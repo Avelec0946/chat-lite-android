@@ -233,6 +233,12 @@
           <input type="file" id="bg-file-input" accept="image/*" style="display:none">
           <button id="btn-remove-bg" class="btn btn-small" style="background:var(--bg3);color:var(--text)">移除背景</button>
         </div>
+        <label class="setting-row" style="margin-top:10px;gap:8px">
+          <span class="setting-hint" style="white-space:nowrap">背景遮罩</span>
+          <input type="range" id="bg-overlay-slider" min="0" max="0.8" step="0.05" value="0.3" style="flex:1">
+          <span id="bg-overlay-value" style="font-size:12px;color:var(--text2);min-width:36px;text-align:right">30%</span>
+        </label>
+        <span class="setting-hint" style="font-size:11px;margin-top:2px">调整背景图与文字之间的对比度，0=无遮罩，80%=强遮罩。每个会话独立设置。</span>
         <div class="setting-divider"></div>
         <span class="setting-section-title">接口管理</span>
         <button id="btn-add-provider" class="btn btn-small" style="margin-bottom:8px">+ 添加接口</button>

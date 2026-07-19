@@ -841,6 +841,14 @@ function applyBackgroundImage() {
     bgEl.style.backgroundImage = '';
     bgEl.classList.remove('active');
   }
+  // 应用背景遮罩透明度（会话独立）
+  const overlay = conv && conv.bgOverlay != null ? conv.bgOverlay : 0.3;
+  bgEl.style.setProperty('--bg-overlay', overlay);
+  // 同步设置面板里的滑块值
+  const slider = document.getElementById('bg-overlay-slider');
+  const valueEl = document.getElementById('bg-overlay-value');
+  if (slider) slider.value = overlay;
+  if (valueEl) valueEl.textContent = Math.round(overlay * 100) + '%';
 }
 
 async function setBackgroundImage(file) {
@@ -1090,6 +1098,17 @@ async function init() {
     e.target.value = '';
   });
   $('btn-remove-bg').addEventListener('click', removeBackgroundImage);
+
+  // 背景遮罩透明度（会话独立）
+  $('bg-overlay-slider').addEventListener('input', (e) => {
+    const conv = currentConv();
+    if (!conv) return;
+    const val = parseFloat(e.target.value);
+    conv.bgOverlay = val;
+    document.getElementById('bg-overlay-value').textContent = Math.round(val * 100) + '%';
+    document.getElementById('chat-bg').style.setProperty('--bg-overlay', val);
+  });
+  $('bg-overlay-slider').addEventListener('change', () => { save(); });
 
   // Status bar toggle
   $('statusbar-toggle').addEventListener('change', function() {
@@ -3064,7 +3083,7 @@ function updateSearchHighlights() {
         hl.setAttribute('height', rect.getAttribute('height'));
         hl.setAttribute('rx', '8');
         hl.setAttribute('fill', 'none');
-        hl.setAttribute('stroke', '#f59e0b');
+        hl.setAttribute('stroke', 'var(--warning)');
         hl.setAttribute('stroke-width', '3');
         hl.classList.add('search-highlight');
         g.appendChild(hl);
@@ -3100,7 +3119,7 @@ function navigateToSearchResult(dir) {
         container.scrollLeft = Math.max(0, tx * branchZoom - container.clientWidth / 2);
       }
       // Flash highlight
-      g.style.outline = '3px solid #f59e0b';
+      g.style.outline = '3px solid var(--warning)';
       g.style.outlineOffset = '2px';
       g.style.zIndex = '10';
       setTimeout(() => { g.style.outline = ''; g.style.outlineOffset = ''; g.style.zIndex = ''; }, 1500);
@@ -3315,11 +3334,11 @@ function renderTreeSVG(conv) {
         fill="${fillColor}" 
         stroke="${isActive ? 'var(--primary)' : 'var(--border)'}" 
         stroke-width="${isActive ? 1.5 : 1}" filter="url(#shadow)"/>
-      <circle cx="12" cy="14" r="5" fill="${msg.role === 'user' ? '#3b82f6' : '#10b981'}" opacity="${isActive ? 0.9 : 0.6}"/>
-      <text x="12" y="17" font-size="8" font-weight="bold" fill="#fff" text-anchor="middle" font-family="inherit">${iconChar}</text>
+      <circle cx="12" cy="14" r="5" fill="${msg.role === 'user' ? 'var(--bubble-user-to)' : 'var(--success)'}" opacity="${isActive ? 0.9 : 0.6}"/>
+      <text x="12" y="17" font-size="8" font-weight="bold" fill="var(--on-primary)" text-anchor="middle" font-family="inherit">${iconChar}</text>
       <text x="24" y="18" font-size="11" font-weight="${isActive ? 'bold' : 'normal'}" 
-        fill="${isActive ? '#fff' : 'var(--text)'}" font-family="inherit">${escapeSvg(title)}</text>
-      <text x="24" y="36" font-size="10" fill="${isActive ? 'rgba(255,255,255,0.7)' : 'var(--text2)'}" font-family="inherit">${wc}字${hasChildren ? ' ▾' : ''}</text>
+        fill="${isActive ? 'var(--on-primary)' : 'var(--text)'}" font-family="inherit">${escapeSvg(title)}</text>
+      <text x="24" y="36" font-size="10" fill="${isActive ? 'color-mix(in srgb, var(--on-primary) 70%, transparent)' : 'var(--text2)'}" font-family="inherit">${wc}字${hasChildren ? ' ▾' : ''}</text>
     </g>`;
   }
   
@@ -3917,17 +3936,43 @@ function importAllDataFromFile(e) {
   e.target.value = '';
 }
 
-function exportConversation() {
+async function exportConversation() {
   const conv = currentConv();
   if (!conv) return;
   const data = { version: 2, exportedAt: new Date().toISOString(), conversation: conv };
-  const blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' });
-  const url = URL.createObjectURL(blob);
-  const a = document.createElement('a');
-  a.href = url;
-  a.download = `chat-lite-${conv.title || 'conversation'}-${new Date().toISOString().slice(0, 10)}.json`;
-  a.click();
-  URL.revokeObjectURL(url);
+  const jsonText = JSON.stringify(data, null, 2);
+  const fileName = `chat-lite-${conv.title || 'conversation'}-${new Date().toISOString().slice(0, 10)}.json`;
+
+  if (isCapacitor() && CapFilesystem && CapShare) {
+    // APK 模式：<a download> 在 WebView 里不生效，改用 Filesystem + Share
+    try {
+      const result = await CapFilesystem.writeFile({
+        path: fileName,
+        data: btoa(unescape(encodeURIComponent(jsonText))),
+        directory: 'CACHE',
+        recursive: true
+      });
+      await CapShare.share({
+        title: 'chat-lite 会话导出',
+        text: fileName,
+        url: result.uri,
+        dialogTitle: '保存会话文件到...'
+      });
+      showToast('已导出，请选择保存位置');
+    } catch (err) {
+      console.error('Export conversation failed:', err);
+      showToast('导出失败：' + (err.message || err));
+    }
+  } else {
+    // Web 模式
+    const blob = new Blob([jsonText], { type: 'application/json' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = fileName;
+    a.click();
+    URL.revokeObjectURL(url);
+  }
 }
 
 // Tolerant JSON parse: handles truncated array exports that miss outer brackets
