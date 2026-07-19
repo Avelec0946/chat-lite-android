@@ -535,8 +535,9 @@ async function testProviderConnection() {
   resultEl.textContent = '测试中...';
   resultEl.className = 'provider-test-result';
   try {
-    var modelsPath = baseUrl + getModelsEndpoint(tempProvider);
     var req = buildUpstreamPayload(tempProvider, { model: '', apiVersion: extraQuery['api-version'] || '2024-06-01' });
+    // Derive models endpoint from chat URL instead of hardcoding /v1/models
+    var modelsPath = req.url.replace(/\/chat\/completions/, '/models');
     var resp = await fetch(modelsPath, { headers: req.headers });
     if (!resp.ok) throw new Error('HTTP ' + resp.status);
     var data = await resp.json();
