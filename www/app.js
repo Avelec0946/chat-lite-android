@@ -959,6 +959,13 @@ async function init() {
     console.log('[chat-lite] Running in Web mode');
   }
 
+  // 淡出开屏动画
+  var splash = document.getElementById('splash-screen');
+  if (splash) {
+    splash.classList.add('fade-out');
+    setTimeout(function() { if (splash.parentNode) splash.parentNode.removeChild(splash); }, 300);
+  }
+
   // PWA install prompt handler
   var deferredPrompt;
   window.addEventListener('beforeinstallprompt', function(e) {
