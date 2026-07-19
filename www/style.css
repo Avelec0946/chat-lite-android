@@ -325,6 +325,7 @@ body.dark .status-bar{
 /* ===== Capacitor (APK) mode adjustments ===== */
 /* APK 模式下隐藏仅 Web 需要的设置项（如直连模式开关） */
 body.capacitor-mode .web-only{display:none !important}
+body:not(.capacitor-mode) .capacitor-only{display:none !important}
 
 /* 触摸设备按钮最小尺寸（44pt 推荐值，提升移动端可用性） */
 @media (max-width: 768px), (pointer: coarse) {

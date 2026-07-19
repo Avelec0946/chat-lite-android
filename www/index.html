@@ -180,6 +180,15 @@
           <input type="checkbox" id="direct-mode-check">
         </label>
         <span class="setting-hint web-only">启用后直接调用 DeepSeek API，无需电脑中转（仅 PWA/浏览器生效）</span>
+        <label class="setting-row capacitor-only">
+          <span>流式模式</span>
+          <select id="native-streaming-mode-select" class="setting-select">
+            <option value="auto" selected>自动（推荐）</option>
+            <option value="stream">真流式</option>
+            <option value="native">非流式（兼容）</option>
+          </select>
+        </label>
+        <span class="setting-hint capacitor-only">真流式：首字更快，可真正中断请求。非流式：兼容性更好。自动：优先真流式，失败回退非流式。</span>
         <div class="setting-divider"></div>
         <span class="setting-section-title">角色卡</span>
         <div class="card-import-row">

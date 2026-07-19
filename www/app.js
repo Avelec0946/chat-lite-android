@@ -9,14 +9,13 @@ function isCapacitor() {
 let CapFilesystem = null;
 let CapShare = null;
 let CapHttp = null;
+let CapStreamHttp = null;
 if (isCapacitor()) {
-  // Capacitor 6 通过 registerPlugin 暴露的插件挂在 window.Capacitor.Plugins 上
-  // 但 @capacitor/filesystem / @capacitor/share 是通过 npm 包引入的 ES Module
-  // 在无构建步骤的场景下，用 Capacitor.Plugins 兜底
   try {
     CapFilesystem = Capacitor.Plugins && Capacitor.Plugins.Filesystem;
     CapShare = Capacitor.Plugins && Capacitor.Plugins.Share;
     CapHttp = Capacitor.Plugins && Capacitor.Plugins.CapacitorHttp;
+    CapStreamHttp = Capacitor.Plugins && Capacitor.Plugins.StreamHttp;
   } catch (e) {
     console.warn('Capacitor plugins init failed:', e);
   }
@@ -34,6 +33,10 @@ const state = {
   _nativeAborted: false,
   // 标记数据是否已从 IndexedDB 加载完成
   _dataLoaded: false,
+  // 标记用户是否正在触摸滚动（流式输出时暂停 DOM 更新，避免阻塞滚动）
+  _isTouching: false,
+  // 当前正在流式输出的 assistantMsg（松手后立即渲染）
+  _streamingMsg: null,
 };
 
 const STORAGE_KEY = 'chatlite_data';
@@ -932,6 +935,9 @@ async function init() {
 
   // Apply settings to UI
   thinkingToggle.checked = settings.thinkingEnabled;
+  // 初始化流式模式选择器
+  const streamingModeSelect = document.getElementById('native-streaming-mode-select');
+  if (streamingModeSelect) streamingModeSelect.value = settings.nativeStreamingMode || 'auto';
   applyDisplaySettings();
 
   // Thinking toggle auto-saves immediately
@@ -958,6 +964,24 @@ async function init() {
   } else {
     console.log('[chat-lite] Running in Web mode');
   }
+
+  // 触摸滚动监听：流式输出时，用户触摸滚动暂停 DOM 更新，松手后恢复
+  // 避免 innerHTML 重建阻塞 touchmove 导致滚动不跟手
+  messagesEl.addEventListener('touchstart', function() {
+    state._isTouching = true;
+  }, { passive: true });
+  messagesEl.addEventListener('touchend', function() {
+    state._isTouching = false;
+    // 松手后立即渲染最新的流式内容
+    if (state._streamingMsg) {
+      updateMessageContent(state._streamingMsg.id, state._streamingMsg.content, state._streamingMsg.reasoningContent || '');
+      // 如果在底部附近，滚到底
+      const distFromBottom = messagesEl.scrollHeight - messagesEl.scrollTop - messagesEl.clientHeight;
+      if (distFromBottom < 150) {
+        messagesEl.scrollTop = messagesEl.scrollHeight;
+      }
+    }
+  }, { passive: true });
 
   // 淡出开屏动画
   var splash = document.getElementById('splash-screen');
@@ -1835,7 +1859,12 @@ function onResizeStart(e) {
 
 function scrollToBottom() {
   requestAnimationFrame(() => {
-    messagesEl.scrollTop = messagesEl.scrollHeight;
+    // 智能滚动：只在用户处于底部附近（150px 内）时才自动滚动
+    // 用户主动往上滑看历史内容时，不被强制拉回底部
+    const distFromBottom = messagesEl.scrollHeight - messagesEl.scrollTop - messagesEl.clientHeight;
+    if (distFromBottom < 150) {
+      messagesEl.scrollTop = messagesEl.scrollHeight;
+    }
   });
 }
 
@@ -2128,7 +2157,203 @@ function buildContext(conv) {
   return msgs;
 }
 
-// ===== Capacitor 原生 HTTP 请求（非流式 + 打字动画）=====
+// ===== Capacitor 原生流式 HTTP（方案 C：capacitor-stream-http 插件）=====
+// 用 StreamHttp.startStream + chunk/end/error 事件实现真流式
+// 首字延迟从"等完整响应"降到"等模型开始输出"
+// 停止生成用 cancelStream 真正中断请求，不浪费 API 额度
+async function executeStreamHttp(req, assistantMsg, opts) {
+  opts = opts || {};
+  const existingContent = opts.existingContent || '';
+  const existingReasoning = opts.existingReasoning || '';
+
+  // 初始化内容（续接场景）
+  assistantMsg.content = existingContent;
+  assistantMsg.reasoningContent = existingReasoning;
+  state._streamingMsg = assistantMsg;  // 记录当前流式消息（松手后立即渲染用）
+
+  // 状态管理
+  let streamId = null;
+  let resolved = false;
+  let chunkBuffer = '';
+  let lastRenderTime = 0;
+  const RENDER_INTERVAL = 100;  // markdown 渲染节流（100ms，约 10fps）
+
+  // 超时
+  const timeoutMs = settings.nativeTimeoutMs || 120000;
+  let timeoutId = null;
+
+  // 设置 abort（用于停止生成）
+  state.abortController = new AbortController();
+  const origAbort = state.abortController.abort.bind(state.abortController);
+  state.abortController.abort = function() {
+    if (streamId) {
+      try { CapStreamHttp.cancelStream({ id: streamId }); } catch(e) {}
+    }
+    try { origAbort(); } catch(e) {}
+  };
+
+  // 移除 cursor-blink，显示首字后会替换
+  const msgBubble = messagesEl.querySelector(`.message[data-id="${assistantMsg.id}"] .msg-bubble`);
+  if (msgBubble) msgBubble.classList.remove('cursor-blink');
+
+  return new Promise(async (resolve, reject) => {
+    let chunkListener, endListener, errorListener;
+
+    function cleanup() {
+      clearTimeout(timeoutId);
+      if (chunkListener && chunkListener.remove) chunkListener.remove();
+      if (endListener && endListener.remove) endListener.remove();
+      if (errorListener && errorListener.remove) errorListener.remove();
+    }
+
+    function done(interrupted) {
+      if (resolved) return;
+      resolved = true;
+      cleanup();
+      state._streamingMsg = null;  // 清除流式消息标记
+      if (interrupted) {
+        assistantMsg.interrupted = true;
+        assistantMsg.errorMsg = '用户打断';
+        if (!assistantMsg.content || assistantMsg.content === existingContent) {
+          assistantMsg.content = existingContent + '\n\n*[已停止]*';
+        }
+      }
+      // 最终渲染 + 保存
+      updateMessageContent(assistantMsg.id, assistantMsg.content, assistantMsg.reasoningContent || '');
+      assistantMsg.versions[0] = {
+        content: assistantMsg.content,
+        timestamp: Date.now(),
+        reason: opts.reason || 'original'
+      };
+      save();
+      resolve();
+    }
+
+    try {
+      // 注册事件监听
+      chunkListener = await CapStreamHttp.addListener('chunk', (data) => {
+        if (data.id !== streamId) return;
+
+        chunkBuffer += data.chunk;
+        const lines = chunkBuffer.split('\n');
+        chunkBuffer = lines.pop() || '';
+
+        for (const line of lines) {
+          if (!line.startsWith('data: ')) continue;
+          const jsonStr = line.slice(6).trim();
+          if (jsonStr === '[DONE]') continue;
+
+          try {
+            const json = JSON.parse(jsonStr);
+            const choice = json.choices && json.choices[0];
+            if (!choice) continue;
+            const delta = choice.delta;
+            if (!delta) continue;
+
+            // 思考链增量
+            const reasoningText = delta.reasoning_content || delta.thinking || delta.chain_of_thought || '';
+            if (reasoningText) {
+              assistantMsg.reasoningContent = (assistantMsg.reasoningContent || '') + reasoningText;
+            }
+
+            // 内容增量
+            if (delta.content) {
+              assistantMsg.content = (assistantMsg.content || '') + delta.content;
+            }
+
+            // 渲染节流：触摸滚动时暂停 DOM 更新（避免 innerHTML 重建阻塞 touchmove）
+            const now = Date.now();
+            if (!state._isTouching && now - lastRenderTime > RENDER_INTERVAL) {
+              updateMessageContent(assistantMsg.id, assistantMsg.content, assistantMsg.reasoningContent || '');
+              lastRenderTime = now;
+            }
+            if (!state._isTouching) scrollToBottom();
+          } catch(e) {}
+        }
+      });
+
+      endListener = await CapStreamHttp.addListener('end', (data) => {
+        if (data.id !== streamId) return;
+        done(false);
+      });
+
+      errorListener = await CapStreamHttp.addListener('error', (data) => {
+        if (data.id !== streamId) return;
+        if (resolved) return;
+        resolved = true;
+        cleanup();
+        reject(new Error(data.error || '流式请求错误'));
+      });
+
+      // 超时
+      timeoutId = setTimeout(() => {
+        if (streamId) {
+          try { CapStreamHttp.cancelStream({ id: streamId }); } catch(e) {}
+        }
+        if (resolved) return;
+        resolved = true;
+        cleanup();
+        reject(new Error('请求超时（' + (timeoutMs / 1000) + ' 秒）'));
+      }, timeoutMs);
+
+      // 启动流式请求（stream 必须为 true）
+      const payload = Object.assign({}, req.payload, { stream: true });
+      const result = await CapStreamHttp.startStream({
+        url: req.url,
+        method: 'POST',
+        headers: Object.assign({ 'Content-Type': 'application/json' }, req.headers || {}),
+        body: JSON.stringify(payload)
+      });
+      streamId = result.id;
+
+    } catch(err) {
+      if (!resolved) {
+        resolved = true;
+        cleanup();
+        reject(err);
+      }
+    }
+  });
+}
+
+// ===== 统一请求入口：根据配置选择方案 A（非流式）或方案 C（流式）=====
+async function executeRequest(req, assistantMsg, opts) {
+  const mode = settings.nativeStreamingMode || 'auto';
+
+  if (isCapacitor()) {
+    // 尝试方案 C（流式）
+    if ((mode === 'stream' || mode === 'auto') && CapStreamHttp) {
+      try {
+        await executeStreamHttp(req, assistantMsg, opts);
+        return;
+      } catch(err) {
+        // 用户取消不算错误
+        if (assistantMsg.interrupted) return;
+        // auto 模式下回退到方案 A
+        if (mode === 'auto') {
+          console.warn('[chat-lite] 流式请求失败，回退到非流式：', err.message);
+          // 重置 assistantMsg 状态
+          assistantMsg.content = opts.existingContent || '';
+          assistantMsg.reasoningContent = opts.existingReasoning || '';
+          assistantMsg.interrupted = false;
+          assistantMsg.errorMsg = '';
+          await executeNativeRequest(req, assistantMsg, opts);
+          return;
+        }
+        // stream 模式下不回退，抛出错误
+        throw err;
+      }
+    }
+    // 方案 A 兜底
+    await executeNativeRequest(req, assistantMsg, opts);
+  } else {
+    // 浏览器模式：原有 fetch 流式逻辑保持不变
+    // 这部分逻辑在 sendFromMessage / sendFromMessageContinue 里
+    return false;  // 返回 false 表示未处理，调用方继续走原有逻辑
+  }
+}
+
+// ===== Capacitor 原生 HTTP（方案 A：非流式 + 打字动画）=====
 // 在 APK 模式下，fetch 流式不可靠，改用 CapacitorHttp 一次性请求 + typewriter 假动画
 // 停止生成：原生请求无法真正中断，用 state._nativeAborted 标记，响应到达后丢弃
 async function executeNativeRequest(req, assistantMsg, opts) {
@@ -2399,9 +2624,9 @@ async function sendFromMessage(context) {
     };
   }
 
-  // Capacitor 模式：走原生 HTTP（非流式 + 打字动画），跳过下方 fetch 流式
-  if (isCapacitor() && CapHttp) {
-    await executeNativeRequest(req, assistantMsg, { reason: 'original' });
+  // Capacitor 模式：走 executeRequest（根据配置选择流式/非流式）
+  if (isCapacitor() && (CapHttp || CapStreamHttp)) {
+    await executeRequest(req, assistantMsg, { reason: 'original' });
     return;
   }
 
@@ -2598,9 +2823,9 @@ async function sendFromMessageContinue(context, assistantMsg) {
       };
     }
 
-    // Capacitor 模式：走原生 HTTP，保留已有内容继续生成
-    if (isCapacitor() && CapHttp) {
-      await executeNativeRequest(req, assistantMsg, {
+    // Capacitor 模式：走 executeRequest（根据配置选择流式/非流式）
+    if (isCapacitor() && (CapHttp || CapStreamHttp)) {
+      await executeRequest(req, assistantMsg, {
         existingContent: existingContent,
         existingReasoning: existingReasoning,
         reason: 'continued'
@@ -3427,6 +3652,9 @@ function toggleSettings(open) {
 
 function saveSettingsHandler() {
   settings.thinkingEnabled = thinkingToggle.checked;
+  // 流式模式（APK 专用）
+  const streamingModeSelect = document.getElementById('native-streaming-mode-select');
+  if (streamingModeSelect) settings.nativeStreamingMode = streamingModeSelect.value;
   // Display settings
   const fsSelect = document.getElementById('font-size-select');
   const lsSelect = document.getElementById('line-spacing-select');
