@@ -1,0 +1,31 @@
+# Dependencies
+node_modules/
+
+# Capacitor Android build
+android/.gradle/
+android/build/
+android/app/build/
+android/local.properties
+android/captures/
+android/.idea/
+android/local.properties
+
+# Native crash reports
+android/app/src/main/assets/capacitor.config.json.bak
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# IDE
+.vscode/
+.idea/
+*.iml
+
+# Logs
+*.log
+npm-debug.log*
+
+# Backup files
+*.bak
+*.tmp

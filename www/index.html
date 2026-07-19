@@ -1,0 +1,315 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+  <link rel="icon" href="favicon.png" type="image/png">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0">
+<title>chat-lite</title>
+<link rel="stylesheet" href="style.css?v=47">
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github-dark.min.css">
+  <meta name="theme-color" content="#7c3aed">
+  <link rel="manifest" href="manifest.json">
+</head>
+<body class="dark">
+<div id="app">
+  <!-- Sidebar -->
+  <aside id="sidebar" class="sidebar">
+    <div class="sidebar-header">
+      <button id="btn-new-chat" class="btn btn-primary" title="新对话">+ 新对话</button>
+    </div>
+    <div class="conv-search">
+      <input id="conv-search-input" type="text" class="conv-search-input" placeholder="搜索对话..." />
+    </div>
+    <div id="conv-list" class="conv-list"></div>
+    <div class="sidebar-footer">
+      <label class="theme-toggle">
+        <input type="checkbox" id="theme-checkbox" checked>
+        <span class="theme-label">浅色</span>
+      </label>
+    </div>
+  </aside>
+
+  <!-- Main -->
+<main id="main" class="main">
+    <div id="chat-bg" class="chat-bg"></div>
+    <!-- Settings bar -->
+    <div id="settings-bar" class="settings-bar">
+      <button id="btn-sidebar-toggle" class="btn btn-icon" title="切换侧栏">
+        <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="4" y1="6" x2="20" y2="6"/><line x1="4" y1="12" x2="20" y2="12"/><line x1="4" y1="18" x2="20" y2="18"/></svg>
+      </button>
+      <select id="model-select" class="model-select"></select>
+      <button id="btn-branch" class="btn btn-icon" title="分支总览">
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="6" y1="3" x2="6" y2="15"/><circle cx="18" cy="6" r="3"/><circle cx="6" cy="21" r="2"/><line x1="8" y1="21" x2="15" y2="21"/><line x1="18" y1="9" x2="18" y2="21"/></svg>
+      </button>
+      <button id="btn-export" class="btn btn-icon" title="导出 JSON">
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
+      </button>
+      <button id="btn-import" class="btn btn-icon" title="导入 JSON">
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="3 10 8 15 13 10"/><line x1="8" y1="15" x2="8" y2="3"/></svg>
+      </button>
+      <input type="file" id="import-file-input" accept=".json" style="display:none">
+      <button id="btn-settings" class="btn btn-icon" title="设置">
+        <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>
+      </button>
+      <span id="status-indicator" class="status-ok"></span>
+    </div>
+
+    <!-- Messages -->
+    <div id="messages" class="messages"></div>
+
+    <!-- Empty state -->
+    <div id="empty-state" class="empty-state">
+      <svg width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" opacity="0.4"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg>
+      <h2>chat-lite</h2>
+      <p>通用 OpenAI 兼容 API 聊天界面</p>
+    </div>
+
+    <!-- Input area -->
+    <div id="input-area" class="input-area">
+      <div id="file-preview" class="file-preview" style="display:none"></div>
+      <div class="input-row">
+        <button id="btn-upload" class="btn btn-icon" title="上传文件">
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21.44 11.05l-9.19 9.19a6 6 0 0 1-8.49-8.49l9.19-9.19a4 4 0 0 1 5.66 5.66l-9.2 9.19a2 2 0 0 1-2.83-2.83l8.49-8.48"/></svg>
+        </button>
+        <input type="file" id="file-input" accept=".txt,.md,.json,.csv,.js,.py,.html,.css,.xml,.yaml,.yml,.log,image/*" multiple style="display:none">
+        <div id="chat-input" class="chat-input" contenteditable="true" data-placeholder="输入消息..." role="textbox"></div>
+        <button id="btn-send" class="btn btn-send" title="发送" style="display:flex">
+          <svg width="20" height="20" viewBox="0 0 24 24" fill="currentColor"><path d="M2.01 21L23 12 2.01 3 2 10l15 2-15 2z"/></svg>
+        </button>
+        <button id="btn-stop" class="btn btn-send" title="停止" style="display:none">
+          <svg width="20" height="20" viewBox="0 0 24 24" fill="currentColor"><rect x="4" y="4" width="16" height="16" rx="2"/></svg>
+        </button>
+      </div>
+    </div>
+  </main>
+
+  <!-- Branch drawer -->
+  <div id="branch-drawer" class="branch-drawer" style="display:none">
+    <div class="branch-drawer-backdrop"></div>
+    <div class="branch-drawer-content">
+      <div class="branch-drawer-header">
+        <h3><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="vertical-align:middle;margin-right:4px"><line x1="6" y1="3" x2="6" y2="15"/><circle cx="18" cy="6" r="3"/><circle cx="6" cy="21" r="2"/><line x1="8" y1="21" x2="15" y2="21"/><line x1="18" y1="9" x2="18" y2="21"/></svg>分支总览</h3>
+        <div class="branch-zoom-controls">
+          <button id="btn-zoom-out" class="btn btn-icon btn-zoom-ctrl" title="缩小">−</button>
+          <input id="zoom-input" class="zoom-input" type="text" value="100" maxlength="5" />
+          <span id="zoom-label" class="zoom-label">%</span>
+          <button id="btn-zoom-in" class="btn btn-icon btn-zoom-ctrl" title="放大">+</button>
+        </div>
+        <button id="btn-close-branch" class="btn btn-icon">
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
+        </button>
+      </div>
+      <div class="branch-search-bar">
+        <div class="branch-search-row">
+          <input id="branch-search-input" type="text" class="branch-search-input-wide" placeholder="搜索消息内容..." />
+          <span id="branch-search-info" class="branch-search-info"></span>
+          <button id="btn-search-prev" class="btn btn-icon btn-search-nav" title="上一个">▲</button>
+          <button id="btn-search-next" class="btn btn-icon btn-search-nav" title="下一个">▼</button>
+        </div>
+        <div id="branch-search-results" class="branch-search-results" style="display:none"></div>
+      </div>
+      <div class="branch-drawer-body">
+        <div id="branch-info" class="branch-info"></div>
+        <div id="branch-tree" class="branch-tree"></div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Settings panel (overlay) -->
+  <div id="settings-panel" class="settings-panel" style="display:none">
+    <div class="settings-backdrop"></div>
+    <div class="settings-content">
+      <div class="settings-header">
+        <h3>设置</h3>
+        <button id="btn-close-settings" class="btn btn-icon">
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
+        </button>
+      </div>
+      <div class="settings-body">
+        <label class="setting-row">
+          <span>深度思考</span>
+          <label class="toggle-switch">
+            <input type="checkbox" id="thinking-toggle" checked>
+            <span class="toggle-slider"></span>
+          </label>
+        </label>
+        <label class="setting-row setting-row-col">
+          <span>系统提示词</span>
+          <textarea id="system-prompt" class="setting-textarea" rows="3" placeholder="输入系统提示词..."></textarea>
+        </label>
+        <label class="setting-row setting-row-col">
+          <span>强调提示</span>
+          <textarea id="emphasis-prompt" class="setting-textarea" rows="2" placeholder="容易被忽略的重点，如：必须以第三人称叙述..."></textarea>
+        </label>
+        <span class="setting-hint">放在系统提示词之后再次强调，增强模型遵从度</span>
+        <div class="setting-divider"></div>
+        <span class="setting-section-title">状态栏</span>
+        <label class="setting-row">
+          <span>启用状态栏</span>
+          <label class="toggle-switch">
+            <input type="checkbox" id="statusbar-toggle">
+            <span class="toggle-slider"></span>
+          </label>
+        </label>
+        <span class="setting-hint">模型回复末尾自动附加结构化状态信息（&lt;status&gt; 标签）</span>
+        <label class="setting-row setting-row-col" id="statusbar-template-row" style="display:none">
+          <span>提示模板</span>
+          <textarea id="statusbar-template" class="setting-textarea" rows="3" placeholder="告诉模型状态栏应该包含哪些内容..."></textarea>
+        </label>
+        <span class="setting-hint" id="statusbar-template-hint" style="display:none">留空则使用默认模板。此内容会注入到每轮对话的系统提示中。</span>
+        <label class="setting-row" id="statusbar-position-row" style="display:none">
+          <span>显示位置</span>
+          <select id="statusbar-position" class="setting-select">
+            <option value="bottom" selected>消息底部</option>
+            <option value="top">消息顶部</option>
+          </select>
+        </label>
+        <div class="setting-divider"></div>
+        <label class="setting-row setting-row-col">
+          <span>用户身份</span>
+          <textarea id="user-identity" class="setting-textarea" rows="2" placeholder="如：我是大二计算机系学生..."></textarea>
+        </label>
+        <div class="setting-divider"></div>
+        <label class="setting-row web-only">
+          <span>直连模式</span>
+          <input type="checkbox" id="direct-mode-check">
+        </label>
+        <span class="setting-hint web-only">启用后直接调用 DeepSeek API，无需电脑中转（仅 PWA/浏览器生效）</span>
+        <div class="setting-divider"></div>
+        <span class="setting-section-title">角色卡</span>
+        <div class="card-import-row">
+          <button id="btn-import-card" class="btn btn-small">导入 PNG 角色卡</button>
+          <input type="file" id="card-import-file" accept=".png" style="display:none">
+          <button id="btn-card-fill" class="btn btn-small">快捷填入提示词</button>
+        </div>
+        <div id="card-editor" class="card-editor" style="display:none">
+          <label class="card-field"><span>名称</span><input id="card-name" class="card-input"></label>
+          <label class="card-field"><span>简介</span><textarea id="card-desc" class="card-textarea" rows="2"></textarea></label>
+          <label class="card-field"><span>性格</span><textarea id="card-personality" class="card-textarea" rows="2"></textarea></label>
+          <label class="card-field"><span>场景</span><textarea id="card-scenario" class="card-textarea" rows="2"></textarea></label>
+          <label class="card-field"><span>开场白</span><textarea id="card-firstmes" class="card-textarea" rows="3"></textarea></label>
+          <label class="card-field"><span>示例对话</span><textarea id="card-example" class="card-textarea" rows="3"></textarea></label>
+          <label class="card-field"><span>系统提示词</span><textarea id="card-sysprompt" class="card-textarea" rows="3"></textarea></label>
+          <label class="card-field"><span>头像</span><input type="file" id="card-avatar" accept=".png"><img id="card-avatar-preview" class="card-avatar-preview" style="display:none"></label>
+          <div id="card-preview" class="card-preview"></div>
+          <button id="btn-export-card" class="btn btn-small">导出 PNG 角色卡</button>
+        </div>
+        <span class="setting-section-title">显示</span>
+        <label class="setting-row">
+          <span>字体大小</span>
+          <select id="font-size-select" class="setting-select">
+            <option value="14">小</option>
+            <option value="15" selected>中</option>
+            <option value="17">大</option>
+            <option value="19">超大</option>
+          </select>
+        </label>
+        <label class="setting-row">
+          <span>行间距</span>
+          <select id="line-spacing-select" class="setting-select">
+            <option value="1.4">紧凑</option>
+            <option value="1.6" selected>标准</option>
+            <option value="1.8">宽松</option>
+          </select>
+        </label>
+        <div class="setting-divider"></div>
+        <span class="setting-section-title">对话背景</span>
+        <div class="card-import-row">
+          <button id="btn-set-bg" class="btn btn-small">选择背景图片</button>
+          <input type="file" id="bg-file-input" accept="image/*" style="display:none">
+          <button id="btn-remove-bg" class="btn btn-small" style="background:var(--bg3);color:var(--text)">移除背景</button>
+        </div>
+        <div class="setting-divider"></div>
+        <span class="setting-section-title">接口管理</span>
+        <button id="btn-add-provider" class="btn btn-small" style="margin-bottom:8px">+ 添加接口</button>
+        <div id="provider-list" class="provider-list"></div>
+        <div id="provider-editor" class="provider-editor" style="display:none">
+          <div class="provider-editor-hint">
+            <strong>说明：</strong>API 地址只填域名或根路径；具体接口路径填在「Endpoint 路径」里。大多数 OpenAI 兼容平台保持默认即可，只有 Azure/特殊中转站才需要改。
+          </div>
+          <label class="card-field"><span>接口模板</span>
+            <select id="provider-template-select" class="card-input">
+              <option value="openai">OpenAI 兼容</option>
+              <option value="deepseek">DeepSeek</option>
+              <option value="azure">Azure OpenAI</option>
+              <option value="custom">自定义</option>
+            </select>
+            <span class="field-help">选择平台类型。OpenAI 兼容适用于 kkaiapi / OneAPI / NewAPI 等大多数中转平台。</span>
+          </label>
+          <label class="card-field"><span>接口名称</span><input id="provider-name-input" class="card-input" placeholder="如：小米 Token Plan">
+            <span class="field-help">仅用于本界面展示，不影响实际请求。</span>
+          </label>
+          <label class="card-field"><span>API 地址</span><input id="provider-url-input" class="card-input" placeholder="https://api.example.com">
+            <span class="field-help">基础地址，不要带路径。例如 https://api.kkaiapi.com 或 https://api.deepseek.com</span>
+          </label>
+          <label class="card-field"><span>Endpoint 路径</span><input id="provider-endpoint-input" class="card-input" placeholder="/v1/chat/completions">
+            <span class="field-help">聊天补全接口的相对路径。绝大多数平台用 /v1/chat/completions；Azure 用 /openai/deployments/{model}/chat/completions</span>
+          </label>
+          <label class="card-field"><span>鉴权方式</span>
+            <select id="provider-auth-select" class="card-input">
+              <option value="bearer">Authorization: Bearer</option>
+              <option value="api-key">api-key Header</option>
+              <option value="header">自定义 Header</option>
+              <option value="query">URL 参数</option>
+              <option value="none">无需鉴权</option>
+            </select>
+            <span class="field-help">OpenAI / kkaiapi / DeepSeek 都用 Bearer；Azure 用 api-key；少数平台需要自定义。</span>
+          </label>
+          <label class="card-field" id="provider-auth-header-row" style="display:none"><span>Header 名 / 参数名</span><input id="provider-auth-header-input" class="card-input" placeholder="api-key">
+            <span class="field-help">鉴权时使用的 Header 名或 URL 参数名。</span>
+          </label>
+          <label class="card-field" id="provider-auth-prefix-row" style="display:none"><span>Token 前缀</span><input id="provider-auth-prefix-input" class="card-input" placeholder="Bearer ">
+            <span class="field-help">放在密钥前面的字符串，如「Bearer 」或「Key 」。留空表示不加前缀。</span>
+          </label>
+          <label class="card-field"><span>API 密钥</span><input id="provider-key-input" class="card-input" type="password" placeholder="sk-...">
+            <span class="field-help">从平台控制台获取的 API Key。直连模式下会发送到浏览器，建议在可信环境使用。</span>
+          </label>
+          <label class="card-field"><span>额外请求头 (JSON)</span><textarea id="provider-extra-headers-input" class="card-input" rows="2" placeholder='{"x-trace-id": "..."}'></textarea>
+            <span class="field-help">需要随每个请求一起发送的额外 HTTP 头，JSON 对象格式。一般不需要填。</span>
+          </label>
+          <label class="card-field"><span>额外 URL 参数 (JSON)</span><textarea id="provider-extra-query-input" class="card-input" rows="2" placeholder='{"api-version": "2024-06-01"}'></textarea>
+            <span class="field-help">需要附加到 URL 的查询参数，JSON 对象格式。Azure 需填 api-version。</span>
+          </label>
+          <div class="provider-editor-actions">
+            <button id="btn-test-provider" class="btn btn-small">测试连接</button>
+            <span id="provider-test-result" class="provider-test-result"></span>
+          </div>
+          <label class="card-field"><span>模型列表（逗号分隔）</span><input id="provider-models-input" class="card-input" placeholder="model1, model2">
+            <span class="field-help">点击「测试连接」可自动拉取。手动填写时用英文逗号分隔，如 gpt-4o, claude-sonnet-4-6</span>
+          </label>
+          <div class="provider-editor-actions">
+            <button id="btn-save-provider" class="btn btn-small btn-primary">保存</button>
+            <button id="btn-close-provider-editor" class="btn btn-small" style="background:var(--bg3);color:var(--text)">取消</button>
+          </div>
+        </div>
+        <div class="setting-divider"></div>
+        <span class="setting-section-title">数据管理（全量导出/导入）</span>
+        <span class="setting-hint">导出当前所有对话、接口配置和设置；可用于网页版与 APK 之间迁移数据。</span>
+        <div class="card-import-row" style="margin-top:8px">
+          <button id="btn-export-all" class="btn btn-small">导出全部数据</button>
+          <button id="btn-import-all" class="btn btn-small">导入全部数据</button>
+          <input type="file" id="import-all-file-input" accept=".json" style="display:none">
+        </div>
+        <label class="setting-row" style="margin-top:8px">
+          <span>导入模式</span>
+          <select id="import-mode-select" class="setting-select">
+            <option value="overwrite" selected>覆盖（推荐）</option>
+            <option value="merge">合并（按 ID 去重）</option>
+          </select>
+        </label>
+        <span class="setting-hint">覆盖：直接替换当前所有数据。合并：相同 ID 的对话/接口以导入数据为准。</span>
+        <div class="setting-divider"></div>
+        <span class="setting-section-title">显示</span>
+      </div>
+      <div class="settings-footer">
+        <button id="btn-save-settings" class="btn btn-primary">保存设置</button>
+      </div>
+    </div>
+  </div>
+</div>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/marked/12.0.1/marked.min.js"></script>
+<script src="app.js?v=47"></script>
+</body>
+</html>
