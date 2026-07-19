@@ -337,6 +337,21 @@ body:not(.capacitor-mode) .capacitor-only{display:none !important}
   .setting-select, .card-input {
     min-height: 40px;
   }
+  /* 设置栏在窄屏下允许横向滚动作为兜底，防止按钮被挤出去看不见 */
+  .settings-bar {
+    overflow-x: auto;
+    overflow-y: visible;
+    scrollbar-width: none;
+    -webkit-overflow-scrolling: touch;
+    gap: 4px;
+    padding: 8px 12px;
+  }
+  .settings-bar::-webkit-scrollbar { display: none; }
+  .settings-bar .model-select {
+    max-width: 100px;
+    min-width: 60px;
+    flex: 0 1 100px;
+  }
   /* 设置面板里按钮间距加大，避免误触 */
   .provider-editor-actions, .card-import-row {
     gap: 10px;
