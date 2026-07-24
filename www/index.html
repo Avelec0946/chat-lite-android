@@ -5,7 +5,7 @@
   <link rel="icon" href="favicon.png" type="image/png">
 <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0">
 <title>chat-lite</title>
-<link rel="stylesheet" href="style.css?v=56">
+<link rel="stylesheet" href="style.css?v=57">
 <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github-dark.min.css">
   <meta name="theme-color" content="#7c3aed">
   <link rel="manifest" href="manifest.json">
@@ -133,8 +133,9 @@
       <div class="settings-body" id="settings-body">
 
         <!-- ===== 本次对话（仅当前会话）===== -->
-        <div class="setting-group">
-          <span class="setting-group-title">本次对话 <span class="setting-scope">仅当前会话</span></span>
+        <details class="setting-group setting-group-collapsible" data-group-key="session" open>
+          <summary class="setting-group-summary">本次对话 <span class="setting-scope">仅当前会话</span></summary>
+          <div class="setting-group-body">
           <label class="setting-row">
             <span>深度思考</span>
             <label class="toggle-switch">
@@ -214,11 +215,13 @@
             <span id="bg-overlay-value" style="font-size:12px;color:var(--text2);min-width:36px;text-align:right">30%</span>
           </label>
           <span class="setting-hint" style="font-size:11px;margin-top:2px">调整背景图与文字之间的对比度，0=无遮罩，80%=强遮罩。每个会话独立设置。</span>
-        </div>
+          </div>
+        </details>
 
         <!-- ===== 常用偏好（全局生效）===== -->
-        <div class="setting-group">
-          <span class="setting-group-title">常用偏好 <span class="setting-scope">全局生效</span></span>
+        <details class="setting-group setting-group-collapsible" data-group-key="prefs" open>
+          <summary class="setting-group-summary">常用偏好 <span class="setting-scope">全局生效</span></summary>
+          <div class="setting-group-body">
           <label class="setting-row web-only">
             <span>直连模式</span>
             <input type="checkbox" id="direct-mode-check">
@@ -260,10 +263,11 @@
               <option value="1.8">宽松</option>
             </select>
           </label>
-        </div>
+          </div>
+        </details>
 
         <!-- ===== 接口管理（全局）===== -->
-        <details class="setting-group setting-group-collapsible" open>
+        <details class="setting-group setting-group-collapsible" data-group-key="provider" open>
           <summary class="setting-group-summary">接口管理 <span class="setting-scope">全局·所有会话可用</span></summary>
           <div class="setting-group-body">
           <button id="btn-add-provider" class="btn btn-small" style="margin-bottom:8px">+ 添加接口</button>
@@ -327,12 +331,12 @@
               <button id="btn-close-provider-editor" class="btn btn-small" style="background:var(--bg3);color:var(--text)">取消</button>
             </div>
           </div>
-          </div>
         </details>
 
         <!-- ===== 模型修饰 ===== -->
-        <div class="setting-group">
-          <span class="setting-group-title">模型修饰 <span class="setting-scope">按模型·全局生效</span></span>
+        <details class="setting-group setting-group-collapsible" data-group-key="model-prompt" open>
+          <summary class="setting-group-summary">模型修饰 <span class="setting-scope">按模型·全局生效</span></summary>
+          <div class="setting-group-body">
           <span class="setting-hint">针对当前模型的风格修饰。用 ===强调=== 分隔，上半部分进系统提示，下半部分进强调。留空则不注入。</span>
           <label class="setting-row setting-row-col">
             <span>当前模型：<span id="model-prompts-key-label" style="color:var(--text2);font-size:12px">-</span></span>
@@ -355,11 +359,13 @@
             <span>本会话修饰语（覆盖全局）</span>
             <textarea id="model-prompt-override" class="setting-textarea" rows="3" placeholder="本会话专属修饰语..."></textarea>
           </label>
-        </div>
+          </div>
+        </details>
 
         <!-- ===== 数据管理 ===== -->
-        <div class="setting-group">
-          <span class="setting-group-title">数据管理 <span class="setting-scope">全量导出/导入</span></span>
+        <details class="setting-group setting-group-collapsible" data-group-key="data" open>
+          <summary class="setting-group-summary">数据管理 <span class="setting-scope">全量导出/导入</span></summary>
+          <div class="setting-group-body">
           <span class="setting-hint">导出当前所有对话、接口配置和设置；可用于网页版与 APK 之间迁移数据。</span>
           <div class="card-import-row" style="margin-top:8px">
             <button id="btn-export-all" class="btn btn-small">导出全部数据</button>
@@ -374,7 +380,8 @@
             </select>
           </label>
           <span class="setting-hint">覆盖：直接替换当前所有数据。合并：相同 ID 的对话/接口以导入数据为准。</span>
-        </div>
+          </div>
+        </details>
       </div>
       <div class="settings-footer">
         <button id="btn-save-settings" class="btn btn-primary">保存设置</button>
@@ -386,6 +393,6 @@
 
 <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/marked/12.0.1/marked.min.js"></script>
-<script src="app.js?v=55"></script>
+<script src="app.js?v=57"></script>
 </body>
 </html>

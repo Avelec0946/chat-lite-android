@@ -790,7 +790,9 @@ function loadSettings() {
     thinkingEnabled: true, apiKey: '', fontSize: '15', lineSpacing: '1.6',
     directMode: false, hapticFeedback: true, nativeStreamingMode: 'auto', nativeTimeoutMs: 120000,
     // B2: 分模型修饰语 {"<providerId>:<modelId>": {text: "修饰语\n\n===强调===\n强调内容"}}
-    modelPrompts: {}
+    modelPrompts: {},
+    // C5: 设置分组收折状态记忆 {groupKey: true=折叠/false=展开}
+    groupCollapse: {}
   };
   try {
     const raw = localStorage.getItem(SETTINGS_KEY);
@@ -819,6 +821,8 @@ function loadSettings() {
       } else {
         s.modelPrompts = {};
       }
+      // C5: 确保 groupCollapse 字段存在且为对象
+      if (!s.groupCollapse || typeof s.groupCollapse !== 'object') s.groupCollapse = {};
       return s;
     }
   } catch(e) {}
@@ -4103,6 +4107,30 @@ function fillSettingsForm() {
   if (mpOverrideRow) mpOverrideRow.style.display = hasOverride ? '' : 'none';
   var mpOverrideTextEl = document.getElementById('model-prompt-override');
   if (mpOverrideTextEl) mpOverrideTextEl.value = (conv && conv.modelPromptOverride) || '';
+  // C5: 应用分组收折记忆状态
+  applyGroupCollapseState();
+}
+
+// C5: 应用设置分组收折状态（根据 settings.groupCollapse 覆盖 HTML 默认 open）
+function applyGroupCollapseState() {
+  var gc = settings.groupCollapse || {};
+  var groups = document.querySelectorAll('#settings-body .setting-group-collapsible[data-group-key]');
+  groups.forEach(function(el) {
+    var key = el.getAttribute('data-group-key');
+    if (!key) return;
+    // 绑定 toggle 事件（仅绑一次，用 dataset 标记）
+    if (!el.dataset.collapseBound) {
+      el.dataset.collapseBound = '1';
+      el.addEventListener('toggle', function() {
+        if (!settings.groupCollapse) settings.groupCollapse = {};
+        settings.groupCollapse[key] = !el.open; // true=折叠, false=展开
+        saveSettings();
+      });
+    }
+    // 覆盖 HTML 默认 open：记忆为折叠则强制收起，记忆为展开则强制展开
+    if (gc[key] === true) el.open = false;
+    else if (gc[key] === false) el.open = true;
+  });
 }
 
 function toggleSettings(open) {
