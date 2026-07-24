@@ -43,7 +43,7 @@ JSON 用紧凑格式（去 `null, 2` 缩进）再省 30%+ 体积。
 | `importAllDataFromFile` | 大文件 >80MB 警告但不阻断；加读取中 toast；加 onerror 处理 |
 
 ### 4. 数据结构新增字段（sync 后旧 APK 数据无影响，但需保留读取兼容）
-- `settings.hapticFeedback` (boolean, 默认 false) — C3 振感开关
+- `settings.hapticFeedback` (boolean, 默认 true，批次1+修正) — C3 振感开关
 
 ---
 
@@ -78,3 +78,17 @@ Select-String -Path C:\Users\86176\chat-lite-android\www\app.js -Pattern "showBu
 
 > 注意：导入导出 OOM 修复涉及 Filesystem API，**不推主仓库**；
 > 但 Web 模式的 `JSON.stringify` 紧凑化（去 null,2）属于通用优化，可单独提取推送。
+
+### 5. v1.3.0 批次 1+ 修正：设置面板空白遮挡 + 振感开关失效
+**根因**：
+- `.settings-panel` 用 `align-items:center` + `.settings-content` 的 `overflow-y:auto`，内容超 80vh 时顶部被推出视口，第一屏被遮住。
+- HTML 中振感开关 class 写成与 CSS 不匹配的值，点击状态切不动；且默认值为 false。
+
+**修复**（cache-bust v49 -> v50）：
+| 文件 | 改动 |
+|---|---|
+| `style.css` | `.settings-panel`: `align-items:center` -> `justify-content:center; overflow-y:auto; padding:20px 0`；`.settings-content` 加 `margin:auto` |
+| `index.html` | 振感开关 class 改为 `toggle-switch`，加 `checked` 默认开；提示文本加「（默认开）」 |
+| `app.js` | `getDefaultSettings` 中 `hapticFeedback:true`；`applySettings` 用 `!== false` 兼容旧用户；web 流式路径（约 2884/3088 行）补 `triggerHapticFeedback()` |
+
+> 设置面板布局修复属于通用 CSS 优化，可推主仓库；振感默认值/触发属 APK 专属行为，不推。

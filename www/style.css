@@ -226,9 +226,12 @@ html,body{height:100%;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Ro
 .btn-icon:hover{background:var(--bg3)}
 
 /* ===== Settings panel ===== */
-.settings-panel{position:fixed;top:0;left:0;right:0;bottom:0;z-index:100;display:flex;align-items:center;justify-content:center}
-.settings-backdrop{position:absolute;top:0;left:0;right:0;bottom:0;background:rgba(0,0,0,.4)}
-.settings-content{position:relative;background:var(--glass-bg);backdrop-filter:var(--glass-blur);-webkit-backdrop-filter:var(--glass-blur);border-radius:16px;width:90%;max-width:480px;max-height:80vh;overflow-y:auto;box-shadow:0 4px 16px rgba(0,0,0,.08)}
+/* 修复（v1.3.0 批次1++）：原 align-items:center + overflow-y:auto 在内容超过 80vh 时
+   顶部被推出视口不可达，导致设置第一屏被空白遮挡。改用 margin:auto 替代 flex centering，
+   auto 在 overflow 时会自动归零，确保顶部始终可见可滚到。 */
+.settings-panel{position:fixed;top:0;left:0;right:0;bottom:0;z-index:100;display:flex;justify-content:center;overflow-y:auto;padding:20px 0}
+.settings-backdrop{position:fixed;top:0;left:0;right:0;bottom:0;background:rgba(0,0,0,.4)}
+.settings-content{position:relative;background:var(--glass-bg);backdrop-filter:var(--glass-blur);-webkit-backdrop-filter:var(--glass-blur);border-radius:16px;width:90%;max-width:480px;max-height:80vh;overflow-y:auto;box-shadow:0 4px 16px rgba(0,0,0,.08);margin:auto}
 .settings-header{display:flex;align-items:center;justify-content:space-between;padding:16px 20px}
 .settings-body{padding:16px 20px;display:flex;flex-direction:column;gap:16px}
 .setting-row{display:flex;align-items:center;justify-content:space-between;gap:12px}

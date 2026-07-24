@@ -5,7 +5,7 @@
   <link rel="icon" href="favicon.png" type="image/png">
 <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0">
 <title>chat-lite</title>
-<link rel="stylesheet" href="style.css?v=49">
+<link rel="stylesheet" href="style.css?v=50">
 <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github-dark.min.css">
   <meta name="theme-color" content="#7c3aed">
   <link rel="manifest" href="manifest.json">
@@ -191,12 +191,12 @@
         <span class="setting-hint capacitor-only">真流式：首字更快，可真正中断请求。非流式：兼容性更好。自动：优先真流式，失败回退非流式。</span>
         <label class="setting-row capacitor-only">
           <span>流式振感反馈</span>
-          <label class="toggle">
-            <input type="checkbox" id="haptic-feedback-check">
+          <label class="toggle-switch">
+            <input type="checkbox" id="haptic-feedback-check" checked>
             <span class="toggle-slider"></span>
           </label>
         </label>
-        <span class="setting-hint capacitor-only">流式输出时每 100ms 振动一次轻反馈（默认关）</span>
+        <span class="setting-hint capacitor-only">流式输出时每 100ms 振动一次轻反馈（默认开）</span>
         <div class="setting-divider"></div>
         <span class="setting-section-title">角色卡</span>
         <div class="card-import-row">
@@ -338,6 +338,6 @@
 
 <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/marked/12.0.1/marked.min.js"></script>
-<script src="app.js?v=49"></script>
+<script src="app.js?v=50"></script>
 </body>
 </html>

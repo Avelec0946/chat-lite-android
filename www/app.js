@@ -762,7 +762,7 @@ function loadSettings() {
     const raw = localStorage.getItem(SETTINGS_KEY);
     if (raw) return JSON.parse(raw);
   } catch(e) {}
-  return { thinkingEnabled: true, apiKey: '', fontSize: '15', lineSpacing: '1.6', directMode: false, hapticFeedback: false };
+  return { thinkingEnabled: true, apiKey: '', fontSize: '15', lineSpacing: '1.6', directMode: false, hapticFeedback: true };
 }
 
 function saveSettings() {
@@ -947,9 +947,9 @@ async function init() {
   // 初始化流式模式选择器
   const streamingModeSelect = document.getElementById('native-streaming-mode-select');
   if (streamingModeSelect) streamingModeSelect.value = settings.nativeStreamingMode || 'auto';
-  // C3: 振感开关回填
+  // C3: 振感开关回填（默认开；老用户 settings 无此字段时按默认开处理）
   const hapticCheck = document.getElementById('haptic-feedback-check');
-  if (hapticCheck) hapticCheck.checked = !!settings.hapticFeedback;
+  if (hapticCheck) hapticCheck.checked = (settings.hapticFeedback !== false);
   applyDisplaySettings();
 
   // Thinking toggle auto-saves immediately
@@ -2881,6 +2881,7 @@ async function sendFromMessage(context) {
             if (delta.content) {
               fullContent += delta.content;
               assistantMsg.content = fullContent;
+              triggerHapticFeedback(); // C3: web 流式路径也触发振感（保险）
             }
             // Update display: pass both reasoning and content
             updateMessageContent(assistantMsg.id, fullContent, fullReasoning);
@@ -3084,6 +3085,7 @@ async function sendFromMessageContinue(context, assistantMsg) {
             if (delta.content) {
               fullContent += delta.content;
               assistantMsg.content = fullContent;
+              triggerHapticFeedback(); // C3: web 流式路径也触发振感（保险）
             }
             updateMessageContent(assistantMsg.id, fullContent, fullReasoning);
           }
