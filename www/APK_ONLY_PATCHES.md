@@ -299,7 +299,7 @@ Select-String -Path C:\Users\86176\chat-lite-android\www\app.js -Pattern "showBu
 | 文件 | 改动 |
 |---|---|
 | `index.html` | 按钮从 settings-body 内移出，作为 settings-content 直接子级（settings-footer 之后） |
-| `style.css` | `.settings-content` 去掉 `overflow-y:auto` 改 `display:flex;flex-direction:column;overflow:hidden`；`.settings-body` 加 `flex:1;min-height:0;overflow-y:auto`；`.settings-scroll-btn` 用 `position:absolute;right:14px;bottom:14px`（z-index:200） |
-| `app.js` | scroll 监听挂 `#settings-body`：scrollTop<200=nearTop，底部-200=nearBottom；按钮在 nearBottom&&nearTop 时隐藏，nearBottom&&!nearTop 显示↑（回顶），否则显示↓（回底）；`toggleSettings` 打开时 setTimeout 触发一次 updateScrollBtn 初始化按钮状态 |
+| `style.css` | `.settings-content` 去掉 `overflow-y:auto` 改 `display:flex;flex-direction:column;overflow:hidden`；`.settings-body` 加 `flex:1;min-height:0;overflow-y:auto`；`.settings-scroll-btn` 用 `position:absolute;right:16px;bottom:72px`（上移避开 footer，z-index:200）；风格对齐 `.btn-scroll-bottom`：半透明 `var(--bg2)`+`var(--border)`+`var(--text)`+`var(--shadow)`，无硬编码颜色 |
+| `app.js` | scroll 监听挂 `#settings-body`：scrollTop<200=nearTop，底部-200=nearBottom；按钮在 nearBottom&&nearTop 时隐藏，nearBottom&&!nearTop 显示↑（回顶），否则显示↓（回底）；箭头用 SVG（复用 C1 的 `polyline` 风格，stroke=currentColor 跟随 `--text`），非文本字符；`toggleSettings` 打开时 setTimeout 触发一次 updateScrollBtn 初始化按钮状态 |
 
 > 本节全部改动不含 Capacitor 专属符号，**可推主仓库**。sync 后需确认 `settings.global` 迁移逻辑、`effectiveStatusBar`/`effectiveModelPrompt` 新签名未被覆盖。

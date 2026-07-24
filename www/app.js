@@ -1215,7 +1215,7 @@ async function init() {
       var nearTop = settingsScrollCt.scrollTop < 200;
       var nearBottom = settingsScrollCt.scrollTop + settingsScrollCt.clientHeight >= settingsScrollCt.scrollHeight - 200;
       settingsScrollBtn.style.display = (nearTop && nearBottom) ? 'none' : '';
-      settingsScrollBtn.textContent = (nearBottom && !nearTop) ? '↑' : '↓';
+      settingsScrollBtn.innerHTML = (nearBottom && !nearTop) ? '<svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><polyline points="6 15 12 9 18 15"/></svg>' : '<svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><polyline points="6 9 12 15 18 9"/></svg>';
     };
     settingsScrollCt.addEventListener('scroll', updateScrollBtn);
     settingsScrollBtn.addEventListener('click', function() {
