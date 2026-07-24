@@ -762,7 +762,7 @@ function loadSettings() {
     const raw = localStorage.getItem(SETTINGS_KEY);
     if (raw) return JSON.parse(raw);
   } catch(e) {}
-  return { thinkingEnabled: true, apiKey: '', fontSize: '15', lineSpacing: '1.6', directMode: false };
+  return { thinkingEnabled: true, apiKey: '', fontSize: '15', lineSpacing: '1.6', directMode: false, hapticFeedback: false };
 }
 
 function saveSettings() {
@@ -947,6 +947,9 @@ async function init() {
   // 初始化流式模式选择器
   const streamingModeSelect = document.getElementById('native-streaming-mode-select');
   if (streamingModeSelect) streamingModeSelect.value = settings.nativeStreamingMode || 'auto';
+  // C3: 振感开关回填
+  const hapticCheck = document.getElementById('haptic-feedback-check');
+  if (hapticCheck) hapticCheck.checked = !!settings.hapticFeedback;
   applyDisplaySettings();
 
   // Thinking toggle auto-saves immediately
@@ -1617,11 +1620,21 @@ function renderMessages() {
     messagesEl.appendChild(div);
 
     const bubble = div.querySelector('.msg-bubble');
-    addLongPress(bubble, () => {
-      state.selectedMsgId = msg.id;
-      renderMessages();
+    // A6+D7: 长按 / 右键统一接管为自定义气泡菜单（替代系统菜单）
+    addLongPress(bubble, (ev) => {
+      const evt = ev || { clientX: 0, clientY: 0, preventDefault: () => {} };
+      // 长按位置兜底：若 event 无坐标，取 bubble 中心
+      if (!evt.clientX && !evt.clientY) {
+        const r = bubble.getBoundingClientRect();
+        evt.clientX = r.left + r.width / 2;
+        evt.clientY = r.top + r.height / 2;
+      }
+      showBubbleContextMenu(evt, msg);
     });
-    bubble.addEventListener('contextmenu', (e) => e.preventDefault());
+    bubble.addEventListener('contextmenu', (e) => {
+      e.preventDefault();
+      showBubbleContextMenu(e, msg);
+    });
 
     const editBtn = div.querySelector('.edit-btn');
     if (editBtn) editBtn.addEventListener('click', () => enterEditMode(msg.id));
@@ -1633,8 +1646,10 @@ function renderMessages() {
     if (deleteBtn) deleteBtn.addEventListener('click', () => deleteMessage(msg.id));
 
     const copyBtn = div.querySelector('.copy-btn');
+    // D6: 单击"复制"按钮 = 复制 AI 正文（保持向后兼容）
+    // 完整 4 变体复制走右键/长按自定义菜单
     if (copyBtn) copyBtn.addEventListener('click', () => {
-      var text = msg.content || '';
+      var text = (msg.role === 'assistant') ? extractAiBody(msg.content) : (msg.content || '');
       navigator.clipboard.writeText(text).then(() => {
         copyBtn.textContent = '已复制';
         setTimeout(() => { copyBtn.textContent = '复制'; }, 1500);
@@ -1674,7 +1689,7 @@ function addLongPress(el, callback) {
     startY = touch.clientY;
     timer = setTimeout(() => {
       timer = null;
-      callback();
+      callback(e); // A6: 传 event 给 callback，便于自定义菜单定位
     }, threshold);
   };
 
@@ -1701,6 +1716,177 @@ function addLongPress(el, callback) {
   el.addEventListener('touchend', cancel);
   el.addEventListener('touchcancel', cancel);
 }
+
+// ===== A6+D6+D7: 气泡自定义上下文菜单 =====
+// 接管 contextmenu + addLongPress，含 4 种复制变体 + 复制选中文字
+function showBubbleContextMenu(event, msg) {
+  closeBubbleContextMenu();
+  const sel = window.getSelection();
+  const selectedText = sel ? sel.toString().trim() : '';
+
+  const menu = document.createElement('div');
+  menu.id = 'bubble-context-menu';
+  menu.className = 'tree-node-menu bubble-context-menu';
+
+  function addItem(label, onClick, isDanger) {
+    const item = document.createElement('div');
+    item.className = 'tree-menu-item' + (isDanger ? ' tree-menu-danger' : '');
+    item.textContent = label;
+    item.addEventListener('click', function(e) {
+      e.stopPropagation();
+      closeBubbleContextMenu();
+      try { onClick(); } catch(err) { console.error('[chat-lite] menu action failed:', err); }
+    });
+    menu.appendChild(item);
+  }
+
+  // D7: 复制选中文字（仅有选区时显示）
+  if (selectedText) {
+    addItem('复制选中', function() {
+      navigator.clipboard.writeText(selectedText).then(flashBubbleMenuToast).catch(function(){});
+    });
+  }
+
+  if (msg.role === 'assistant') {
+    // D6: 复制 AI 正文（去 <status> 标签）
+    addItem('复制正文', function() {
+      navigator.clipboard.writeText(extractAiBody(msg.content)).then(flashBubbleMenuToast).catch(function(){});
+    });
+    // D6: 含思考过程
+    if (msg.reasoningContent) {
+      addItem('复制含思考', function() {
+        const text = '【思考】\n' + (msg.reasoningContent || '') + '\n\n【正文】\n' + extractAiBody(msg.content);
+        navigator.clipboard.writeText(text).then(flashBubbleMenuToast).catch(function(){});
+      });
+    }
+    // D6: 纯 Markdown 源码
+    addItem('复制 Markdown 源', function() {
+      navigator.clipboard.writeText(msg.content || '').then(flashBubbleMenuToast).catch(function(){});
+    });
+    // D6: 单代码块（多个时合并复制并提示）
+    const blocks = extractCodeBlocks(msg.content || '');
+    if (blocks.length === 1) {
+      addItem('复制代码块', function() {
+        navigator.clipboard.writeText(blocks[0]).then(flashBubbleMenuToast).catch(function(){});
+      });
+    } else if (blocks.length > 1) {
+      addItem('复制 ' + blocks.length + ' 个代码块', function() {
+        navigator.clipboard.writeText(blocks.join('\n\n---\n\n')).then(flashBubbleMenuToast).catch(function(){});
+      });
+    }
+  } else {
+    // user msg: 复制全文
+    addItem('复制全文', function() {
+      navigator.clipboard.writeText(msg.content || '').then(flashBubbleMenuToast).catch(function(){});
+    });
+  }
+
+  // 编辑（仅 user）
+  if (msg.role === 'user') addItem('编辑', function() { enterEditMode(msg.id); });
+  // 重新生成（仅 assistant）
+  if (msg.role === 'assistant') addItem('重新生成', function() { regenerate(msg.id); });
+  // 删除
+  addItem('删除', function() {
+    if (confirm('确定删除这条消息？')) deleteMessage(msg.id);
+  }, true);
+
+  // 定位
+  let x, y;
+  if (event.touches && event.touches.length) { x = event.touches[0].clientX; y = event.touches[0].clientY; }
+  else if (event.changedTouches && event.changedTouches.length) { x = event.changedTouches[0].clientX; y = event.changedTouches[0].clientY; }
+  else { x = event.clientX; y = event.clientY; }
+  menu.style.left = x + 'px';
+  menu.style.top = y + 'px';
+  document.body.appendChild(menu);
+
+  // 边界检查：超出视口则向左/上偏移
+  requestAnimationFrame(function() {
+    const r = menu.getBoundingClientRect();
+    if (r.right > window.innerWidth - 8) menu.style.left = (window.innerWidth - r.width - 8) + 'px';
+    if (r.bottom > window.innerHeight - 8) menu.style.top = (window.innerHeight - r.height - 8) + 'px';
+  });
+
+  setTimeout(function() {
+    document.addEventListener('click', closeBubbleContextMenu, { once: true });
+    document.addEventListener('contextmenu', closeBubbleContextMenu, { once: true });
+    document.addEventListener('scroll', closeBubbleContextMenu, { once: true });
+  }, 50);
+}
+
+function closeBubbleContextMenu() {
+  const m = document.getElementById('bubble-context-menu');
+  if (m) m.remove();
+}
+
+// 提取 AI 正文：去掉 <status>...</status> 标签
+function extractAiBody(content) {
+  return (content || '').replace(/<status>[\s\S]*?<\/status>/g, '').trim();
+}
+
+// 提取 markdown 代码块内容（去围栏）
+function extractCodeBlocks(content) {
+  const blocks = [];
+  const re = /```[\s\S]*?```/g;
+  let m;
+  while ((m = re.exec(content)) !== null) {
+    const inner = m[0].replace(/^```[^\r\n]*\r?\n?/, '').replace(/\r?\n?```$/, '');
+    blocks.push(inner);
+  }
+  return blocks;
+}
+
+// 复制成功反馈：复用 setStatus('saved') 机制
+function flashBubbleMenuToast() {
+  if (typeof setStatus === 'function') {
+    setStatus('saved');
+    setTimeout(function() { setStatus(''); }, 1000);
+  }
+}
+
+// ===== C3: 流式振感反馈（带开关，节流 100ms） =====
+let _hapticLastTriggered = 0;
+function triggerHapticFeedback() {
+  if (!settings.hapticFeedback) return;
+  if (typeof navigator === 'undefined' || !navigator.vibrate) return;
+  const now = Date.now();
+  if (now - _hapticLastTriggered < 100) return; // 节流，避免每 chunk 振动
+  _hapticLastTriggered = now;
+  try { navigator.vibrate(8); } catch(e) {}
+}
+
+// ===== C1: 回到底部按钮 =====
+// 距底 >200px 显示，<200px 隐藏；点击平滑滚到底
+function initScrollBottomButton() {
+  if (document.getElementById('btn-scroll-bottom')) return;
+  const btn = document.createElement('button');
+  btn.id = 'btn-scroll-bottom';
+  btn.className = 'btn-scroll-bottom';
+  btn.title = '回到底部';
+  btn.setAttribute('aria-label', '回到底部');
+  btn.innerHTML = '<svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><polyline points="6 9 12 15 18 9"/></svg>';
+  btn.style.display = 'none';
+  // 插到 input-area 之前（浮在 input 上方右侧）
+  const inputArea = document.getElementById('input-area');
+  if (inputArea && inputArea.parentNode) {
+    inputArea.parentNode.insertBefore(btn, inputArea);
+  } else {
+    document.body.appendChild(btn);
+  }
+  // 监听滚动
+  const onScroll = function() {
+    const distFromBottom = messagesEl.scrollHeight - messagesEl.scrollTop - messagesEl.clientHeight;
+    btn.style.display = (distFromBottom > 200) ? 'flex' : 'none';
+  };
+  messagesEl.addEventListener('scroll', onScroll, { passive: true });
+  // 点击平滑滚到底
+  btn.addEventListener('click', function() {
+    messagesEl.scrollTo({ top: messagesEl.scrollHeight, behavior: 'smooth' });
+    btn.style.display = 'none';
+  });
+  // 初始检查一次
+  requestAnimationFrame(onScroll);
+}
+document.addEventListener('DOMContentLoaded', initScrollBottomButton);
 
 // Sibling navigation (branch switching)
 function renderSiblingArrows(msg, conv) {
@@ -2042,16 +2228,17 @@ function deleteMessage(msgId) {
     // Truncate activePath to just before the deleted message
     conv.activePath = conv.activePath.slice(0, deleteIdx);
 
-    // If parent has remaining children, switch to the first available sibling
+    // A2: If parent has remaining children, switch to the LAST available sibling
+    // (主人偏好回退到倒数第一，而非第一)
     if (parent && parent.children && parent.children.length > 0) {
-      const newChildId = parent.children[0];
-      // Walk down the first-child chain to rebuild a complete activePath
+      const newChildId = parent.children[parent.children.length - 1];
+      // Walk down the last-child chain to rebuild a complete activePath
       let cursor = newChildId;
       while (cursor) {
         conv.activePath.push(cursor);
         const cursorNode = conv.messageMap[cursor];
         cursor = (cursorNode && cursorNode.children && cursorNode.children.length > 0)
-          ? cursorNode.children[0]
+          ? cursorNode.children[cursorNode.children.length - 1]
           : null;
       }
     }
@@ -2141,7 +2328,7 @@ function buildContext(conv) {
   if (conv.statusBar && conv.statusBar.enabled) {
     var sbTemplate = conv.statusBar.template || '当前地点、当前行动、当前穿搭、内心独白';
     var sbExample = sbTemplate.split(/[,，、]/).map(function(s){ return s.trim()+'：xxx'; }).join('\\n');
-    sysParts.push('【状态栏指令】每次回复末尾，请用 <status>...</status> 标签输出角色当前状态信息。状态栏应包含以下内容：' + sbTemplate + '。请根据上下文合理填写数值和描述，保持角色一致性。示例格式：\\n<status>【角色状态】\\n' + sbExample + '\\n</status>');
+    sysParts.push('【状态栏指令】每次回复末尾，请用 <status>...</status> 标签输出角色当前状态信息。状态栏应包含以下内容：' + sbTemplate + '。请根据上下文合理填写数值和描述，保持角色一致性。示例格式：\\n<status>\\n' + sbExample + '\\n</status>');
   }
   if (conv.userIdentity) {
     sysParts.push('用户身份：' + conv.userIdentity);
@@ -2279,6 +2466,8 @@ async function executeStreamHttp(req, assistantMsg, opts) {
             // 内容增量
             if (delta.content) {
               assistantMsg.content = (assistantMsg.content || '') + delta.content;
+              // C3: 流式振感反馈（默认关，节流 100ms）
+              triggerHapticFeedback();
             }
 
             // 渲染节流：触摸滚动时暂停 DOM 更新（避免 innerHTML 重建阻塞 touchmove）
@@ -2761,7 +2950,7 @@ function buildContextForContinue(conv, targetMsg) {
   if (conv.statusBar && conv.statusBar.enabled) {
     var sbTemplate = conv.statusBar.template || '当前地点、当前行动、当前穿搭、内心独白';
     var sbExample = sbTemplate.split(/[,，、]/).map(function(s){ return s.trim()+'：xxx'; }).join('\\n');
-    sysParts.push('【状态栏指令】每次回复末尾，请用 <status>...</status> 标签输出角色当前状态信息。状态栏应包含以下内容：' + sbTemplate + '。请根据上下文合理填写数值和描述，保持角色一致性。示例格式：\\n<status>【角色状态】\\n' + sbExample + '\\n</status>');
+    sysParts.push('【状态栏指令】每次回复末尾，请用 <status>...</status> 标签输出角色当前状态信息。状态栏应包含以下内容：' + sbTemplate + '。请根据上下文合理填写数值和描述，保持角色一致性。示例格式：\\n<status>\\n' + sbExample + '\\n</status>');
   }
   if (conv.userIdentity) sysParts.push('用户身份：' + conv.userIdentity);
   if (sysParts.length > 0) msgs.push({ role: 'system', content: sysParts.join('\\n\\n') });
@@ -3013,6 +3202,7 @@ function doBranchSearch() {
     branchSearchResults = []; branchSearchIdx = -1;
     clearSearchHighlights();
     if (info) info.textContent = '';
+    renderSearchResults(); // A1: 清空 query 时也需隐藏搜索结果面板
     return;
   }
   // Search all messages in the conversation
@@ -3675,6 +3865,9 @@ function saveSettingsHandler() {
   // 流式模式（APK 专用）
   const streamingModeSelect = document.getElementById('native-streaming-mode-select');
   if (streamingModeSelect) settings.nativeStreamingMode = streamingModeSelect.value;
+  // C3: 振感反馈开关
+  const hapticCheck = document.getElementById('haptic-feedback-check');
+  if (hapticCheck) settings.hapticFeedback = hapticCheck.checked;
   // Display settings
   const fsSelect = document.getElementById('font-size-select');
   const lsSelect = document.getElementById('line-spacing-select');
