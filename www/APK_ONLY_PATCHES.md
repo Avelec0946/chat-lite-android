@@ -244,3 +244,56 @@ Select-String -Path C:\Users\86176\chat-lite-android\www\app.js -Pattern "showBu
 **DOM 移动原理**：`appendChild` 对已有元素是"移动"而非"复制"，不会产生重复 ID，原有事件监听器保持有效。
 
 > 本节全部改动不含 Capacitor 专属符号，**可推主仓库**。sync 后仅需确认 `renderProviderList`/`openProviderEditor`/`closeProviderEditor` 三个函数的 A4/A5 标记段落未被覆盖。
+
+
+### 10. v1.3.0 批次 2 续：设置面板按场景重构 + 快速回顶/底（cache-bust v54 -> v55）
+**范围**：废除 tab 切换，按使用场景分组；模型修饰合并单文本框；设置面板快速回顶/底按钮。
+**不含 Capacitor 专属 API，属于通用 UI/架构重构，可推主仓库**。
+
+#### 10.1 设置面板按场景分组
+**背景**：原 B1 的 global/conv tab 切换加重认知负担。重构为按使用场景分组，取消 tab，会话级字段直接存 conv，全局偏好存 settings 根对象。
+
+**数据结构变更**：
+- 移除 `settings.global` 层（loadSettings 迁移：旧 global.thinkingEnabled 回写顶层后 delete global）
+- 会话级字段直接存 conv：`thinkingEnabled / systemPrompt / emphasis / userIdentity / statusBar`
+- 全局偏好存 settings 根：`directMode / nativeStreamingMode / hapticFeedback / fontSize / lineSpacing / thinkingEnabled`
+- 模型修饰 `settings.modelPrompts[key]` 从 `{systemPrompt, emphasis}` 合并为 `{text}`（用 `===强调===` 分隔）
+
+**UI 改动**：
+| 文件 | 改动 |
+|---|---|
+| `index.html` | settings-body 重构为 5 个 `setting-group`：本次对话(仅当前会话)/常用偏好(全局)/接口管理(全局)/模型修饰(按模型)/数据管理 |
+| `index.html` | 移除 `settings-tabs`、`tab-hint-*`、`btn-reset-conv-prompts` |
+| `style.css` | 删除 `.settings-tabs`/`.settings-tab`；新增 `.setting-group`/`.setting-group-title`/`.setting-scope`/`.settings-scroll-btn` |
+| `app.js` | 删除 `effective()` 函数；`effectiveStatusBar` 改为只读 conv；`effectiveModelPrompt` 加会话级禁用/覆盖逻辑 |
+
+**函数改动**：
+| 函数 | 改动 |
+|---|---|
+| `loadSettings` | 移除 global 默认值；迁移旧 global.thinkingEnabled→顶层；迁移旧 modelPrompts {systemPrompt,emphasis}→{text} |
+| `newConversation` | 移除"继承全局"注释 |
+| `buildContext`/`buildContextForContinue` | 移除全局 systemPrompt 注入；`effective(conv,'userIdentity')`→`conv.userIdentity`；模型修饰按 `===强调===` 拆分 |
+| `fillSettingsForm` | 移除 tab 逻辑；直接从 conv 读会话字段、从 settings 读全局字段；回填模型修饰 text/disable/override |
+| `toggleSettings` | 移除 tab 初始化和 font-size/line-spacing 单独回填（统一到 fillSettingsForm） |
+| `saveSettingsHandler` | 移除 tab 分支；会话字段存 conv（空转 null）；全局偏好存 settings；模型修饰 text 存 modelPrompts[key] |
+| `thinkingToggle` 监听 | 移除 `settings.global` 同步和 tab 判断；直接存 conv |
+| tab 切换/reset 按钮监听 | 整段删除，替换为模型修饰 override 复选框监听 + 设置面板回顶/底按钮监听 |
+
+#### 10.2 模型修饰单文本框 + 会话级覆盖
+**数据结构**：`settings.modelPrompts["<providerId>:<modelId>"] = { text: "修饰语\n\n===强调===\n强调内容" }`
+- 会话级禁用：`conv.modelPromptDisabled = true`
+- 会话级覆盖：`conv.modelPromptOverride = "本会话专属修饰语"`
+
+**注入逻辑**（effectiveModelPrompt）：conv.modelPromptDisabled→返回 null；conv.modelPromptOverride→返回 {text:覆盖值}；否则返回全局 modelPrompts[key]。
+
+**UI**：模型修饰分组内单 textarea `model-prompt-text` + 两个复选框（禁用/自定义覆盖）+ 条件显示的覆盖 textarea。
+
+#### 10.3 设置面板快速回顶/底按钮
+**方案同批次 1 C1**：设置面板内悬浮 sticky 按钮，基于滚动位置动态切换箭头方向。
+| 文件 | 改动 |
+|---|---|
+| `index.html` | settings-body 开头加 `<button id="settings-scroll-btn" class="settings-scroll-btn">` |
+| `style.css` | `.settings-scroll-btn` sticky+float:right 圆形按钮 |
+| `app.js` | settings-body scroll 监听：scrollTop<200=nearTop，底部-200=nearBottom；按钮在 nearBottom&&nearTop 时隐藏，nearBottom&&!nearTop 显示↑（回顶），否则显示↓（回底） |
+
+> 本节全部改动不含 Capacitor 专属符号，**可推主仓库**。sync 后需确认 `settings.global` 迁移逻辑、`effectiveStatusBar`/`effectiveModelPrompt` 新签名未被覆盖。

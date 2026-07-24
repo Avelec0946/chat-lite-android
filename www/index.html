@@ -5,7 +5,7 @@
   <link rel="icon" href="favicon.png" type="image/png">
 <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0">
 <title>chat-lite</title>
-<link rel="stylesheet" href="style.css?v=54">
+<link rel="stylesheet" href="style.css?v=55">
 <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github-dark.min.css">
   <meta name="theme-color" content="#7c3aed">
   <link rel="manifest" href="manifest.json">
@@ -130,229 +130,250 @@
           <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
         </button>
       </div>
-      <div class="settings-body">
-        <div class="settings-tabs">
-          <button type="button" class="settings-tab active" data-tab="conv">当前会话</button>
-          <button type="button" class="settings-tab" data-tab="global">全局默认</button>
-          <button type="button" id="btn-reset-conv-prompts" class="btn btn-small" style="margin-left:auto;display:none">使用全局设置</button>
-        </div>
-        <span class="setting-hint" id="tab-hint-conv" style="display:block">当前会话：留空字段自动继承全局默认</span>
-        <span class="setting-hint" id="tab-hint-global" style="display:none">全局默认：新建会话将继承这些设置</span>
-        <label class="setting-row">
-          <span>深度思考</span>
-          <label class="toggle-switch">
-            <input type="checkbox" id="thinking-toggle" checked>
-            <span class="toggle-slider"></span>
+      <div class="settings-body" id="settings-body">
+        <button id="settings-scroll-btn" class="settings-scroll-btn" style="display:none" title="回顶/底">↓</button>
+
+        <!-- ===== 本次对话（仅当前会话）===== -->
+        <div class="setting-group">
+          <span class="setting-group-title">本次对话 <span class="setting-scope">仅当前会话</span></span>
+          <label class="setting-row">
+            <span>深度思考</span>
+            <label class="toggle-switch">
+              <input type="checkbox" id="thinking-toggle" checked>
+              <span class="toggle-slider"></span>
+            </label>
           </label>
-        </label>
-        <label class="setting-row setting-row-col">
-          <span>系统提示词</span>
-          <textarea id="system-prompt" class="setting-textarea" rows="3" placeholder="输入系统提示词..."></textarea>
-        </label>
-        <label class="setting-row setting-row-col">
-          <span>强调提示</span>
-          <textarea id="emphasis-prompt" class="setting-textarea" rows="2" placeholder="容易被忽略的重点，如：必须以第三人称叙述..."></textarea>
-        </label>
-        <span class="setting-hint">放在系统提示词之后再次强调，增强模型遵从度</span>
-        <div class="setting-divider"></div>
-        <span class="setting-section-title">状态栏</span>
-        <label class="setting-row">
-          <span>启用状态栏</span>
-          <label class="toggle-switch">
-            <input type="checkbox" id="statusbar-toggle">
-            <span class="toggle-slider"></span>
+          <label class="setting-row setting-row-col">
+            <span>系统提示词</span>
+            <textarea id="system-prompt" class="setting-textarea" rows="3" placeholder="输入系统提示词..."></textarea>
           </label>
-        </label>
-        <span class="setting-hint">模型回复末尾自动附加结构化状态信息（&lt;status&gt; 标签）</span>
-        <label class="setting-row setting-row-col" id="statusbar-template-row" style="display:none">
-          <span>提示规则（templateRule）</span>
-          <textarea id="statusbar-template-rule" class="setting-textarea" rows="3" placeholder="告诉模型状态栏应输出哪些内容，如：当前地点、当前行动、当前穿搭、内心独白"></textarea>
-        </label>
-        <label class="setting-row setting-row-col" id="statusbar-display-fields-row" style="display:none">
-          <span>展示字段（displayFields，可选）</span>
-          <textarea id="statusbar-display-fields" class="setting-textarea" rows="2" placeholder="UI 上仅展示的字段名，逗号分隔，如：地点, 行动。留空则展示全部"></textarea>
-        </label>
-        <span class="setting-hint" id="statusbar-template-hint" style="display:none">提示规则注入系统提示；展示字段用于 UI 过滤（可留空）</span>
-        <label class="setting-row" id="statusbar-position-row" style="display:none">
-          <span>显示位置</span>
-          <select id="statusbar-position" class="setting-select">
-            <option value="bottom" selected>消息底部</option>
-            <option value="top">消息顶部</option>
-          </select>
-        </label>
-        <div class="setting-divider"></div>
-        <label class="setting-row setting-row-col">
-          <span>用户身份</span>
-          <textarea id="user-identity" class="setting-textarea" rows="2" placeholder="如：我是大二计算机系学生..."></textarea>
-        </label>
-        <div class="setting-divider"></div>
-        <label class="setting-row web-only">
-          <span>直连模式</span>
-          <input type="checkbox" id="direct-mode-check">
-        </label>
-        <span class="setting-hint web-only">启用后直接调用 DeepSeek API，无需电脑中转（仅 PWA/浏览器生效）</span>
-        <label class="setting-row capacitor-only">
-          <span>流式模式</span>
-          <select id="native-streaming-mode-select" class="setting-select">
-            <option value="auto" selected>自动（推荐）</option>
-            <option value="stream">真流式</option>
-            <option value="native">非流式（兼容）</option>
-          </select>
-        </label>
-        <span class="setting-hint capacitor-only">真流式：首字更快，可真正中断请求。非流式：兼容性更好。自动：优先真流式，失败回退非流式。</span>
-        <label class="setting-row capacitor-only">
-          <span>流式振感反馈</span>
-          <label class="toggle-switch">
-            <input type="checkbox" id="haptic-feedback-check" checked>
-            <span class="toggle-slider"></span>
+          <label class="setting-row setting-row-col">
+            <span>强调提示</span>
+            <textarea id="emphasis-prompt" class="setting-textarea" rows="2" placeholder="容易被忽略的重点，如：必须以第三人称叙述..."></textarea>
           </label>
-        </label>
-        <span class="setting-hint capacitor-only">流式输出时每 100ms 振动一次轻反馈（默认开）</span>
-        <div class="setting-divider"></div>
-        <span class="setting-section-title">角色卡</span>
-        <div class="card-import-row">
-          <button id="btn-import-card" class="btn btn-small">导入 PNG 角色卡</button>
-          <input type="file" id="card-import-file" accept=".png" style="display:none">
-          <button id="btn-card-fill" class="btn btn-small">快捷填入提示词</button>
-        </div>
-        <div id="card-editor" class="card-editor" style="display:none">
-          <label class="card-field"><span>名称</span><input id="card-name" class="card-input"></label>
-          <label class="card-field"><span>简介</span><textarea id="card-desc" class="card-textarea" rows="2"></textarea></label>
-          <label class="card-field"><span>性格</span><textarea id="card-personality" class="card-textarea" rows="2"></textarea></label>
-          <label class="card-field"><span>场景</span><textarea id="card-scenario" class="card-textarea" rows="2"></textarea></label>
-          <label class="card-field"><span>开场白</span><textarea id="card-firstmes" class="card-textarea" rows="3"></textarea></label>
-          <label class="card-field"><span>示例对话</span><textarea id="card-example" class="card-textarea" rows="3"></textarea></label>
-          <label class="card-field"><span>系统提示词</span><textarea id="card-sysprompt" class="card-textarea" rows="3"></textarea></label>
-          <label class="card-field"><span>头像</span><input type="file" id="card-avatar" accept=".png"><img id="card-avatar-preview" class="card-avatar-preview" style="display:none"></label>
-          <div id="card-preview" class="card-preview"></div>
-          <button id="btn-export-card" class="btn btn-small">导出 PNG 角色卡</button>
-        </div>
-        <span class="setting-section-title">显示</span>
-        <label class="setting-row">
-          <span>字体大小</span>
-          <select id="font-size-select" class="setting-select">
-            <option value="14">小</option>
-            <option value="15" selected>中</option>
-            <option value="17">大</option>
-            <option value="19">超大</option>
-          </select>
-        </label>
-        <label class="setting-row">
-          <span>行间距</span>
-          <select id="line-spacing-select" class="setting-select">
-            <option value="1.4">紧凑</option>
-            <option value="1.6" selected>标准</option>
-            <option value="1.8">宽松</option>
-          </select>
-        </label>
-        <div class="setting-divider"></div>
-        <span class="setting-section-title">对话背景</span>
-        <div class="card-import-row">
-          <button id="btn-set-bg" class="btn btn-small">选择背景图片</button>
-          <input type="file" id="bg-file-input" accept="image/*" style="display:none">
-          <button id="btn-remove-bg" class="btn btn-small" style="background:var(--bg3);color:var(--text)">移除背景</button>
-        </div>
-        <label class="setting-row" style="margin-top:10px;gap:8px">
-          <span class="setting-hint" style="white-space:nowrap">背景遮罩</span>
-          <input type="range" id="bg-overlay-slider" min="0" max="0.8" step="0.05" value="0.3" style="flex:1">
-          <span id="bg-overlay-value" style="font-size:12px;color:var(--text2);min-width:36px;text-align:right">30%</span>
-        </label>
-        <span class="setting-hint" style="font-size:11px;margin-top:2px">调整背景图与文字之间的对比度，0=无遮罩，80%=强遮罩。每个会话独立设置。</span>
-        <div class="setting-divider"></div>
-        <span class="setting-section-title">接口管理</span>
-        <button id="btn-add-provider" class="btn btn-small" style="margin-bottom:8px">+ 添加接口</button>
-        <div id="provider-list" class="provider-list"></div>
-        <div id="provider-editor" class="provider-editor" style="display:none">
-          <div class="provider-editor-hint">
-            <strong>说明：</strong>API 地址只填域名或根路径；具体接口路径填在「Endpoint 路径」里。大多数 OpenAI 兼容平台保持默认即可，只有 Azure/特殊中转站才需要改。
-          </div>
-          <label class="card-field"><span>接口模板</span>
-            <select id="provider-template-select" class="card-input">
-              <option value="openai">OpenAI 兼容</option>
-              <option value="deepseek">DeepSeek</option>
-              <option value="azure">Azure OpenAI</option>
-              <option value="custom">自定义</option>
+          <span class="setting-hint">放在系统提示词之后再次强调，增强模型遵从度</span>
+          <div class="setting-divider"></div>
+          <span class="setting-section-title">状态栏</span>
+          <label class="setting-row">
+            <span>启用状态栏</span>
+            <label class="toggle-switch">
+              <input type="checkbox" id="statusbar-toggle">
+              <span class="toggle-slider"></span>
+            </label>
+          </label>
+          <span class="setting-hint">模型回复末尾自动附加结构化状态信息（&lt;status&gt; 标签）</span>
+          <label class="setting-row setting-row-col" id="statusbar-template-row" style="display:none">
+            <span>提示规则（templateRule）</span>
+            <textarea id="statusbar-template-rule" class="setting-textarea" rows="3" placeholder="告诉模型状态栏应输出哪些内容，如：当前地点、当前行动、当前穿搭、内心独白"></textarea>
+          </label>
+          <label class="setting-row setting-row-col" id="statusbar-display-fields-row" style="display:none">
+            <span>展示字段（displayFields，可选）</span>
+            <textarea id="statusbar-display-fields" class="setting-textarea" rows="2" placeholder="UI 上仅展示的字段名，逗号分隔，如：地点, 行动。留空则展示全部"></textarea>
+          </label>
+          <span class="setting-hint" id="statusbar-template-hint" style="display:none">提示规则注入系统提示；展示字段用于 UI 过滤（可留空）</span>
+          <label class="setting-row" id="statusbar-position-row" style="display:none">
+            <span>显示位置</span>
+            <select id="statusbar-position" class="setting-select">
+              <option value="bottom" selected>消息底部</option>
+              <option value="top">消息顶部</option>
             </select>
-            <span class="field-help">选择平台类型。OpenAI 兼容适用于 kkaiapi / OneAPI / NewAPI 等大多数中转平台。</span>
           </label>
-          <label class="card-field"><span>接口名称</span><input id="provider-name-input" class="card-input" placeholder="如：小米 Token Plan">
-            <span class="field-help">仅用于本界面展示，不影响实际请求。</span>
+          <div class="setting-divider"></div>
+          <label class="setting-row setting-row-col">
+            <span>用户身份</span>
+            <textarea id="user-identity" class="setting-textarea" rows="2" placeholder="如：我是大二计算机系学生..."></textarea>
           </label>
-          <label class="card-field"><span>API 地址</span><input id="provider-url-input" class="card-input" placeholder="https://api.example.com">
-            <span class="field-help">基础地址，不要带路径。例如 https://api.kkaiapi.com 或 https://api.deepseek.com</span>
+          <div class="setting-divider"></div>
+          <span class="setting-section-title">角色卡</span>
+          <div class="card-import-row">
+            <button id="btn-import-card" class="btn btn-small">导入 PNG 角色卡</button>
+            <input type="file" id="card-import-file" accept=".png" style="display:none">
+            <button id="btn-card-fill" class="btn btn-small">快捷填入提示词</button>
+          </div>
+          <div id="card-editor" class="card-editor" style="display:none">
+            <label class="card-field"><span>名称</span><input id="card-name" class="card-input"></label>
+            <label class="card-field"><span>简介</span><textarea id="card-desc" class="card-textarea" rows="2"></textarea></label>
+            <label class="card-field"><span>性格</span><textarea id="card-personality" class="card-textarea" rows="2"></textarea></label>
+            <label class="card-field"><span>场景</span><textarea id="card-scenario" class="card-textarea" rows="2"></textarea></label>
+            <label class="card-field"><span>开场白</span><textarea id="card-firstmes" class="card-textarea" rows="3"></textarea></label>
+            <label class="card-field"><span>示例对话</span><textarea id="card-example" class="card-textarea" rows="3"></textarea></label>
+            <label class="card-field"><span>系统提示词</span><textarea id="card-sysprompt" class="card-textarea" rows="3"></textarea></label>
+            <label class="card-field"><span>头像</span><input type="file" id="card-avatar" accept=".png"><img id="card-avatar-preview" class="card-avatar-preview" style="display:none"></label>
+            <div id="card-preview" class="card-preview"></div>
+            <button id="btn-export-card" class="btn btn-small">导出 PNG 角色卡</button>
+          </div>
+          <div class="setting-divider"></div>
+          <span class="setting-section-title">对话背景</span>
+          <div class="card-import-row">
+            <button id="btn-set-bg" class="btn btn-small">选择背景图片</button>
+            <input type="file" id="bg-file-input" accept="image/*" style="display:none">
+            <button id="btn-remove-bg" class="btn btn-small" style="background:var(--bg3);color:var(--text)">移除背景</button>
+          </div>
+          <label class="setting-row" style="margin-top:10px;gap:8px">
+            <span class="setting-hint" style="white-space:nowrap">背景遮罩</span>
+            <input type="range" id="bg-overlay-slider" min="0" max="0.8" step="0.05" value="0.3" style="flex:1">
+            <span id="bg-overlay-value" style="font-size:12px;color:var(--text2);min-width:36px;text-align:right">30%</span>
           </label>
-          <label class="card-field"><span>Endpoint 路径</span><input id="provider-endpoint-input" class="card-input" placeholder="/v1/chat/completions">
-            <span class="field-help">聊天补全接口的相对路径。绝大多数平台用 /v1/chat/completions；Azure 用 /openai/deployments/{model}/chat/completions</span>
+          <span class="setting-hint" style="font-size:11px;margin-top:2px">调整背景图与文字之间的对比度，0=无遮罩，80%=强遮罩。每个会话独立设置。</span>
+        </div>
+
+        <!-- ===== 常用偏好（全局生效）===== -->
+        <div class="setting-group">
+          <span class="setting-group-title">常用偏好 <span class="setting-scope">全局生效</span></span>
+          <label class="setting-row web-only">
+            <span>直连模式</span>
+            <input type="checkbox" id="direct-mode-check">
           </label>
-          <label class="card-field"><span>鉴权方式</span>
-            <select id="provider-auth-select" class="card-input">
-              <option value="bearer">Authorization: Bearer</option>
-              <option value="api-key">api-key Header</option>
-              <option value="header">自定义 Header</option>
-              <option value="query">URL 参数</option>
-              <option value="none">无需鉴权</option>
+          <span class="setting-hint web-only">启用后直接调用 DeepSeek API，无需电脑中转（仅 PWA/浏览器生效）</span>
+          <label class="setting-row capacitor-only">
+            <span>流式模式</span>
+            <select id="native-streaming-mode-select" class="setting-select">
+              <option value="auto" selected>自动（推荐）</option>
+              <option value="stream">真流式</option>
+              <option value="native">非流式（兼容）</option>
             </select>
-            <span class="field-help">OpenAI / kkaiapi / DeepSeek 都用 Bearer；Azure 用 api-key；少数平台需要自定义。</span>
           </label>
-          <label class="card-field" id="provider-auth-header-row" style="display:none"><span>Header 名 / 参数名</span><input id="provider-auth-header-input" class="card-input" placeholder="api-key">
-            <span class="field-help">鉴权时使用的 Header 名或 URL 参数名。</span>
+          <span class="setting-hint capacitor-only">真流式：首字更快，可真正中断请求。非流式：兼容性更好。自动：优先真流式，失败回退非流式。</span>
+          <label class="setting-row capacitor-only">
+            <span>流式振感反馈</span>
+            <label class="toggle-switch">
+              <input type="checkbox" id="haptic-feedback-check" checked>
+              <span class="toggle-slider"></span>
+            </label>
           </label>
-          <label class="card-field" id="provider-auth-prefix-row" style="display:none"><span>Token 前缀</span><input id="provider-auth-prefix-input" class="card-input" placeholder="Bearer ">
-            <span class="field-help">放在密钥前面的字符串，如「Bearer 」或「Key 」。留空表示不加前缀。</span>
+          <span class="setting-hint capacitor-only">流式输出时振动反馈（默认开）</span>
+          <div class="setting-divider"></div>
+          <span class="setting-section-title">显示</span>
+          <label class="setting-row">
+            <span>字体大小</span>
+            <select id="font-size-select" class="setting-select">
+              <option value="14">小</option>
+              <option value="15" selected>中</option>
+              <option value="17">大</option>
+              <option value="19">超大</option>
+            </select>
           </label>
-          <label class="card-field"><span>API 密钥</span><input id="provider-key-input" class="card-input" type="password" placeholder="sk-...">
-            <span class="field-help">从平台控制台获取的 API Key。直连模式下会发送到浏览器，建议在可信环境使用。</span>
+          <label class="setting-row">
+            <span>行间距</span>
+            <select id="line-spacing-select" class="setting-select">
+              <option value="1.4">紧凑</option>
+              <option value="1.6" selected>标准</option>
+              <option value="1.8">宽松</option>
+            </select>
           </label>
-          <label class="card-field"><span>额外请求头 (JSON)</span><textarea id="provider-extra-headers-input" class="card-input" rows="2" placeholder='{"x-trace-id": "..."}'></textarea>
-            <span class="field-help">需要随每个请求一起发送的额外 HTTP 头，JSON 对象格式。一般不需要填。</span>
-          </label>
-          <label class="card-field"><span>额外 URL 参数 (JSON)</span><textarea id="provider-extra-query-input" class="card-input" rows="2" placeholder='{"api-version": "2024-06-01"}'></textarea>
-            <span class="field-help">需要附加到 URL 的查询参数，JSON 对象格式。Azure 需填 api-version。</span>
-          </label>
-          <div class="provider-editor-actions">
-            <button id="btn-test-provider" class="btn btn-small">测试连接</button>
-            <span id="provider-test-result" class="provider-test-result"></span>
-          </div>
-          <label class="card-field"><span>模型列表（逗号分隔）</span><input id="provider-models-input" class="card-input" placeholder="model1, model2">
-            <span class="field-help">点击「测试连接」可自动拉取。手动填写时用英文逗号分隔，如 gpt-4o, claude-sonnet-4-6</span>
-          </label>
-          <div class="provider-editor-actions">
-            <button id="btn-save-provider" class="btn btn-small btn-primary">保存</button>
-            <button id="btn-close-provider-editor" class="btn btn-small" style="background:var(--bg3);color:var(--text)">取消</button>
+        </div>
+
+        <!-- ===== 接口管理（全局）===== -->
+        <div class="setting-group">
+          <span class="setting-group-title">接口管理 <span class="setting-scope">全局·所有会话可用</span></span>
+          <button id="btn-add-provider" class="btn btn-small" style="margin-bottom:8px">+ 添加接口</button>
+          <div id="provider-list" class="provider-list"></div>
+          <div id="provider-editor" class="provider-editor" style="display:none">
+            <div class="provider-editor-hint">
+              <strong>说明：</strong>API 地址只填域名或根路径；具体接口路径填在「Endpoint 路径」里。大多数 OpenAI 兼容平台保持默认即可，只有 Azure/特殊中转站才需要改。
+            </div>
+            <label class="card-field"><span>接口模板</span>
+              <select id="provider-template-select" class="card-input">
+                <option value="openai">OpenAI 兼容</option>
+                <option value="deepseek">DeepSeek</option>
+                <option value="azure">Azure OpenAI</option>
+                <option value="custom">自定义</option>
+              </select>
+              <span class="field-help">选择平台类型。OpenAI 兼容适用于 kkaiapi / OneAPI / NewAPI 等大多数中转平台。</span>
+            </label>
+            <label class="card-field"><span>接口名称</span><input id="provider-name-input" class="card-input" placeholder="如：小米 Token Plan">
+              <span class="field-help">仅用于本界面展示，不影响实际请求。</span>
+            </label>
+            <label class="card-field"><span>API 地址</span><input id="provider-url-input" class="card-input" placeholder="https://api.example.com">
+              <span class="field-help">基础地址，不要带路径。例如 https://api.kkaiapi.com 或 https://api.deepseek.com</span>
+            </label>
+            <label class="card-field"><span>Endpoint 路径</span><input id="provider-endpoint-input" class="card-input" placeholder="/v1/chat/completions">
+              <span class="field-help">聊天补全接口的相对路径。绝大多数平台用 /v1/chat/completions；Azure 用 /openai/deployments/{model}/chat/completions</span>
+            </label>
+            <label class="card-field"><span>鉴权方式</span>
+              <select id="provider-auth-select" class="card-input">
+                <option value="bearer">Authorization: Bearer</option>
+                <option value="api-key">api-key Header</option>
+                <option value="header">自定义 Header</option>
+                <option value="query">URL 参数</option>
+                <option value="none">无需鉴权</option>
+              </select>
+              <span class="field-help">OpenAI / kkaiapi / DeepSeek 都用 Bearer；Azure 用 api-key；少数平台需要自定义。</span>
+            </label>
+            <label class="card-field" id="provider-auth-header-row" style="display:none"><span>Header 名 / 参数名</span><input id="provider-auth-header-input" class="card-input" placeholder="api-key">
+              <span class="field-help">鉴权时使用的 Header 名或 URL 参数名。</span>
+            </label>
+            <label class="card-field" id="provider-auth-prefix-row" style="display:none"><span>Token 前缀</span><input id="provider-auth-prefix-input" class="card-input" placeholder="Bearer ">
+              <span class="field-help">放在密钥前面的字符串，如「Bearer 」或「Key 」。留空表示不加前缀。</span>
+            </label>
+            <label class="card-field"><span>API 密钥</span><input id="provider-key-input" class="card-input" type="password" placeholder="sk-...">
+              <span class="field-help">从平台控制台获取的 API Key。直连模式下会发送到浏览器，建议在可信环境使用。</span>
+            </label>
+            <label class="card-field"><span>额外请求头 (JSON)</span><textarea id="provider-extra-headers-input" class="card-input" rows="2" placeholder='{"x-trace-id": "..."}'></textarea>
+              <span class="field-help">需要随每个请求一起发送的额外 HTTP 头，JSON 对象格式。一般不需要填。</span>
+            </label>
+            <label class="card-field"><span>额外 URL 参数 (JSON)</span><textarea id="provider-extra-query-input" class="card-input" rows="2" placeholder='{"api-version": "2024-06-01"}'></textarea>
+              <span class="field-help">需要附加到 URL 的查询参数，JSON 对象格式。Azure 需填 api-version。</span>
+            </label>
+            <div class="provider-editor-actions">
+              <button id="btn-test-provider" class="btn btn-small">测试连接</button>
+              <span id="provider-test-result" class="provider-test-result"></span>
+            </div>
+            <label class="card-field"><span>模型列表（逗号分隔）</span><input id="provider-models-input" class="card-input" placeholder="model1, model2">
+              <span class="field-help">点击「测试连接」可自动拉取。手动填写时用英文逗号分隔，如 gpt-4o, claude-sonnet-4-6</span>
+            </label>
+            <div class="provider-editor-actions">
+              <button id="btn-save-provider" class="btn btn-small btn-primary">保存</button>
+              <button id="btn-close-provider-editor" class="btn btn-small" style="background:var(--bg3);color:var(--text)">取消</button>
+            </div>
           </div>
         </div>
-        <div class="setting-divider"></div>
-        <span class="setting-section-title">模型提示词（B2 分模型微调）</span>
-        <span class="setting-hint">为当前会话的 provider+model 组合设置独立提示词，注入顺序：全局 → 会话 → 模型。留空则不注入。</span>
-        <label class="setting-row setting-row-col">
-          <span>当前模型键：<span id="model-prompts-key-label" style="color:var(--text2);font-size:12px">-</span></span>
-        </label>
-        <label class="setting-row setting-row-col">
-          <span>模型级 systemPrompt</span>
-          <textarea id="model-prompt-sys" class="setting-textarea" rows="2" placeholder="留空则不注入模型级提示"></textarea>
-        </label>
-        <label class="setting-row setting-row-col">
-          <span>模型级 emphasis</span>
-          <textarea id="model-prompt-emp" class="setting-textarea" rows="2" placeholder="留空则不注入"></textarea>
-        </label>
-        <div class="setting-divider"></div>
-        <span class="setting-section-title">数据管理（全量导出/导入）</span>
-        <span class="setting-hint">导出当前所有对话、接口配置和设置；可用于网页版与 APK 之间迁移数据。</span>
-        <div class="card-import-row" style="margin-top:8px">
-          <button id="btn-export-all" class="btn btn-small">导出全部数据</button>
-          <button id="btn-import-all" class="btn btn-small">导入全部数据</button>
-          <input type="file" id="import-all-file-input" accept=".json" style="display:none">
+
+        <!-- ===== 模型修饰 ===== -->
+        <div class="setting-group">
+          <span class="setting-group-title">模型修饰 <span class="setting-scope">按模型·全局生效</span></span>
+          <span class="setting-hint">针对当前模型的风格修饰。用 ===强调=== 分隔，上半部分进系统提示，下半部分进强调。留空则不注入。</span>
+          <label class="setting-row setting-row-col">
+            <span>当前模型：<span id="model-prompts-key-label" style="color:var(--text2);font-size:12px">-</span></span>
+          </label>
+          <label class="setting-row setting-row-col">
+            <span>修饰语</span>
+            <textarea id="model-prompt-text" class="setting-textarea" rows="4" placeholder="针对此模型的修饰语..."></textarea>
+          </label>
+          <label class="setting-row" style="flex-direction:column;align-items:flex-start;gap:6px">
+            <label style="display:flex;align-items:center;gap:6px;cursor:pointer;font-size:13px;color:var(--text2)">
+              <input type="checkbox" id="model-prompt-disable-check">
+              <span>本会话禁用模型修饰</span>
+            </label>
+            <label style="display:flex;align-items:center;gap:6px;cursor:pointer;font-size:13px;color:var(--text2)">
+              <input type="checkbox" id="model-prompt-override-check">
+              <span>本会话自定义（覆盖全局修饰）</span>
+            </label>
+          </label>
+          <label class="setting-row setting-row-col" id="model-prompt-override-row" style="display:none">
+            <span>本会话修饰语（覆盖全局）</span>
+            <textarea id="model-prompt-override" class="setting-textarea" rows="3" placeholder="本会话专属修饰语..."></textarea>
+          </label>
         </div>
-        <label class="setting-row" style="margin-top:8px">
-          <span>导入模式</span>
-          <select id="import-mode-select" class="setting-select">
-            <option value="overwrite" selected>覆盖（推荐）</option>
-            <option value="merge">合并（按 ID 去重）</option>
-          </select>
-        </label>
-        <span class="setting-hint">覆盖：直接替换当前所有数据。合并：相同 ID 的对话/接口以导入数据为准。</span>
-        <div class="setting-divider"></div>
-        <span class="setting-section-title">显示</span>
+
+        <!-- ===== 数据管理 ===== -->
+        <div class="setting-group">
+          <span class="setting-group-title">数据管理 <span class="setting-scope">全量导出/导入</span></span>
+          <span class="setting-hint">导出当前所有对话、接口配置和设置；可用于网页版与 APK 之间迁移数据。</span>
+          <div class="card-import-row" style="margin-top:8px">
+            <button id="btn-export-all" class="btn btn-small">导出全部数据</button>
+            <button id="btn-import-all" class="btn btn-small">导入全部数据</button>
+            <input type="file" id="import-all-file-input" accept=".json" style="display:none">
+          </div>
+          <label class="setting-row" style="margin-top:8px">
+            <span>导入模式</span>
+            <select id="import-mode-select" class="setting-select">
+              <option value="overwrite" selected>覆盖（推荐）</option>
+              <option value="merge">合并（按 ID 去重）</option>
+            </select>
+          </label>
+          <span class="setting-hint">覆盖：直接替换当前所有数据。合并：相同 ID 的对话/接口以导入数据为准。</span>
+        </div>
       </div>
       <div class="settings-footer">
         <button id="btn-save-settings" class="btn btn-primary">保存设置</button>
@@ -363,6 +384,6 @@
 
 <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/marked/12.0.1/marked.min.js"></script>
-<script src="app.js?v=54"></script>
+<script src="app.js?v=55"></script>
 </body>
 </html>

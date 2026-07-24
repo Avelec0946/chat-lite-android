@@ -233,10 +233,11 @@ html,body{height:100%;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Ro
 .settings-backdrop{position:fixed;top:0;left:0;right:0;bottom:0;background:rgba(0,0,0,.4)}
 .settings-content{position:relative;background:var(--glass-bg);backdrop-filter:var(--glass-blur);-webkit-backdrop-filter:var(--glass-blur);border-radius:16px;width:90%;max-width:480px;max-height:80vh;overflow-y:auto;box-shadow:0 4px 16px rgba(0,0,0,.08);margin:auto}
 /* B1: settings tab */
-.settings-tabs{display:flex;align-items:center;gap:8px;margin-bottom:8px;padding-bottom:8px;border-bottom:1px solid var(--border)}
-.settings-tab{padding:6px 14px;border:none;background:transparent;color:var(--text2);font-size:13px;border-radius:6px;cursor:pointer;transition:all .15s}
-.settings-tab.active{background:var(--primary);color:#fff}
-.settings-tab:hover:not(.active){background:var(--bg3);color:var(--text)}
+.setting-group{background:var(--bg2);border:1px solid var(--border);border-radius:10px;padding:12px;margin-bottom:12px}
+.setting-group-title{display:block;font-size:14px;font-weight:600;color:var(--text);margin-bottom:8px;padding-bottom:6px;border-bottom:1px solid var(--border)}
+.setting-scope{font-size:11px;font-weight:400;color:var(--text2);background:var(--bg3);padding:1px 8px;border-radius:10px;margin-left:6px}
+.settings-scroll-btn{position:sticky;position:-webkit-sticky;bottom:10px;float:right;width:36px;height:36px;border-radius:50%;background:var(--primary);color:#fff;border:none;font-size:18px;cursor:pointer;box-shadow:0 2px 8px rgba(0,0,0,.2);z-index:10;opacity:.9}
+.settings-scroll-btn:hover{opacity:1}
 .settings-header{display:flex;align-items:center;justify-content:space-between;padding:16px 20px}
 .settings-body{padding:16px 20px;display:flex;flex-direction:column;gap:16px}
 .setting-row{display:flex;align-items:center;justify-content:space-between;gap:12px}

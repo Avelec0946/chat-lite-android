@@ -518,8 +518,8 @@ function openProviderEditor(idx) {
       group.open = true;
     }
   } else {
-    // Adding new: append at the end of the list
-    container.appendChild(editor);
+    // Adding new: insert right after the "+ 娣诲姞鎺ュ彛" button (before the list)
+    container.parentNode.insertBefore(editor, container);
   }
 }
 
@@ -789,49 +789,55 @@ function loadSettings() {
   var defaults = {
     thinkingEnabled: true, apiKey: '', fontSize: '15', lineSpacing: '1.6',
     directMode: false, hapticFeedback: true, nativeStreamingMode: 'auto', nativeTimeoutMs: 120000,
-    // B1: 全局提示词层（会话级 null/空表示继承）
-    global: { thinkingEnabled: true, systemPrompt: '', emphasis: '', userIdentity: '', statusBar: { enabled: false, templateRule: '', displayFields: '', position: 'bottom' } },
-    // B2: 分模型提示词 {"<providerId>:<modelId>": {systemPrompt, emphasis}}
+    // B2: 分模型修饰语 {"<providerId>:<modelId>": {text: "修饰语\n\n===强调===\n强调内容"}}
     modelPrompts: {}
   };
   try {
     const raw = localStorage.getItem(SETTINGS_KEY);
     if (raw) {
       var s = JSON.parse(raw);
-      // B1 迁移：旧 settings 无 global 字段，从顶层 thinkingEnabled 派生
-      if (!s.global) {
-        s.global = {
-          thinkingEnabled: s.thinkingEnabled !== undefined ? s.thinkingEnabled : defaults.global.thinkingEnabled,
-          systemPrompt: '', emphasis: '', userIdentity: '',
-          statusBar: { enabled: false, templateRule: '', displayFields: '', position: 'bottom' }
-        };
-      } else {
-        if (!s.global.statusBar) s.global.statusBar = { enabled: false, templateRule: '', displayFields: '', position: 'bottom' };
-        if (s.global.statusBar.template && !s.global.statusBar.templateRule) s.global.statusBar.templateRule = s.global.statusBar.template;
-        if (s.global.thinkingEnabled === undefined) s.global.thinkingEnabled = s.thinkingEnabled !== undefined ? s.thinkingEnabled : true;
+      // 迁移：旧版有 settings.global，提示词字段已回归会话级，移除 global
+      if (s.global) {
+        if (s.global.thinkingEnabled !== undefined && s.thinkingEnabled === undefined) {
+          s.thinkingEnabled = s.global.thinkingEnabled;
+        }
+        delete s.global;
       }
-      if (!s.modelPrompts) s.modelPrompts = {};
+      // 迁移：旧 modelPrompts[key] = {systemPrompt, emphasis} -> 合并为 {text}
+      if (s.modelPrompts) {
+        for (var k in s.modelPrompts) {
+          var mp = s.modelPrompts[k];
+          if (mp && mp.text === undefined && (mp.systemPrompt || mp.emphasis)) {
+            var parts = [];
+            if (mp.systemPrompt) parts.push(mp.systemPrompt);
+            if (mp.emphasis) parts.push('===强调===\n' + mp.emphasis);
+            mp.text = parts.join('\n\n');
+            delete mp.systemPrompt;
+            delete mp.emphasis;
+          }
+        }
+      } else {
+        s.modelPrompts = {};
+      }
       return s;
     }
   } catch(e) {}
   return defaults;
 }
 
-// B1: 读取有效设置（conv 非空优先，否则回退 global）
-function effective(conv, key) {
-  if (conv && conv[key]) return conv[key];
-  return (settings.global && settings.global[key]) || null;
-}
-// B1: 状态栏有效值（对象特殊处理，兼容旧 template 字段名）
+// 状态栏有效值（直接读 conv，兼容旧 template 字段名）
 function effectiveStatusBar(conv) {
-  var sb = (conv && conv.statusBar) || (settings.global && settings.global.statusBar) || null;
+  var sb = (conv && conv.statusBar) || null;
   if (!sb) return { enabled: false, templateRule: '', displayFields: '', position: 'bottom' };
   if (sb.template && !sb.templateRule) sb.templateRule = sb.template;
   return sb;
 }
-// B2: 读取模型级提示词
+// B2: 读取模型级修饰语（考虑会话级禁用/覆盖）
 function effectiveModelPrompt(conv) {
-  if (!settings.modelPrompts || !conv) return null;
+  if (!conv) return null;
+  if (conv.modelPromptDisabled) return null;
+  if (conv.modelPromptOverride) return { text: conv.modelPromptOverride };
+  if (!settings.modelPrompts) return null;
   var key = (conv.providerId || '') + ':' + (conv.model || '');
   return settings.modelPrompts[key] || null;
 }
@@ -851,13 +857,11 @@ function newConversation() {
     versions: [{ content: '', timestamp: Date.now(), reason: 'original' }],
     activeVersion: 0, files: [], editing: false, createdAt: Date.now()
   };
-  // B1: 新会话默认继承全局设置（systemPrompt/emphasis/userIdentity/statusBar 不设即继承）
   return {
     id: uid(),
     title: '新对话',
     model: (state.providers && state.providers[0] && state.providers[0].models && state.providers[0].models[0] && state.providers[0].models[0].id) || 'deepseek-v4-flash',
     providerId: (state.providers && state.providers[0] && state.providers[0].id) || null,
-    // thinkingEnabled 不设，继承 settings.global.thinkingEnabled
     rootId: msgId,
     activePath: [msgId],
     messageMap: { [msgId]: rootMsg },
@@ -1022,13 +1026,12 @@ async function init() {
   if (hapticCheck) hapticCheck.checked = (settings.hapticFeedback !== false);
   applyDisplaySettings();
 
-  // Thinking toggle auto-saves immediately (B1: 同时更新 global)
+  // Thinking toggle auto-saves immediately (会话级)
   thinkingToggle.addEventListener('change', () => {
     settings.thinkingEnabled = thinkingToggle.checked;
-    if (settings.global) settings.global.thinkingEnabled = thinkingToggle.checked;
     saveSettings();
     const conv = currentConv();
-    if (conv && (state._settingsTab || 'conv') === 'conv') {
+    if (conv) {
       conv.thinkingEnabled = thinkingToggle.checked;
       save();
     }
@@ -1195,29 +1198,33 @@ async function init() {
     $('statusbar-position-row').style.display = show ? '' : 'none';
   });
 
-  // B1: settings tab 切换
-  document.querySelectorAll('.settings-tab').forEach(function(tab) {
-    tab.addEventListener('click', function() {
-      state._settingsTab = tab.dataset.tab;
-      fillSettingsForm();
+  // 模型修饰复选框：本会话自定义
+  var mpOverrideCheck = document.getElementById('model-prompt-override-check');
+  if (mpOverrideCheck) {
+    mpOverrideCheck.addEventListener('change', function() {
+      var row = document.getElementById('model-prompt-override-row');
+      if (row) row.style.display = this.checked ? '' : 'none';
     });
-  });
+  }
 
-  // B1: "使用全局设置"按钮（会话 tab 下把 conv 提示词字段清空为 null 继承全局）
-  var resetBtn = document.getElementById('btn-reset-conv-prompts');
-  if (resetBtn) {
-    resetBtn.addEventListener('click', function() {
-      var conv = currentConv();
-      if (!conv) return;
-      if (!confirm('清空当前会话的提示词设置，改为继承全局？')) return;
-      conv.thinkingEnabled = null;
-      conv.systemPrompt = null;
-      conv.emphasis = null;
-      conv.userIdentity = null;
-      conv.statusBar = null;
-      save();
-      fillSettingsForm();
-      showToast('已切换为继承全局设置');
+  // 设置面板快速回顶/底按钮
+  var settingsBody = document.getElementById('settings-body');
+  var settingsScrollBtn = document.getElementById('settings-scroll-btn');
+  if (settingsBody && settingsScrollBtn) {
+    settingsBody.addEventListener('scroll', function() {
+      var nearTop = settingsBody.scrollTop < 200;
+      var nearBottom = settingsBody.scrollTop + settingsBody.clientHeight >= settingsBody.scrollHeight - 200;
+      settingsScrollBtn.style.display = (nearTop && nearBottom) ? 'none' : '';
+      settingsScrollBtn.textContent = (nearBottom && !nearTop) ? '↑' : '↓';
+    });
+    settingsScrollBtn.addEventListener('click', function() {
+      var nearTop = settingsBody.scrollTop < 200;
+      var nearBottom = settingsBody.scrollTop + settingsBody.clientHeight >= settingsBody.scrollHeight - 200;
+      if (nearBottom && !nearTop) {
+        settingsBody.scrollTo({ top: 0, behavior: 'smooth' });
+      } else {
+        settingsBody.scrollTo({ top: settingsBody.scrollHeight, behavior: 'smooth' });
+      }
     });
   }
 
@@ -2498,16 +2505,21 @@ function buildContext(conv) {
   const sb = effectiveStatusBar(conv);
   const mp = effectiveModelPrompt(conv);
 
-  // B1: 全局 systemPrompt
-  if (settings.global && settings.global.systemPrompt) sysParts.push(settings.global.systemPrompt);
-  // B1: 会话级 systemPrompt override（null/空继承全局）
+  // 会话级 systemPrompt
   if (conv.systemPrompt) sysParts.push(conv.systemPrompt);
-  // B1: 会话级 emphasis
+  // 会话级 emphasis
   if (conv.emphasis) sysParts.push('【重要强调】' + conv.emphasis);
-  // B2: 模型级提示词
-  if (mp) {
-    if (mp.systemPrompt) sysParts.push(mp.systemPrompt);
-    if (mp.emphasis) sysParts.push('【重要强调】' + mp.emphasis);
+  // B2: 模型修饰（text 按 ===强调=== 分隔拆分为 systemPrompt + emphasis）
+  if (mp && mp.text) {
+    var sepIdx = mp.text.indexOf('===强调===');
+    if (sepIdx >= 0) {
+      var mpSys = mp.text.substring(0, sepIdx).trim();
+      var mpEmp = mp.text.substring(sepIdx + 9).trim();
+      if (mpSys) sysParts.push(mpSys);
+      if (mpEmp) sysParts.push('【重要强调】' + mpEmp);
+    } else {
+      sysParts.push(mp.text.trim());
+    }
   }
   // B3: 状态栏指令（templateRule + displayFields 分离）
   if (sb && sb.enabled) {
@@ -2518,8 +2530,8 @@ function buildContext(conv) {
     if (df) ruleText += '\\n（UI 仅展示以下字段，其余可省略：' + df + '）';
     sysParts.push(ruleText);
   }
-  // B1: 用户身份（会话级优先，回退全局）
-  var userId = effective(conv, 'userIdentity');
+  // 用户身份（会话级）
+  var userId = conv.userIdentity;
   if (userId) sysParts.push('用户身份：' + userId);
 
   if (sysParts.length > 0) {
@@ -3006,7 +3018,7 @@ async function sendFromMessage(context) {
     messages: context,
     model: conv.model,
     stream: !isCapacitor(),
-    thinkingEnabled: effective(conv, 'thinkingEnabled') !== false
+    thinkingEnabled: conv.thinkingEnabled !== false
   };
 
   var req;
@@ -3132,16 +3144,21 @@ function buildContextForContinue(conv, targetMsg) {
   const sb = effectiveStatusBar(conv);
   const mp = effectiveModelPrompt(conv);
 
-  // B1: 全局 systemPrompt
-  if (settings.global && settings.global.systemPrompt) sysParts.push(settings.global.systemPrompt);
-  // B1: 会话级 systemPrompt override
+  // 会话级 systemPrompt
   if (conv.systemPrompt) sysParts.push(conv.systemPrompt);
-  // B1: 会话级 emphasis
+  // 会话级 emphasis
   if (conv.emphasis) sysParts.push('【重要强调】' + conv.emphasis);
-  // B2: 模型级提示词
-  if (mp) {
-    if (mp.systemPrompt) sysParts.push(mp.systemPrompt);
-    if (mp.emphasis) sysParts.push('【重要强调】' + mp.emphasis);
+  // B2: 模型修饰（text 按 ===强调=== 分隔拆分为 systemPrompt + emphasis）
+  if (mp && mp.text) {
+    var sepIdx = mp.text.indexOf('===强调===');
+    if (sepIdx >= 0) {
+      var mpSys = mp.text.substring(0, sepIdx).trim();
+      var mpEmp = mp.text.substring(sepIdx + 9).trim();
+      if (mpSys) sysParts.push(mpSys);
+      if (mpEmp) sysParts.push('【重要强调】' + mpEmp);
+    } else {
+      sysParts.push(mp.text.trim());
+    }
   }
   // B3: 状态栏指令
   if (sb && sb.enabled) {
@@ -3152,8 +3169,8 @@ function buildContextForContinue(conv, targetMsg) {
     if (df) ruleText += '\\n（UI 仅展示以下字段，其余可省略：' + df + '）';
     sysParts.push(ruleText);
   }
-  // B1: 用户身份
-  var userId = effective(conv, 'userIdentity');
+  // 用户身份（会话级）
+  var userId = conv.userIdentity;
   if (userId) sysParts.push('用户身份：' + userId);
   if (sysParts.length > 0) msgs.push({ role: 'system', content: sysParts.join('\\n\\n') });
 
@@ -3218,7 +3235,7 @@ async function sendFromMessageContinue(context, assistantMsg) {
       messages: context,
       model: conv.model,
       stream: !isCapacitor(),
-      thinkingEnabled: effective(conv, 'thinkingEnabled') !== false
+      thinkingEnabled: conv.thinkingEnabled !== false
     };
 
     var req;
@@ -4037,26 +4054,13 @@ function applyDisplaySettings() {
 
 // B1: 根据 tab 回填表单（conv tab 时 conv 字段优先，回退 global；global tab 时只读 global）
 function fillSettingsForm() {
-  var tab = state._settingsTab || 'conv';
   var conv = currentConv();
-  var src = {};
-  if (tab === 'global') {
-    src = settings.global || {};
-    src.statusBar = src.statusBar || { enabled: false, templateRule: '', displayFields: '', position: 'bottom' };
-  } else {
-    var g = settings.global || {};
-    src.thinkingEnabled = conv ? (conv.thinkingEnabled != null ? conv.thinkingEnabled : g.thinkingEnabled) : g.thinkingEnabled;
-    src.systemPrompt = conv ? (conv.systemPrompt != null ? conv.systemPrompt : g.systemPrompt) : g.systemPrompt;
-    src.emphasis = conv ? (conv.emphasis != null ? conv.emphasis : g.emphasis) : g.emphasis;
-    src.userIdentity = conv ? (conv.userIdentity != null ? conv.userIdentity : g.userIdentity) : g.userIdentity;
-    src.statusBar = effectiveStatusBar(conv);
-  }
-  thinkingToggle.checked = src.thinkingEnabled !== false;
-  systemPromptInput.value = src.systemPrompt || '';
-  $('emphasis-prompt').value = src.emphasis || '';
-  userIdentityInput.value = src.userIdentity || '';
-  var sb = src.statusBar || { enabled: false, templateRule: '', displayFields: '', position: 'bottom' };
-  if (sb.template && !sb.templateRule) sb.templateRule = sb.template;
+  // 会话级字段（直接从 conv 读取，无全局继承）
+  thinkingToggle.checked = conv ? (conv.thinkingEnabled !== false) : true;
+  systemPromptInput.value = (conv && conv.systemPrompt) || '';
+  $('emphasis-prompt').value = (conv && conv.emphasis) || '';
+  userIdentityInput.value = (conv && conv.userIdentity) || '';
+  var sb = effectiveStatusBar(conv);
   $('statusbar-toggle').checked = sb.enabled;
   var ruleEl = document.getElementById('statusbar-template-rule');
   var dfEl = document.getElementById('statusbar-display-fields');
@@ -4069,43 +4073,48 @@ function fillSettingsForm() {
   if (dfRow) dfRow.style.display = showRows;
   $('statusbar-template-hint').style.display = showRows;
   $('statusbar-position-row').style.display = showRows;
-  // "使用全局设置"按钮：仅 conv tab 且有会话时显示
-  var resetBtn = document.getElementById('btn-reset-conv-prompts');
-  if (resetBtn) resetBtn.style.display = (tab === 'conv' && conv) ? '' : 'none';
-  // tab 高亮
-  document.querySelectorAll('.settings-tab').forEach(function(t) {
-    t.classList.toggle('active', t.dataset.tab === tab);
-  });
-  // B2: 模型提示词回填
+  // 全局偏好字段
+  var dmCheck = document.getElementById('direct-mode-check');
+  if (dmCheck) dmCheck.checked = settings.directMode || false;
+  var smSelect = document.getElementById('native-streaming-mode-select');
+  if (smSelect) smSelect.value = settings.nativeStreamingMode || 'auto';
+  var hfCheck = document.getElementById('haptic-feedback-check');
+  if (hfCheck) hfCheck.checked = settings.hapticFeedback !== false;
+  var fsSelect = document.getElementById('font-size-select');
+  var lsSelect = document.getElementById('line-spacing-select');
+  if (fsSelect) fsSelect.value = settings.fontSize || '15';
+  if (lsSelect) lsSelect.value = settings.lineSpacing || '1.6';
+  // B2: 模型修饰
   var mpKey = conv ? ((conv.providerId || '') + ':' + (conv.model || '')) : '';
   var mpLabel = document.getElementById('model-prompts-key-label');
   if (mpLabel) mpLabel.textContent = mpKey || '(无当前会话)';
   var mp = (conv && settings.modelPrompts && settings.modelPrompts[mpKey]) || {};
-  var mpSys = document.getElementById('model-prompt-sys');
-  var mpEmp = document.getElementById('model-prompt-emp');
-  if (mpSys) mpSys.value = mp.systemPrompt || '';
-  if (mpEmp) mpEmp.value = mp.emphasis || '';
+  var mpTextEl = document.getElementById('model-prompt-text');
+  if (mpTextEl) mpTextEl.value = mp.text || '';
+  var mpDisableEl = document.getElementById('model-prompt-disable-check');
+  if (mpDisableEl) mpDisableEl.checked = !!(conv && conv.modelPromptDisabled);
+  var mpOverrideEl = document.getElementById('model-prompt-override-check');
+  var mpOverrideRow = document.getElementById('model-prompt-override-row');
+  var hasOverride = !!(conv && conv.modelPromptOverride);
+  if (mpOverrideEl) mpOverrideEl.checked = hasOverride;
+  if (mpOverrideRow) mpOverrideRow.style.display = hasOverride ? '' : 'none';
+  var mpOverrideTextEl = document.getElementById('model-prompt-override');
+  if (mpOverrideTextEl) mpOverrideTextEl.value = (conv && conv.modelPromptOverride) || '';
 }
 
 function toggleSettings(open) {
   state.settingsOpen = open;
   settingsPanel.style.display = open ? 'flex' : 'none';
   if (open) {
-    if (!state._settingsTab) state._settingsTab = 'conv';
     renderProviderList();
-    // Display settings（全局）
-    const fsSelect = document.getElementById('font-size-select');
-    const lsSelect = document.getElementById('line-spacing-select');
-    if (fsSelect) fsSelect.value = settings.fontSize || '15';
-    if (lsSelect) lsSelect.value = settings.lineSpacing || '1.6';
     fillSettingsForm();
   }
 }
 
 function saveSettingsHandler() {
-  // 全局设置（永远保存）
+  // 全局偏好
   settings.thinkingEnabled = thinkingToggle.checked;
-  if (settings.global) settings.global.thinkingEnabled = thinkingToggle.checked;
+  settings.directMode = document.getElementById('direct-mode-check')?.checked || false;
   const streamingModeSelect = document.getElementById('native-streaming-mode-select');
   if (streamingModeSelect) settings.nativeStreamingMode = streamingModeSelect.value;
   const hapticCheck = document.getElementById('haptic-feedback-check');
@@ -4117,44 +4126,39 @@ function saveSettingsHandler() {
   applyDisplaySettings();
   saveSettings();
 
-  // B1: 提示词相关根据 tab 保存
-  var tab = state._settingsTab || 'conv';
-  var sbData = {
-    enabled: $('statusbar-toggle').checked,
-    templateRule: (document.getElementById('statusbar-template-rule') || {}).value ? (document.getElementById('statusbar-template-rule').value || '').trim() : '',
-    displayFields: (document.getElementById('statusbar-display-fields') || {}).value ? (document.getElementById('statusbar-display-fields').value || '').trim() : '',
-    position: $('statusbar-position').value
-  };
-  if (tab === 'global') {
-    settings.global = settings.global || {};
-    settings.global.systemPrompt = systemPromptInput.value.trim();
-    settings.global.emphasis = $('emphasis-prompt').value.trim();
-    settings.global.userIdentity = userIdentityInput.value.trim();
-    settings.global.statusBar = sbData;
-    saveSettings();
-  } else {
-    const conv = currentConv();
-    if (conv) {
-      conv.thinkingEnabled = thinkingToggle.checked;
-      // B1: 空字符串转 null 表示继承全局
-      conv.systemPrompt = systemPromptInput.value.trim() || null;
-      conv.emphasis = $('emphasis-prompt').value.trim() || null;
-      conv.userIdentity = userIdentityInput.value.trim() || null;
-      conv.statusBar = sbData;
-      save();
+  // 会话级字段
+  const conv = currentConv();
+  if (conv) {
+    conv.thinkingEnabled = thinkingToggle.checked;
+    conv.systemPrompt = systemPromptInput.value.trim() || null;
+    conv.emphasis = $('emphasis-prompt').value.trim() || null;
+    conv.userIdentity = userIdentityInput.value.trim() || null;
+    conv.statusBar = {
+      enabled: $('statusbar-toggle').checked,
+      templateRule: (document.getElementById('statusbar-template-rule') || {}).value ? (document.getElementById('statusbar-template-rule').value || '').trim() : '',
+      displayFields: (document.getElementById('statusbar-display-fields') || {}).value ? (document.getElementById('statusbar-display-fields').value || '').trim() : '',
+      position: $('statusbar-position').value
+    };
+    // B2: 模型修饰会话级覆盖
+    var mpDisableEl = document.getElementById('model-prompt-disable-check');
+    if (mpDisableEl) conv.modelPromptDisabled = mpDisableEl.checked;
+    var mpOverrideEl = document.getElementById('model-prompt-override-check');
+    var mpOverrideTextEl = document.getElementById('model-prompt-override');
+    if (mpOverrideEl && mpOverrideEl.checked && mpOverrideTextEl) {
+      conv.modelPromptOverride = mpOverrideTextEl.value.trim() || null;
+    } else {
+      conv.modelPromptOverride = null;
     }
+    save();
   }
 
-  // B2: 模型提示词保存
-  var b2conv = currentConv();
-  if (b2conv) {
-    var mpKey = (b2conv.providerId || '') + ':' + (b2conv.model || '');
-    var mpSysEl = document.getElementById('model-prompt-sys');
-    var mpEmpEl = document.getElementById('model-prompt-emp');
-    var newSys = mpSysEl ? mpSysEl.value.trim() : '';
-    var newEmp = mpEmpEl ? mpEmpEl.value.trim() : '';
-    if (newSys || newEmp) {
-      settings.modelPrompts[mpKey] = { systemPrompt: newSys, emphasis: newEmp };
+  // B2: 全局模型修饰语保存
+  if (conv) {
+    var mpKey = (conv.providerId || '') + ':' + (conv.model || '');
+    var mpTextEl = document.getElementById('model-prompt-text');
+    var newText = mpTextEl ? mpTextEl.value.trim() : '';
+    if (newText) {
+      settings.modelPrompts[mpKey] = { text: newText };
     } else {
       delete settings.modelPrompts[mpKey];
     }
@@ -4163,6 +4167,7 @@ function saveSettingsHandler() {
 
   toggleSettings(false);
 }
+
 
 // ===== Version Navigation =====
 window.prevVersion = function(msgId) {
