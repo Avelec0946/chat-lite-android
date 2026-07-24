@@ -303,3 +303,316 @@ Select-String -Path C:\Users\86176\chat-lite-android\www\app.js -Pattern "showBu
 | `app.js` | scroll 监听挂 `#settings-body`：scrollTop<200=nearTop，底部-200=nearBottom；按钮在 nearBottom&&nearTop 时隐藏，nearBottom&&!nearTop 显示↑（回顶），否则显示↓（回底）；箭头用 SVG（复用 C1 的 `polyline` 风格，stroke=currentColor 跟随 `--text`），非文本字符；`toggleSettings` 打开时 setTimeout 触发一次 updateScrollBtn 初始化按钮状态 |
 
 > 本节全部改动不含 Capacitor 专属符号，**可推主仓库**。sync 后需确认 `settings.global` 迁移逻辑、`effectiveStatusBar`/`effectiveModelPrompt` 新签名未被覆盖。
+
+### 11. v1.3.0 批次 5：F1 生图 API 集成（cache-bust v57 -> v58）
+**范围**：独立生图 API 子系统，含界面、Provider 管理、API 调用、全局图库。为后续 F2/F4/F3/F5 预留扩展点（详见蓝皮书 v4 第十章）。
+**含 Capacitor 专属代码**（Filesystem 写入 Download 目录、App.addListener backButton），**不推主仓库**；其余 UI/数据结构/API 调用逻辑可推。
+
+#### 11.1 数据结构（settings 扩展）
+```javascript
+settings = {
+  // ... 既有字段 ...
+  imageProviders: [],          // 生图 provider 列表（独立于聊天 providers）
+  imageProviderId: null,       // 当前选中的生图 provider id
+  images: []                   // 全局图库（F2/F4/F5 共用）
+};
+```
+- `IMAGE_PROVIDER_TEMPLATES` 常量独立于 `PROVIDER_TEMPLATES`，定义 `openai_compat`/`openai_standard`/`custom` 三种模板
+- `settings.images[]` 字段：`{ id, dataUrl, thumbnailDataUrl, prompt, negativePrompt, referenceImageId, model, providerId, size, createdAt, tags, source, starred, revisedPrompt }`
+- 为 F2/F4/F5 预留扩展字段：`tags[]`/`starred`/`source`/`referenceImageId`
+
+#### 11.2 loadSettings 默认值与迁移
+| 函数 | 改动 |
+|---|---|
+| `loadSettings` | 默认值加 `imageProviders:[]`/`imageProviderId:null`/`images:[]`；旧 settings 无此字段时补默认值；`imageProviders` 数组用 `normalizeImageProvider` 归一化；`imageProviderId` 指向不存在的 provider 时回退到首个 |
+
+#### 11.3 新增函数（app.js，约 680 行）
+| 模块 | 函数 |
+|---|---|
+| Provider 模板 | `IMAGE_PROVIDER_TEMPLATES` / `getImageProviderTemplate` / `normalizeImageProvider` / `getImageProvider` / `getCurrentImageProvider` / `saveImageProviders` |
+| Provider 管理 UI | `renderImageProviderList` / `openImageProviderEditor` / `closeImageProviderEditor` / `saveImageProviderFromEditor` / `deleteImageProvider` |
+| 界面切换 | `toggleImageView` / `renderImageProviderSelect` / `updateImageGalleryCount` |
+| 图片流 | `renderImageStream` / `showImagePreview` / `deleteImageFromGallery` / `saveImageToDevice` |
+| API 调用 | `compressImageForGeneration` / `buildImageRequestPayload` / `generateImage` / `fetchImageAsDataUrl` / `clearImageGallery` |
+| 事件绑定 | `initImageView`（入口按钮/返回键/接口选择/参考图/尺寸/提示词/高级参数/设置面板按钮/边缘滑动返回/Android 返回键拦截） |
+| init 调用 | `init()` 中调用 `initImageView()`；`toggleSettings(open)` 打开时调用 `renderImageProviderList()` + `updateImageGalleryCount()` |
+
+#### 11.4 API 协议（kkaiapi OpenAI 兼容）
+- 端点：`POST {baseUrl}/v1/images/generations`
+- 请求体（nested 格式）：`{ model, input: { messages: [{ role:'user', content: [{type:'text',text:prompt}, {type:'image',image:base64}] }] }, parameters: { prompt_extend, watermark, n, size, negative_prompt } }`
+- 响应：`{ data: [{ url, b64_json, revised_prompt }] }`
+- 图片获取策略：优先 `b64_json`，否则 fetch `url` 转 base64
+
+#### 11.5 UI 改动
+| 文件 | 改动 |
+|---|---|
+| `index.html` | sidebar-footer 加 `#btn-open-image-view`（图片图标 SVG）；`<main>` 后加 `<section id="image-view">`（顶部栏+图片流+输入区+高级参数）；设置面板「数据管理」前加「生图 API」`<details>` 分组（provider 列表+编辑器+图库统计+清空按钮）；cache-bust v57→v58 |
+| `style.css` | `:root` 加 `--shadow-up`；`body.dark` 加 `--shadow-up`；`.sidebar-footer` 改 flex 布局；新增 `.btn-image-entry` + 全套生图界面样式（`.image-view`/`.image-bar`/`.image-stream`/`.image-msg`/`.image-card`/`.image-input-area`/`.image-advanced-*`/`.image-loading`/`.image-error`/`.image-preview-overlay`/`.image-provider-editor`），全部使用 CSS 变量 |
+| `app.js` | 见 11.3 |
+
+#### 11.6 Capacitor 专属代码（不推主仓库）
+| 函数 | Capacitor API |
+|---|---|
+| `saveImageToDevice` | `CapFilesystem.writeFile({ path:'Download/'+fileName, data:base64, directory:'EXTERNAL_STORAGE', recursive:true })` |
+| `initImageView` 末尾 | `Capacitor.Plugins.App.addListener('backButton', ...)` 拦截 Android 物理返回键，生图界面打开时返回主界面而非退出 |
+
+> Web 模式下 `saveImageToDevice` 回退为 `<a download>` 触发浏览器下载，无需 Capacitor。
+> 同步主仓库时需保留：`settings.imageProviders`/`imageProviderId`/`images` 字段迁移逻辑、`IMAGE_PROVIDER_TEMPLATES` 常量、所有 UI 渲染与 API 调用函数；剔除 `CapFilesystem` 与 `Capacitor.Plugins.App` 相关分支。
+
+#### 11.7 风险与遗留
+1. **大图存储**：base64 图片存 localStorage，5-10MB 限制。当前未生成缩略图（`thumbnailDataUrl:null`），F2/F4 优化时再补
+2. **API 超时**：默认 120s（复用 `settings.nativeTimeoutMs`），可通过设置面板「常用偏好」分组的流式超时调整
+3. **参考图大小**：压缩到 1024px 内（PNG 0.85 质量）再上传
+4. **图生图请求体**：kkaiapi 把参考图放在 `content[].image` 字段作为纯 base64（去 data URL 前缀）
+5. **滑动返回**：仅左边缘 24px 内触发，需横向 >80px、纵向 <60px、时间 <500ms，避免误触
+
+#### 11.8 sync 后自检命令
+```powershell
+# 1. 检查 F1 关键标记
+Select-String -Path C:\Users\86176\chat-lite-android\www\app.js -Pattern "IMAGE_PROVIDER_TEMPLATES|toggleImageView|generateImage|initImageView" -SimpleMatch
+
+# 2. 检查 Capacitor 专属符号（应仅在 saveImageToDevice 和 initImageView 末尾出现）
+Select-String -Path C:\Users\86176\chat-lite-android\www\app.js -Pattern "CapFilesystem|Capacitor.Plugins.App" -SimpleMatch
+
+# 3. 语法验证
+node --check C:\Users\86176\chat-lite-android\www\app.js
+```
+
+### 12. v1.3.0 批次 5 修正：F1 新增 gpt_image 模板支持 gpt-image-2（cache-bust v58 -> v59）
+**背景**：原 `openai_compat` 模板用通义万相 nested 格式（`input.messages[].content`），但用户用 kkaiapi 中转 gpt-image-2 时，gpt-image-2 实际是 OpenAI 标准 flat 格式 + `quality`/`output_format` 参数，nested 请求体上游不认 → HTTP 500 Upstream gateway error。
+
+**修复**：
+| 文件 | 改动 |
+|---|---|
+| `app.js` IMAGE_PROVIDER_TEMPLATES | 新增 `gpt_image` 模板：`requestFormat:'gpt_image'`、`responseFormat:'b64_only'`、`features.supportsQuality:true` |
+| `app.js` generateImage | 新增 `gpt_image` 分支：构建 flat 请求体 `{model,prompt,n,size,quality,output_format,moderation}` |
+| `app.js` updateImageAdvancedVisibility（新增函数） | 根据当前模板显示/隐藏 quality 行/负面提示词/提示词扩展/水印/参考图按钮 |
+| `app.js` toggleImageView / initImageView 接口切换 | 调用 `updateImageAdvancedVisibility()` |
+| `index.html` 模板 select | 新增 `gpt_image` 选项（默认推荐，放第一位） |
+| `index.html` 高级面板 | 新增 quality 选择行 `image-quality-row`（auto/low/medium/high）；给负面提示词行/提示词扩展 label/水印 label 加 id 供 visibility 控制 |
+
+**gpt-image-2 请求体格式**（与 DALL-E nested 格式不同）：
+```json
+{
+  "model": "gpt-image-2",
+  "prompt": "...",
+  "n": 1,
+  "size": "1024x1024",
+  "quality": "auto",
+  "output_format": "png",
+  "moderation": "auto"
+}
+```
+
+**响应**：gpt-image 系列只返回 `data[0].b64_json`（无 url），原代码已支持 b64_json 解析，无需改动。
+
+> 本次改动不含 Capacitor 专属 API，属于通用模板扩展，**可推主仓库**。sync 后确认 `IMAGE_PROVIDER_TEMPLATES.gpt_image` 与 `generateImage` 的 `gpt_image` 分支未被覆盖。
+
+### 13. v1.3.0 批次 5 扩展：F1 新增 Nano Banana 模板 + 输入区分层 + 分辨率/宽高比双下拉（cache-bust v59 -> v60）
+**背景**：用户反馈三点改进需求：① 支持 Google Nano Banana（Gemini 2.5/3 Flash Image）；② 尺寸选择改为「分辨率（1K/2K/4K）+ 宽高比（1:1/16:9 等）+ 自由」更人性化；③ 输入区被设置框挤压，需分层。
+
+**研究依据**：
+- Nano Banana 谷歌原生 API：`POST /v1beta/models/{model}:generateContent`，鉴权 `x-goog-api-key`，请求体 `contents[].parts[].text` + `generationConfig.responseModalities:['IMAGE']` + `generationConfig.imageConfig:{aspectRatio, imageSize}`
+- 中转平台（kkidc 等）：同样路径但用 `Authorization: Bearer` 鉴权
+- 响应：`candidates[0].content.parts[].inlineData.data`（base64），与 OpenAI 的 `data[0].b64_json` 结构完全不同
+- imageSize 取值 "1K"/"2K"/"4K"；aspectRatio 取值 "1:1"/"4:3"/"3:4"/"16:9"/"9:16"
+
+**修复**：
+| 文件 | 改动 |
+|---|---|
+| `app.js` IMAGE_PROVIDER_TEMPLATES | 新增 `nano_banana` 模板：`endpointPath:'/v1beta/models/{model}:generateContent'`、`authType:'api-key'`、`authHeader:'x-goog-api-key'`、`requestFormat:'gemini_image'`、`responseFormat:'gemini'`、`features.supportsReferenceImage:true`（图生图用 inline_data）|
+| `app.js` IMAGE_PROVIDER_TEMPLATES | 所有模板 features 补 `supportsResolution`/`supportsAspectRatio` 字段（统一 true，由映射函数处理）|
+| `app.js` buildImageRequestPayload | 支持 `{model}` 占位符替换（从 body.model 读取）|
+| `app.js` buildImageSizeConfig（新增函数） | 把「分辨率 + 宽高比」映射为对应字段：nano_banana → `{imageConfig:{aspectRatio, imageSize}}`；OpenAI 系 → `{size:'WxH'}`；auto → `{size:'auto', imageConfig:null}` |
+| `app.js` _IMAGE_SIZE_MAP（新增常量） | 1K/2K/4K × 5 种宽高比的 WxH 映射表（全部 16 的倍数，满足 gpt-image-2 约束）|
+| `app.js` generateImage | 请求体新增 `nano_banana` 分支：`contents + generationConfig`；参考图用 `inline_data`（Gemini 格式）；超时提升到 600s（生图较慢）|
+| `app.js` generateImage 响应解析 | 新增 Gemini 格式解析：`candidates[].content.parts[].inlineData.data` 归一化为 `[{b64_json, mime}]`；mime 从 `inlineData.mimeType` 读 |
+| `app.js` generateImage imgObj | 新增 `resolution`/`aspect` 字段；`size` 字段对 nano_banana 存 imageConfig 的 JSON |
+| `app.js` saveImageProviderFromEditor | 新增「鉴权方式」下拉处理：bearer/api-key/header/跟随模板，覆盖模板默认 authType/authHeader/authPrefix |
+| `app.js` openImageProviderEditor | 回填鉴权方式（与模板默认一致则显示「跟随模板」）|
+| `index.html` 模板 select | 新增 `nano_banana` 选项 |
+| `index.html` provider 编辑器 | 新增「鉴权方式」下拉（跟随模板/Bearer/x-goog-api-key/自定义 Header）|
+| `index.html` 输入区 | 重构为三层：①`.image-config-row`（参考图+分辨率+宽高比+自定义）→ ②`.image-input-row`（提示词+发送）→ ③高级折叠 |
+| `index.html` 尺寸控件 | 旧 `image-size-select`/`image-size-custom` → 新 `image-resolution-select`（auto/1K/2K/4K）+ `image-aspect-select`（auto/1:1/4:3/3:4/16:9/9:16/custom）+ `image-aspect-custom` |
+| `style.css` | 新增 `.image-config-row` 样式（flex + wrap + margin-bottom:8px）|
+
+**WxH 映射表**（16 的倍数，满足 gpt-image-2 约束）：
+| 分辨率 | 1:1 | 4:3 | 3:4 | 16:9 | 9:16 |
+|---|---|---|---|---|---|
+| 1K | 1024x1024 | 1024x768 | 768x1024 | 1792x1024 | 1024x1792 |
+| 2K | 2048x2048 | 2048x1536 | 1536x2048 | 2048x1152 | 1152x2048 |
+| 4K | 3072x3072 | 3840x2880 | 2880x3840 | 3840x2160 | 2160x3840 |
+
+**Nano Banana 请求体格式**：
+```json
+{
+  "model": "gemini-2.5-flash-image",
+  "contents": [{"parts": [{"text": "prompt"}]}],
+  "generationConfig": {
+    "responseModalities": ["IMAGE"],
+    "imageConfig": {"aspectRatio": "16:9", "imageSize": "2K"}
+  }
+}
+```
+
+**鉴权方式说明**：
+- 跟随模板：nano_banana 默认 `x-goog-api-key`，其他默认 `Bearer`
+- Bearer：中转平台（kkaiapi/kkidc/OneAPI）统一用此
+- x-goog-api-key：Google 官方 API
+- 自定义 Header：特殊平台
+
+> 本次改动不含 Capacitor 专属 API，属于通用模板扩展与 UI 重构，**可推主仓库**。sync 后确认 `IMAGE_PROVIDER_TEMPLATES.nano_banana`、`buildImageSizeConfig`、`generateImage` 的 `nano_banana` 分支、Gemini 响应解析段未被覆盖。
+
+### 14. v1.3.0 批次 5 修正：F1 图片存储改用 Filesystem + saveSettings 配额保护 + 参考图按钮始终显示（cache-bust v60 -> v61）
+**背景**：用户反馈两个问题：① 参考图入口不见了；② 两次应用更新后图库和生图 API 数据都没保存。
+
+**根因分析**：
+| 问题 | 根因 |
+|---|---|
+| 参考图入口不见 | `updateImageAdvancedVisibility` 把参考图按钮在 gpt_image 模板（supportsReferenceImage:false）下隐藏了，用户用 gpt-image-2 时按钮消失 |
+| 数据没保存 | **localStorage 配额超限**。base64 图片 1-2MB/张，localStorage 限制 5-10MB，多张图片就超限。`saveSettings` 没有 try/catch，`setItem` 抛 QuotaExceededError 被静默吞掉，导致整个 settings（含 imageProviders）写入失败 |
+| 导入导出兼容 | 导出 `settings` 整体理论兼容，但因 localStorage 就丢了数据，导出也是空的 |
+
+**修复**：
+| 文件 | 改动 |
+|---|---|
+| `app.js` updateImageAdvancedVisibility | 参考图按钮始终显示（不再按 supportsReferenceImage 隐藏），模板不支持时点击会提示 |
+| `app.js` btn-image-ref 点击监听 | 模板不支持参考图时 `showToast('当前接口模板不支持参考图', 'warn')` 并 return |
+| `app.js` writeImageFile（新增函数） | APK 模式把 dataUrl 写入 Filesystem `DATA/chatlite_images/<id>.<ext>`，返回 fileName |
+| `app.js` readImageFile（新增函数） | 从 Filesystem 读取图片文件，返回 dataUrl |
+| `app.js` deleteImageFile（新增函数） | 删除 Filesystem 中的图片文件 |
+| `app.js` getImageDataUrl（新增函数） | 统一获取 dataUrl：内存缓存 → Filesystem → dataUrl 字段（兼容旧数据）|
+| `app.js` generateImage imgObj | APK 模式 fileName 非空时 `dataUrl:null`（只存元数据）；浏览器模式或写入失败仍存 dataUrl |
+| `app.js` renderImageStream | 改为异步加载：APK 模式下 fileName 非空但 dataUrl 为空时先占位，再异步从 Filesystem 读取填充 src |
+| `app.js` deleteImageFromGallery | 删除时同步调用 deleteImageFile 清理 Filesystem 文件 |
+| `app.js` saveImageToDevice | 先用 getImageDataUrl 获取 dataUrl（APK 模式从 Filesystem 读），再写入 Download 目录 |
+| `app.js` saveSettings | 加 try/catch：配额超限时剥离所有图片 dataUrl（保留 fileName 元数据）后重试，并提示用户 |
+| `app.js` migrateImportedImagesToFilesystem（新增函数） | 导入旧备份后把残留 dataUrl 转存 Filesystem，剥离 dataUrl 释放 localStorage 空间 |
+| `app.js` importAllData | 导入完成后调用 migrateImportedImagesToFilesystem |
+| `app.js` init | 启动时调用 migrateImportedImagesToFilesystem（迁移旧版本残留 dataUrl）|
+
+**存储架构变更**：
+| 项 | 旧方案 | 新方案 |
+|---|---|---|
+| 图片 dataUrl | 存在 settings.images[].dataUrl（localStorage） | APK 模式存 Filesystem `DATA/chatlite_images/<id>.<ext>`，settings.images 只存 fileName |
+| settings.images | 含完整 base64（撑爆 localStorage） | 只存元数据 + fileName（体积小） |
+| 浏览器模式 | 存 dataUrl | 仍存 dataUrl（无 Filesystem） |
+| 兼容旧数据 | - | getImageDataUrl 优先读 img.dataUrl，无则从 fileName 读 Filesystem；启动/导入时自动迁移 |
+
+**配额超限保护链**：
+1. 正常路径：图片存 Filesystem，settings 不含 dataUrl → localStorage 体积小
+2. 异常路径（浏览器模式/写入失败）：settings 含 dataUrl → saveSettings 配额超限 → 剥离所有 dataUrl 重试 → 仍失败则提示用户导出备份
+3. 迁移路径：启动/导入时自动把残留 dataUrl 转存 Filesystem
+
+> 本次改动**含 Capacitor 专属代码**（Filesystem 读写图片文件），**不推主仓库**；浏览器模式的 dataUrl 直存逻辑可推。sync 后确认 writeImageFile/readImageFile/deleteImageFile/getImageDataUrl/migrateImportedImagesToFilesystem 函数及 saveSettings 的 try/catch 段未被覆盖。
+
+### 15. v1.3.0 批次 5 修正：F1 gpt_image 模板支持参考图（/v1/images/edits 端点）（cache-bust v61 -> v62）
+**背景**：用户确证 GPT-image-2 支持**图像输入和输出**，提供专门的图像编辑接口 `v1/images/edits`（multipart/form-data），可上传参考图做图生图。原 gpt_image 模板误把 `supportsReferenceImage` 设为 false，且只用 `/v1/images/generations` 端点不支持图生图。
+
+**修复**：
+| 文件 | 改动 |
+|---|---|
+| `app.js` IMAGE_PROVIDER_TEMPLATES.gpt_image | `supportsReferenceImage: true`；`supportsBatch: false, maxBatch: 1`（edits 端点只支持 n=1）；新增 `editsPath: '/v1/images/edits'` 字段 |
+| `app.js` normalizeImageProvider | 保留 `editsPath` 字段（gpt_image 图生图专用端点）|
+| `app.js` generateImage gpt_image 分支 | 拆分两路径：有参考图走 `_useEdits:true` + FormData；无参考图走原 generations + JSON |
+| `app.js` buildImageRequestPayload | 支持 `_useEdits` 标记：用 editsPath 端点 + 构建 multipart/form-data（FormData），不设 Content-Type 让浏览器自动加 boundary；参考图 dataUrl → Blob 传入 `image` 字段 |
+| `app.js` base64ToBytes（新增函数） | base64 字符串 → Uint8Array，用于构建 Blob |
+| `app.js` generateImage fetch 调用 | `body` 判断：FormData 时直接传 payload，否则 JSON.stringify |
+| `app.js` initImageView | 模板 select change 监听：新建时自动填充推荐默认模型（gpt_image→gpt-image-2，nano_banana→gemini-2.5-flash-image 等）|
+
+**gpt_image 两路径对比**：
+| 路径 | 端点 | Content-Type | body | 参考图 |
+|---|---|---|---|---|
+| 文生图 | `/v1/images/generations` | application/json | JSON | 不传 |
+| 图生图 | `/v1/images/edits` | multipart/form-data（自动）| FormData | `image` 字段传 Blob |
+
+**edits 端点请求体**（multipart/form-data）：
+```
+model: gpt-image-2
+prompt: 修改要求
+size: 1024x1024（可选）
+quality: auto（可选）
+output_format: png
+n: 1
+image: <reference.png Blob>
+```
+
+> 本次改动不含 Capacitor 专属 API，属于通用模板扩展，**可推主仓库**。sync 后确认 `IMAGE_PROVIDER_TEMPLATES.gpt_image.editsPath`、`buildImageRequestPayload` 的 `_useEdits` 分支、`base64ToBytes` 函数未被覆盖。
+
+### 16. v1.3.0 批次 5 扩展：F1 多张参考图（最多16张）+ 后台/切出不报错 + 顺序展示（cache-bust v62 -> v63）
+**背景**：用户提出三个问题：① 一次只能附一张参考图，能否多张；② 多图顺序需清楚；③ 切出页面/app 后台时能否正常接收不报错。
+
+**研究依据**：
+- OpenAI gpt-image-2 `/v1/images/edits` 端点支持最多 16 张参考图，做法是重复同名字段 `image` 或 `image[]`
+- 多图顺序即 FormData append 顺序，模型按顺序参考
+- nano_banana Gemini `contents[].parts[]` 原生支持多图 inline_data
+- openai_compat 通义万相 nested `content[]` 也支持多 `image` 项
+- Android WebView 切后台时 JS 暂停，fetch 挂起但不会报错，切回前台后继续等待
+
+**修复**：
+| 文件 | 改动 |
+|---|---|
+| `index.html` image-ref-file | 加 `multiple` 属性，支持多选 |
+| `app.js` refFileInput change 监听 | 改为多选：files 数组遍历，最多 16 张，存到 `state._imageRefDataUrls` 数组（每项含 dataUrl/name/size）|
+| `app.js` renderImageRefPreview（新增函数）| 多图预览渲染：每张缩略图 + 顺序编号（1-16）+ 单张删除按钮 + 「清空」按钮 |
+| `app.js` bindRefClear（新增函数）| 绑定「清空」按钮事件 |
+| `app.js` generateImage refDataUrls | 改用数组：`state._imageRefDataUrls` 优先，兼容旧 `state._imageRefDataUrl` |
+| `app.js` generateImage nano_banana 分支 | 多图作为多个 `inline_data` part（Gemini 原生支持多图 parts）|
+| `app.js` generateImage openai_compat 分支 | 多图作为多个 `{type:'image', image:base64}` content 项 |
+| `app.js` generateImage gpt_image 分支 | 多图通过 `_refDataUrls` 数组传给 buildImageRequestPayload |
+| `app.js` buildImageRequestPayload | 多图 FormData：遍历 `_refDataUrls` 数组，每张 dataUrl → Blob → 重复 append `image` 字段（文件名含序号 reference_1.png/reference_2.png...）|
+| `app.js` 用户消息显示 | `[N 张参考图]` 替代原 `[参考图]` |
+| `app.js` generateImage 后台适配 | 加 `state._imageGenerating = true` 标记；gpt_image 图生图/nano_banana 超时提升到 600s |
+| `app.js` initImageView appStateChange 监听 | 切回前台时若 `_imageGenerating` 为 true，更新状态指示器并提示「生图请求进行中，请稍候...」|
+| `app.js` generateImage finally | 清除 `state._imageGenerating` 标记 |
+| `style.css` .ref-thumb-item | 多图缩略图样式：36×36 + 顺序编号（蓝色圆形）+ 单张删除按钮（红色圆形）|
+
+**多图顺序保证**：
+- FormData append 顺序 = 用户选择顺序 = 模型参考顺序
+- 缩略图展示顺序 = 数组顺序 = 发送顺序
+- 文件名含序号：reference_1.png, reference_2.png...（便于调试）
+
+**后台/切出行为**：
+| 场景 | 行为 |
+|---|---|
+| 请求进行中切后台 | JS 暂停，fetch 挂起（不报错），超时定时器也暂停 |
+| 切回前台 | JS 恢复，fetch 继续等待或已完成，状态指示器更新，toast 提示 |
+| 后台超时 | 切回前台后定时器恢复，若已超时则 abort，提示「请求超时」|
+| 后台完成 | 切回前台后正常处理响应（图片存 Filesystem + 渲染）|
+
+**注意**：Android 系统可能在后台一段时间后杀死 app 进程（特别是内存不足时），此时请求会中断。这是系统级行为，无法完全避免。建议长时间生图时保持 app 在前台。
+
+> 本次改动**含 Capacitor 专属代码**（App.addListener appStateChange），**不推主仓库**；多图 FormData 构建逻辑可推。sync 后确认 `renderImageRefPreview`/`bindRefClear`/`state._imageRefDataUrls`/`buildImageRequestPayload` 多图循环段未被覆盖。
+
+### 17. v1.3.0 批次 5 重构：settings 存储基底 localStorage -> IndexedDB（cache-bust v64 -> v65）
+
+**背景**：用户反馈"重启后图集没了，原有图集也没被保存"。批次5第14条虽已将图片 base64 分离到 Filesystem，但 settings 元数据（imageProviders / images 元数据 / modelPrompts / groupCollapse）仍写 localStorage，配额仅 5-10MB，元数据累积或残留 dataUrl 仍会触发 QuotaExceededError，且 fallback 路径会循环触发写入失败。导入路径直接 localStorage.setItem 绕过 fallback，更易失败。
+
+**根因**：localStorage 配额硬上限（Android WebView 通常 ~5MB/origin），无法扩容；IndexedDB 配额通常数百 MB 起，按域名可达 GB 级，无 QuotaExceededError 风险。conversations/providers 早已用 IndexedDB（STORAGE_KEY），settings 仍走 localStorage 是历史遗留。
+
+**修复**：
+| 位置 | 改动 |
+|---|---|
+| pp.js 顶部常量 | 新增 `SETTINGS_IDB_KEY = 'chatlite_settings_v2'`（与旧 `SETTINGS_KEY` 区分，避免双写）|
+| pp.js `let settings = loadSettings()` | 改为 `let settings = defaultSettings()`（同步默认值，启动 await 后覆盖）+ `let _settingsLoaded = false` 标记 |
+| pp.js `loadSettings()` 拆分 | 拆为 `defaultSettings()`（同步返回默认值）+ `migrateSettings(s)`（字段迁移+归一化）+ `async initSettings()`（从 IDB 加载或从 localStorage 迁移）|
+| pp.js `initSettings()` 新函数 | 1) 先从 IDB 读 `SETTINGS_IDB_KEY`；2) IDB 无数据时从旧 localStorage `SETTINGS_KEY` 读，写 IDB 成功后 `localStorage.removeItem(SETTINGS_KEY)` 清理；3) 都没有则用默认值 |
+| pp.js `saveSettings()` | 改为异步写 IDB（`idbPut(SETTINGS_IDB_KEY, settings)`），不再走 localStorage.setItem；防御性剥离残留图片 dataUrl（fileName 非空时 dataUrl=null）；写入失败仅 toast 提示，不影响内存数据 |
+| pp.js `init()` | 在 `await loadData()` 后插入 `await initSettings()`，确保 settings 加载完成后再渲染 UI |
+| pp.js `importAllData` 覆盖/合并两处 | 删除 `localStorage.setItem(SETTINGS_KEY, ...)`，改用 `saveSettings()` 走 IDB |
+| pp.js `migrateOldApiKey` | 同上，删除直接 localStorage.setItem，改用 saveSettings |
+
+**迁移行为**：
+| 启动场景 | 行为 |
+|---|---|
+| 老用户首次升级（localStorage 有数据）| 读 localStorage -> 写 IDB -> 清掉 localStorage，控制台输出迁移日志 |
+| 新用户首次启动 | IDB 无数据，localStorage 无数据 -> 用默认值 |
+| 老用户二次启动 | 直接从 IDB 读，localStorage 已清空，跳过迁移 |
+| 迁移失败（极少见）| 保留 localStorage，控制台 warn，下次启动重试 |
+
+**风险与缓解**：
+- `let settings = loadSettings()` 原本是同步初始化 -> 现改为 `defaultSettings()` 同步返回默认值，启动 `await initSettings()` 覆盖；启动前若读 settings 字段会得到默认值（仅启动极早期阶段）
+- `saveSettings()` 异步 -> 内存 settings 同步更新，IDB 写入异步不阻塞 UI，读取始终从内存读，不受影响
+- 旧的 localStorage `SETTINGS_KEY` 保留作为迁移源（仅启动时一次性读取），迁移成功后清理
+
+**回滚**：若需回滚到 localStorage，恢复 loadSettings 同步读 localStorage 的版本，删除 initSettings 调用，saveSettings 改回 localStorage.setItem 即可。IDB 中的数据不会自动迁移回 localStorage（需手动）。

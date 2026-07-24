@@ -29,3 +29,6 @@ npm-debug.log*
 # Backup files
 *.bak
 *.tmp
+
+# APK build artifacts (release/debug binaries - tracked separately as release assets)
+*.apk

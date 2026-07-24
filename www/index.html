@@ -1,11 +1,11 @@
-﻿<!DOCTYPE html>
+<!DOCTYPE html>
 <html lang="zh-CN">
 <head>
 <meta charset="UTF-8">
   <link rel="icon" href="favicon.png" type="image/png">
 <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0">
 <title>chat-lite</title>
-<link rel="stylesheet" href="style.css?v=57">
+<link rel="stylesheet" href="style.css?v=65">
 <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github-dark.min.css">
   <meta name="theme-color" content="#7c3aed">
   <link rel="manifest" href="manifest.json">
@@ -31,6 +31,9 @@
         <input type="checkbox" id="theme-checkbox" checked>
         <span class="theme-label">浅色</span>
       </label>
+      <button id="btn-open-image-view" class="btn-image-entry" title="生图">
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="18" height="18" rx="2"/><circle cx="8.5" cy="8.5" r="1.5"/><polyline points="21 15 16 10 5 21"/></svg>
+      </button>
     </div>
   </aside>
 
@@ -87,6 +90,95 @@
       </div>
     </div>
   </main>
+
+  <!-- F1: 生图界面 -->
+  <section id="image-view" class="image-view" style="display:none">
+    <div class="image-bar">
+      <button id="btn-image-back" class="btn btn-icon" title="返回">
+        <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="19" y1="12" x2="5" y2="12"/><polyline points="12 19 5 12 12 5"/></svg>
+      </button>
+      <select id="image-provider-select" class="model-select" title="切换生图接口"></select>
+      <input id="image-model-input" class="image-model-input" type="text" placeholder="模型名（如 dall-e-3）">
+      <span id="image-status-indicator" class="image-status-indicator"></span>
+    </div>
+    <div id="image-stream" class="image-stream">
+      <div class="image-empty" id="image-empty">
+        <svg width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" opacity="0.4"><rect x="3" y="3" width="18" height="18" rx="2"/><circle cx="8.5" cy="8.5" r="1.5"/><polyline points="21 15 16 10 5 21"/></svg>
+        <h2>生图</h2>
+        <p>输入提示词，生成图片</p>
+      </div>
+    </div>
+    <div class="image-input-area">
+      <!-- 参考图预览（图生图时显示） -->
+      <div class="image-ref-preview" id="image-ref-preview">
+        <img id="image-ref-thumb" alt="参考图">
+        <span class="ref-info" id="image-ref-info">参考图</span>
+        <button class="ref-clear" id="image-ref-clear" title="移除参考图">×</button>
+      </div>
+      <!-- 第一层：设置框（分辨率 + 宽高比 + 参考图） -->
+      <div class="image-config-row" id="image-config-row">
+        <button id="btn-image-ref" class="image-ref-btn" title="参考图（图生图）">
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21.44 11.05l-9.19 9.19a6 6 0 0 1-8.49-8.49l9.19-9.19a4 4 0 0 1 5.66 5.66l-9.2 9.19a2 2 0 0 1-2.83-2.83l8.49-8.48"/></svg>
+        </button>
+        <input type="file" id="image-ref-file" accept="image/*" multiple style="display:none">
+        <select id="image-resolution-select" class="image-size-select" title="分辨率">
+          <option value="auto">自动</option>
+          <option value="1K">1K</option>
+          <option value="2K" selected>2K</option>
+          <option value="4K">4K</option>
+        </select>
+        <select id="image-aspect-select" class="image-size-select" title="宽高比">
+          <option value="auto" selected>自由</option>
+          <option value="1:1">1:1</option>
+          <option value="4:3">4:3</option>
+          <option value="3:4">3:4</option>
+          <option value="16:9">16:9</option>
+          <option value="9:16">9:16</option>
+          <option value="custom">自定义</option>
+        </select>
+        <input type="text" id="image-aspect-custom" class="image-size-select" placeholder="如 1024x1024 或 16:10" style="display:none;max-width:140px">
+      </div>
+      <!-- 第二层：提示词输入框 -->
+      <div class="image-input-row">
+        <div id="image-prompt-input" class="image-prompt-input" contenteditable="true" data-placeholder="输入提示词，Shift+Enter 换行..." role="textbox"></div>
+        <button id="btn-image-send" class="image-send-btn" title="生成" disabled>
+          <svg width="20" height="20" viewBox="0 0 24 24" fill="currentColor"><path d="M2.01 21L23 12 2.01 3 2 10l15 2-15 2z"/></svg>
+        </button>
+      </div>
+      <!-- 第三层：高级 -->
+      <button class="image-advanced-toggle" id="image-advanced-toggle">
+        <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="9 18 15 12 9 6"/></svg>
+        高级
+      </button>
+      <div class="image-advanced-body" id="image-advanced-body">
+        <div class="image-advanced-row" id="image-quality-row" style="display:none">
+          <span style="min-width:80px">质量</span>
+          <select id="image-quality-select" class="image-size-select">
+            <option value="auto" selected>auto（自动）</option>
+            <option value="low">low（草稿）</option>
+            <option value="medium">medium（中等）</option>
+            <option value="high">high（高清）</option>
+          </select>
+        </div>
+        <div class="image-advanced-row" id="image-negative-prompt-row">
+          <span style="min-width:80px">负面提示词</span>
+          <input type="text" id="image-negative-prompt" placeholder="不希望出现的元素">
+        </div>
+        <div class="image-advanced-row">
+          <span style="min-width:80px">生成数量</span>
+          <input type="number" id="image-batch-n" min="1" max="4" value="1">
+          <label id="image-prompt-extend-label" style="display:flex;align-items:center;gap:4px;margin-left:8px;cursor:pointer">
+            <input type="checkbox" id="image-prompt-extend" checked>
+            <span>提示词扩展</span>
+          </label>
+          <label id="image-watermark-label" style="display:flex;align-items:center;gap:4px;margin-left:8px;cursor:pointer">
+            <input type="checkbox" id="image-watermark">
+            <span>水印</span>
+          </label>
+        </div>
+      </div>
+    </div>
+  </section>
 
   <!-- Branch drawer -->
   <div id="branch-drawer" class="branch-drawer" style="display:none">
@@ -362,6 +454,48 @@
           </div>
         </details>
 
+        <!-- F1: ===== 生图 API ===== -->
+        <details class="setting-group setting-group-collapsible" data-group-key="image-provider">
+          <summary class="setting-group-summary">生图 API <span class="setting-scope">全局·所有会话可用</span></summary>
+          <div class="setting-group-body">
+          <span class="setting-hint">独立于聊天接口的生图 API 配置。OpenAI 兼容平台（kkaiapi 等）使用 /v1/images/generations 端点。</span>
+          <button id="btn-add-image-provider" class="btn btn-small" style="margin-top:8px">+ 添加生图接口</button>
+          <div id="image-provider-list" class="provider-list" style="margin-top:8px"></div>
+          <div id="image-provider-editor" class="image-provider-editor" style="display:none">
+            <label class="card-field"><span>接口模板</span>
+              <select id="img-provider-template-select" class="card-input">
+                <option value="gpt_image" selected>GPT Image（gpt-image-2/1.5/1）</option>
+                <option value="nano_banana">Nano Banana（Gemini 2.5/3 Flash Image）</option>
+                <option value="openai_compat">OpenAI 兼容-通义万相 nested（kkaiapi/OneAPI）</option>
+                <option value="openai_standard">OpenAI 标准（DALL-E）</option>
+                <option value="custom">自定义</option>
+              </select>
+            </label>
+            <label class="card-field"><span>接口名称</span><input id="img-provider-name-input" class="card-input" placeholder="如：kkaiapi 生图"></label>
+            <label class="card-field"><span>API 地址</span><input id="img-provider-url-input" class="card-input" placeholder="https://api.kkaiapi.com"></label>
+            <label class="card-field"><span>Endpoint 路径</span><input id="img-provider-endpoint-input" class="card-input" placeholder="/v1/images/generations"></label>
+            <label class="card-field"><span>API 密钥</span><input id="img-provider-key-input" class="card-input" type="password" placeholder="sk-..."></label>
+            <label class="card-field"><span>鉴权方式</span>
+              <select id="img-provider-auth-select" class="card-input" title="默认跟随模板，中转平台通常选 Bearer，Google 官方选 x-goog-api-key">
+                <option value="">跟随模板</option>
+                <option value="bearer">Authorization: Bearer</option>
+                <option value="api-key">x-goog-api-key（Google 原生）</option>
+                <option value="header">自定义 Header</option>
+              </select>
+            </label>
+            <label class="card-field"><span>默认模型</span><input id="img-provider-default-model-input" class="card-input" placeholder="如 gpt-image-2 / gemini-2.5-flash-image"></label>
+            <div class="provider-editor-actions">
+              <button id="btn-save-image-provider" class="btn btn-small btn-primary">保存</button>
+              <button id="btn-close-image-provider-editor" class="btn btn-small" style="background:var(--bg3);color:var(--text)">取消</button>
+            </div>
+          </div>
+          <div class="setting-divider"></div>
+          <span class="setting-hint">图库统计：<span id="image-gallery-count">0</span> 张</span>
+          <button id="btn-clear-image-gallery" class="btn btn-small" style="background:var(--bg3);color:var(--text);margin-left:8px">清空图库</button>
+          <span class="setting-hint" style="display:block;margin-top:4px">清空仅删除 settings.images 中的全局图库，不影响会话背景图</span>
+          </div>
+        </details>
+
         <!-- ===== 数据管理 ===== -->
         <details class="setting-group setting-group-collapsible" data-group-key="data" open>
           <summary class="setting-group-summary">数据管理 <span class="setting-scope">全量导出/导入</span></summary>
@@ -393,6 +527,6 @@
 
 <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/marked/12.0.1/marked.min.js"></script>
-<script src="app.js?v=57"></script>
+<script src="app.js?v=65"></script>
 </body>
 </html>

@@ -97,7 +97,15 @@ function idbGet(key) {
     });
   });
 }
-let settings = loadSettings();
+
+// ===== settings 存储基底重构：localStorage → IndexedDB =====
+// 旧基底 localStorage 配额仅 5-10MB，图库元数据 + imageProviders + modelPrompts 累积会撑爆
+// IndexedDB 配额通常数百 MB 起步，按域名可达 GB 级，且无 QuotaExceededError 风险
+// 启动时 init() 中 await initSettings() 从 IDB 加载或从 localStorage 迁移
+const SETTINGS_IDB_KEY = 'chatlite_settings_v2';  // 与旧 localStorage 的 SETTINGS_KEY 区分，避免双写
+// 同步初始化默认值，init 中 await initSettings() 会从 IDB 覆盖
+let settings = defaultSettings();
+let _settingsLoaded = false;  // 标记 settings 是否已从 IDB 加载完成
 let isLongPress = false;
 
 // ===== Helpers =====
@@ -199,6 +207,106 @@ const PROVIDER_TEMPLATES = {
 
 function getProviderTemplate(template) {
   return PROVIDER_TEMPLATES[template] || PROVIDER_TEMPLATES.openai;
+}
+
+// ===== F1: 生图 Provider 模板（独立于聊天 PROVIDER_TEMPLATES）=====
+const IMAGE_PROVIDER_TEMPLATES = {
+  // Google Nano Banana / Gemini Image（gemini-2.5-flash-image / gemini-3-pro-image-preview）— generateContent 格式
+  nano_banana: {
+    endpointPath: '/v1beta/models/{model}:generateContent',
+    authType: 'api-key',           // 默认 x-goog-api-key（中转平台可在 provider 配置改回 Bearer）
+    authHeader: 'x-goog-api-key',
+    authPrefix: '',
+    requestFormat: 'gemini_image', // contents[].parts[].text + generationConfig.imageConfig
+    responseFormat: 'gemini',      // candidates[0].content.parts[].inlineData.data
+    features: { supportsReferenceImage: true, supportsNegativePrompt: false, supportsCustomSize: false, supportsBatch: false, maxBatch: 1, supportsResolution: true, supportsAspectRatio: true }
+  },
+  // OpenAI 新一代 GPT Image 模型（gpt-image-2 / gpt-image-1.5 / gpt-image-1）— flat 格式 + quality/output_format
+  // 文生图走 /v1/images/generations；图生图走 /v1/images/edits（multipart/form-data）
+  gpt_image: {
+    endpointPath: '/v1/images/generations',
+    editsPath: '/v1/images/edits',     // 图生图专用端点
+    authType: 'bearer',
+    authHeader: 'Authorization',
+    authPrefix: 'Bearer ',
+    requestFormat: 'gpt_image',    // flat 格式 + quality/output_format/moderation 参数
+    responseFormat: 'b64_only',    // gpt-image 系列只返回 b64_json（无 url）
+    features: { supportsReferenceImage: true, supportsNegativePrompt: false, supportsCustomSize: true, supportsBatch: false, maxBatch: 1, supportsQuality: true, supportsResolution: true, supportsAspectRatio: true }
+  },
+  // OpenAI DALL-E 兼容格式（kkaiapi 等三方平台，支持图生图/负面提示词/批量）
+  openai_compat: {
+    endpointPath: '/v1/images/generations',
+    authType: 'bearer',
+    authHeader: 'Authorization',
+    authPrefix: 'Bearer ',
+    requestFormat: 'nested',       // 'nested' = input.messages[].content[].text; 'flat' = prompt
+    responseFormat: 'url_or_b64',  // data[0].url 或 data[0].b64_json
+    features: { supportsReferenceImage: true, supportsNegativePrompt: true, supportsCustomSize: true, supportsBatch: true, maxBatch: 4, supportsResolution: true, supportsAspectRatio: true }
+  },
+  // 标准 OpenAI DALL-E 格式（无图生图/无负面提示词，单张生成）
+  openai_standard: {
+    endpointPath: '/v1/images/generations',
+    authType: 'bearer',
+    authHeader: 'Authorization',
+    authPrefix: 'Bearer ',
+    requestFormat: 'flat',
+    responseFormat: 'url_or_b64',
+    features: { supportsReferenceImage: false, supportsNegativePrompt: false, supportsCustomSize: true, supportsBatch: true, maxBatch: 1, supportsResolution: true, supportsAspectRatio: true }
+  },
+  custom: {
+    endpointPath: '/v1/images/generations',
+    authType: 'bearer',
+    authHeader: 'Authorization',
+    authPrefix: 'Bearer ',
+    requestFormat: 'nested',
+    responseFormat: 'url_or_b64',
+    features: { supportsReferenceImage: true, supportsNegativePrompt: true, supportsCustomSize: true, supportsBatch: true, maxBatch: 4, supportsResolution: true, supportsAspectRatio: true }
+  }
+};
+
+function getImageProviderTemplate(template) {
+  return IMAGE_PROVIDER_TEMPLATES[template] || IMAGE_PROVIDER_TEMPLATES.openai_compat;
+}
+
+function normalizeImageProvider(p) {
+  if (!p || typeof p !== 'object') p = {};
+  var template = getImageProviderTemplate(p.template);
+  var baseUrl = normalizeBaseUrl(p.baseUrl);
+  var endpointPath = p.endpointPath || template.endpointPath;
+  var result = {
+    id: p.id || uid(),
+    name: p.name || '未命名生图接口',
+    template: p.template || 'openai_compat',
+    baseUrl: baseUrl,
+    endpointPath: endpointPath,
+    apiKey: p.apiKey || '',
+    authType: p.authType || template.authType,
+    authHeader: p.authHeader || template.authHeader,
+    authPrefix: p.authPrefix !== undefined ? p.authPrefix : template.authPrefix,
+    defaultModel: p.defaultModel || 'dall-e-3',
+    features: Object.assign({}, template.features, p.features || {}),
+    createdAt: p.createdAt || Date.now()
+  };
+  // 保留 editsPath（gpt_image 图生图专用端点）
+  if (p.editsPath || template.editsPath) {
+    result.editsPath = p.editsPath || template.editsPath;
+  }
+  return result;
+}
+
+function getImageProvider(id) {
+  var list = settings.imageProviders || [];
+  var raw = list.find(function(p) { return p.id === id; }) || null;
+  return raw ? normalizeImageProvider(raw) : null;
+}
+
+function getCurrentImageProvider() {
+  return getImageProvider(settings.imageProviderId);
+}
+
+// 生图 provider 列表持久化（写入 localStorage 的 settings.imageProviders）
+function saveImageProviders() {
+  saveSettings();
 }
 
 function normalizeProvider(p) {
@@ -349,7 +457,7 @@ function migrateOldApiKey() {
   }
   // Clear old key
   delete settings.apiKey;
-  localStorage.setItem(SETTINGS_KEY, JSON.stringify(settings));
+  saveSettings();  // 走 IDB 持久化
   console.log('Migrated old API key to Provider system');
 }
 
@@ -647,6 +755,1097 @@ function deleteProvider(idx) {
 }
 
 
+// ===== F1: 生图 Provider 管理 UI（复用聊天 provider 列表模式）=====
+function renderImageProviderList() {
+  var container = document.getElementById('image-provider-list');
+  if (!container) return;
+  var editor = document.getElementById('image-provider-editor');
+  if (editor && container.contains(editor)) {
+    container.parentNode.insertBefore(editor, container.nextSibling);
+  }
+  var list = settings.imageProviders || [];
+  if (list.length === 0) {
+    container.innerHTML = '<div class="provider-empty">暂无生图接口，点击上方按钮添加</div>';
+    return;
+  }
+  container.innerHTML = list.map(function(p, i) {
+    var templateLabel = p.template ? '[' + p.template.toUpperCase() + '] ' : '';
+    return '<details class="provider-group" data-idx="' + i + '">' +
+      '<summary class="provider-summary">' +
+        '<span class="provider-name">' + escapeHtml(templateLabel + p.name) + '</span>' +
+        '<div class="provider-actions">' +
+          '<button class="btn btn-small image-provider-edit" data-idx="' + i + '">编辑</button>' +
+          '<button class="btn btn-small image-provider-delete" data-idx="' + i + '" style="background:var(--bg3);color:var(--text)">删除</button>' +
+        '</div>' +
+      '</summary>' +
+      '<div class="provider-detail">' +
+        '<span class="provider-url">' + escapeHtml(p.baseUrl) + '</span>' +
+        '<span class="provider-endpoint">' + escapeHtml(p.endpointPath || '') + '</span>' +
+        '<span class="provider-models">默认模型: ' + escapeHtml(p.defaultModel || '-') + '</span>' +
+      '</div>' +
+    '</details>';
+  }).join('');
+  container.querySelectorAll('.image-provider-edit').forEach(function(btn) {
+    btn.addEventListener('click', function(e) { e.stopPropagation(); openImageProviderEditor(parseInt(btn.dataset.idx)); });
+  });
+  container.querySelectorAll('.image-provider-delete').forEach(function(btn) {
+    btn.addEventListener('click', function(e) { e.stopPropagation(); deleteImageProvider(parseInt(btn.dataset.idx)); });
+  });
+}
+
+function openImageProviderEditor(idx) {
+  var editor = document.getElementById('image-provider-editor');
+  if (!editor) return;
+  var p = (idx !== undefined && idx >= 0) ? normalizeImageProvider((settings.imageProviders || [])[idx]) : null;
+  editor.style.display = 'block';
+  editor.dataset.editIdx = idx !== undefined ? idx : '';
+  document.getElementById('img-provider-template-select').value = p ? p.template : 'openai_compat';
+  document.getElementById('img-provider-name-input').value = p ? p.name : '';
+  document.getElementById('img-provider-url-input').value = p ? p.baseUrl : '';
+  document.getElementById('img-provider-endpoint-input').value = p ? (p.endpointPath || '') : '';
+  document.getElementById('img-provider-key-input').value = p ? p.apiKey : '';
+  document.getElementById('img-provider-default-model-input').value = p ? (p.defaultModel || '') : '';
+  // 鉴权方式回填：与模板默认一致或未设则「跟随模板」
+  var authSel = document.getElementById('img-provider-auth-select');
+  if (authSel) {
+    var authVal = '';
+    if (p && p.authType) {
+      var tmpl = getImageProviderTemplate(p.template);
+      if (p.authType !== tmpl.authType || (p.authHeader && p.authHeader !== tmpl.authHeader)) {
+        authVal = p.authType;
+      }
+    }
+    authSel.value = authVal;
+  }
+  // A4: 编辑器紧邻被编辑项
+  var container = document.getElementById('image-provider-list');
+  if (idx !== undefined && idx >= 0) {
+    var group = container.querySelector('.provider-group[data-idx="' + idx + '"]');
+    if (group) {
+      group.appendChild(editor);
+      group.open = true;
+    }
+  } else {
+    container.parentNode.insertBefore(editor, container);
+  }
+}
+
+function closeImageProviderEditor() {
+  var editor = document.getElementById('image-provider-editor');
+  if (!editor) return;
+  editor.style.display = 'none';
+  var container = document.getElementById('image-provider-list');
+  if (container && container.parentNode) {
+    container.parentNode.insertBefore(editor, container.nextSibling);
+  }
+}
+
+function saveImageProviderFromEditor() {
+  var editor = document.getElementById('image-provider-editor');
+  if (!editor) return;
+  var template = document.getElementById('img-provider-template-select').value;
+  var name = document.getElementById('img-provider-name-input').value.trim();
+  var baseUrl = normalizeBaseUrl(document.getElementById('img-provider-url-input').value);
+  var endpointPath = document.getElementById('img-provider-endpoint-input').value.trim();
+  var apiKey = document.getElementById('img-provider-key-input').value.trim();
+  var defaultModel = document.getElementById('img-provider-default-model-input').value.trim();
+  if (!name || !baseUrl || !apiKey) {
+    showToast('请填写接口名称、地址和密钥', 'warn');
+    return;
+  }
+  if (!settings.imageProviders) settings.imageProviders = [];
+  // 鉴权方式覆盖（空=跟随模板）
+  var authSelect = document.getElementById('img-provider-auth-select');
+  var authOverride = authSelect ? authSelect.value : '';
+  var providerData = {
+    template: template,
+    name: name,
+    baseUrl: baseUrl,
+    endpointPath: endpointPath,
+    apiKey: apiKey,
+    defaultModel: defaultModel || 'dall-e-3'
+  };
+  if (authOverride === 'bearer') {
+    providerData.authType = 'bearer';
+    providerData.authHeader = 'Authorization';
+    providerData.authPrefix = 'Bearer ';
+  } else if (authOverride === 'api-key') {
+    providerData.authType = 'api-key';
+    providerData.authHeader = 'x-goog-api-key';
+    providerData.authPrefix = '';
+  } else if (authOverride === 'header') {
+    providerData.authType = 'header';
+    // authHeader/authPrefix 跟随模板
+  }
+  // authOverride === '' 时不设 authType，normalizeImageProvider 用模板默认
+  var editIdx = editor.dataset.editIdx;
+  if (editIdx !== '' && editIdx !== undefined && parseInt(editIdx) >= 0) {
+    providerData.id = settings.imageProviders[parseInt(editIdx)].id;
+    settings.imageProviders[parseInt(editIdx)] = normalizeImageProvider(providerData);
+  } else {
+    var newProvider = normalizeImageProvider(providerData);
+    settings.imageProviders.push(newProvider);
+    // 若首次添加，自动选中
+    if (!settings.imageProviderId) settings.imageProviderId = newProvider.id;
+  }
+  saveImageProviders();
+  renderImageProviderList();
+  renderImageProviderSelect();
+  updateImageGalleryCount();
+  closeImageProviderEditor();
+}
+
+function deleteImageProvider(idx) {
+  if (!settings.imageProviders || !settings.imageProviders[idx]) return;
+  if (!confirm('确定删除生图接口「' + settings.imageProviders[idx].name + '」？')) return;
+  var deletedId = settings.imageProviders[idx].id;
+  settings.imageProviders.splice(idx, 1);
+  if (settings.imageProviderId === deletedId) {
+    settings.imageProviderId = settings.imageProviders.length > 0 ? settings.imageProviders[0].id : null;
+  }
+  saveImageProviders();
+  renderImageProviderList();
+  renderImageProviderSelect();
+  closeImageProviderEditor();
+}
+
+// F1: 生图界面顶部接口选择下拉框
+function renderImageProviderSelect() {
+  var sel = document.getElementById('image-provider-select');
+  if (!sel) return;
+  var list = settings.imageProviders || [];
+  if (list.length === 0) {
+    sel.innerHTML = '<option disabled selected>请先在设置中添加生图接口</option>';
+    return;
+  }
+  sel.innerHTML = list.map(function(p) {
+    return '<option value="' + escapeHtml(p.id) + '">' + escapeHtml(p.name) + '</option>';
+  }).join('');
+  if (settings.imageProviderId) sel.value = settings.imageProviderId;
+  // 同步模型输入框
+  var modelInput = document.getElementById('image-model-input');
+  var current = getCurrentImageProvider();
+  if (modelInput && current) modelInput.value = current.defaultModel || '';
+}
+
+// F1: 更新图库计数显示
+function updateImageGalleryCount() {
+  var el = document.getElementById('image-gallery-count');
+  if (el) el.textContent = String((settings.images || []).length);
+}
+
+// F1: 切换生图界面显示
+function toggleImageView(open) {
+  var imageView = document.getElementById('image-view');
+  if (!imageView) return;
+  state.imageViewOpen = !!open;
+  imageView.style.display = open ? 'flex' : 'none';
+  var main = document.getElementById('main');
+  var sidebarEl = document.getElementById('sidebar');
+  if (open) {
+    if (main) main.style.display = 'none';
+    if (sidebarEl) sidebarEl.classList.add('hidden');
+    renderImageProviderSelect();
+    updateImageGalleryCount();
+    renderImageStream();
+    updateImageAdvancedVisibility();
+  } else {
+    if (main) main.style.display = '';
+  }
+}
+
+// F1: 根据当前生图接口模板，显示/隐藏高级参数中的 quality / 负面提示词 / 参考图等字段
+function updateImageAdvancedVisibility() {
+  var provider = getCurrentImageProvider();
+  var template = provider ? provider.template : 'openai_compat';
+  var features = provider ? provider.features : null;
+  // quality 行：仅 gpt_image 模板显示
+  var qualityRow = document.getElementById('image-quality-row');
+  if (qualityRow) qualityRow.style.display = (template === 'gpt_image') ? '' : 'none';
+  // 分辨率选择：gpt_image 模板隐藏（gpt-image-2 只支持 1024 基础，分辨率无意义）
+  var resSelect = document.getElementById('image-resolution-select');
+  if (resSelect) resSelect.style.display = (template === 'gpt_image') ? 'none' : '';
+  // 负面提示词：模板不支持时隐藏
+  var negRow = document.getElementById('image-negative-prompt-row');
+  if (negRow) negRow.style.display = (features && features.supportsNegativePrompt) ? '' : 'none';
+  // 提示词扩展/水印：仅 openai_compat/custom 显示
+  var promptExtendLabel = document.getElementById('image-prompt-extend-label');
+  if (promptExtendLabel) promptExtendLabel.style.display = (template === 'openai_compat' || template === 'custom') ? '' : 'none';
+  var watermarkLabel = document.getElementById('image-watermark-label');
+  if (watermarkLabel) watermarkLabel.style.display = (template === 'openai_compat' || template === 'custom') ? '' : 'none';
+  // 参考图按钮：始终显示，模板不支持时点击会提示（不再隐藏，避免用户找不到入口）
+  var btnRef = document.getElementById('btn-image-ref');
+  if (btnRef) btnRef.style.display = '';
+  // gpt_image 模板：动态改「自由」option 文本提示用户（gpt-image-2 的 auto 默认返回 1:1，不读提示词宽高）
+  var aspectSel = document.getElementById('image-aspect-select');
+  if (aspectSel && aspectSel.options[0]) {
+    aspectSel.options[0].text = (template === 'gpt_image') ? '自由（默认1:1）' : '自由';
+  }
+}
+
+// F1: 渲染图片流（从 settings.images 全局图库读取，按时间倒序）
+function renderImageStream() {
+  var stream = document.getElementById('image-stream');
+  if (!stream) return;
+  var images = settings.images || [];
+  if (images.length === 0) {
+    stream.innerHTML = '<div class="image-empty" id="image-empty">' +
+      '<svg width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" opacity="0.4"><rect x="3" y="3" width="18" height="18" rx="2"/><circle cx="8.5" cy="8.5" r="1.5"/><polyline points="21 15 16 10 5 21"/></svg>' +
+      '<h2>生图</h2><p>输入提示词，生成图片</p></div>';
+    return;
+  }
+  // 时间倒序展示（最新在最底部，因为渲染时按数组顺序，新图 push 到末尾）
+  var html = '';
+  for (var i = 0; i < images.length; i++) {
+    var img = images[i];
+    // 优先用内存缓存的 dataUrl；APK 模式下 fileName 非空但 dataUrl 为空时先占位，异步加载
+    var imgSrc = img.dataUrl || '';
+    var needAsync = !imgSrc && !!img.fileName;
+    html += '<div class="image-msg user"><div class="img-bubble"><p>' + escapeHtml(img.prompt || '(无提示词)') + '</p></div></div>';
+    html += '<div class="image-msg assistant"><div class="img-bubble"><div class="image-card">' +
+      '<img src="' + imgSrc + '" alt="生成的图片" data-image-id="' + img.id + '"' + (needAsync ? ' data-need-async="1"' : '') + '>' +
+      '<div class="image-card-meta">' +
+        '<span class="meta-tag">' + escapeHtml(img.model || '-') + '</span>' +
+        '<span class="meta-tag">' + escapeHtml(img.size || '-') + '</span>' +
+        (img.negativePrompt ? '<span class="meta-tag">neg</span>' : '') +
+      '</div>' +
+      '<div class="image-card-actions">' +
+        '<button class="img-action-btn" data-action="save" data-id="' + img.id + '">保存到相册</button>' +
+        '<button class="img-action-btn" data-action="delete" data-id="' + img.id + '">删除</button>' +
+      '</div>' +
+    '</div></div></div>';
+  }
+  stream.innerHTML = html;
+  // 异步加载 Filesystem 中的图片（APK 模式）
+  stream.querySelectorAll('img[data-need-async="1"]').forEach(function(imgEl) {
+    var imageId = imgEl.dataset.imageId;
+    var imgObj = (settings.images || []).find(function(x) { return x.id === imageId; });
+    if (imgObj) {
+      getImageDataUrl(imgObj).then(function(dataUrl) {
+        if (dataUrl) imgEl.src = dataUrl;
+      });
+    }
+  });
+  // 绑定图片点击预览
+  stream.querySelectorAll('img[data-image-id]').forEach(function(imgEl) {
+    imgEl.addEventListener('click', function() {
+      showImagePreview(imgEl.src);
+    });
+  });
+  // 绑定操作按钮
+  stream.querySelectorAll('.img-action-btn').forEach(function(btn) {
+    btn.addEventListener('click', function() {
+      var action = btn.dataset.action;
+      var id = btn.dataset.id;
+      if (action === 'delete') deleteImageFromGallery(id);
+      else if (action === 'save') saveImageToDevice(id);
+    });
+  });
+  // 滚到底部（最新内容）
+  setTimeout(function() { stream.scrollTop = stream.scrollHeight; }, 0);
+}
+
+// F1: 大图预览
+function showImagePreview(src) {
+  var overlay = document.createElement('div');
+  overlay.className = 'image-preview-overlay';
+  overlay.innerHTML = '<button class="image-preview-close" title="关闭"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg></button><img src="' + src + '">';
+  overlay.addEventListener('click', function(e) {
+    if (e.target === overlay || e.target.closest('.image-preview-close')) {
+      overlay.remove();
+    }
+  });
+  document.body.appendChild(overlay);
+}
+
+// F1: 从图库删除单张图片
+function deleteImageFromGallery(id) {
+  if (!confirm('确定从图库删除此图片？')) return;
+  if (!settings.images) return;
+  var idx = settings.images.findIndex(function(x) { return x.id === id; });
+  if (idx < 0) return;
+  var img = settings.images[idx];
+  // 同步删除 Filesystem 中的图片文件（APK 模式）
+  if (img.fileName) deleteImageFile(img.fileName);
+  settings.images.splice(idx, 1);
+  saveImageProviders(); // 持久化 settings
+  renderImageStream();
+  updateImageGalleryCount();
+}
+
+// F1: 保存图片到设备相册（APK 用 Filesystem 写入 Download 目录，浏览器用 a 下载）
+async function saveImageToDevice(id) {
+  var img = (settings.images || []).find(function(x) { return x.id === id; });
+  if (!img) return;
+  try {
+    // 先获取 dataUrl（APK 模式从 Filesystem 读）
+    var dataUrl = await getImageDataUrl(img);
+    if (!dataUrl) { showToast('图片数据不可用', 'warn'); return; }
+    if (isCapacitor() && CapFilesystem) {
+      // 写入 Download 目录
+      var base64Data = dataUrl.split(',')[1];
+      var mime = (dataUrl.match(/data:(.*?);base64/) || [])[1] || 'image/png';
+      var ext = mime === 'image/jpeg' ? 'jpg' : (mime === 'image/webp' ? 'webp' : 'png');
+      var fileName = 'chatlite_' + Date.now() + '.' + ext;
+      var path = 'Download/' + fileName;
+      await CapFilesystem.writeFile({
+        path: path,
+        data: base64Data,
+        directory: 'EXTERNAL_STORAGE',
+        recursive: true
+      });
+      showToast('已保存到 Download/' + fileName);
+    } else {
+      // 浏览器：触发下载
+      var a = document.createElement('a');
+      a.href = dataUrl;
+      a.download = 'chatlite_' + Date.now() + '.png';
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+      showToast('已触发下载');
+    }
+  } catch(e) {
+    console.error('saveImageToDevice failed:', e);
+    showToast('保存失败: ' + (e.message || e), 'warn');
+  }
+}
+
+// F1: 压缩参考图（用于上传给生图 API，最大 1024px，JPEG 0.8）
+function compressImageForGeneration(file) {
+  return new Promise(function(resolve, reject) {
+    var reader = new FileReader();
+    reader.onload = function(e) {
+      var img = new Image();
+      img.onload = function() {
+        var canvas = document.createElement('canvas');
+        var maxDim = 1024;
+        var w = img.width, h = img.height;
+        if (w > maxDim || h > maxDim) {
+          if (w > h) { h = Math.round(h * maxDim / w); w = maxDim; }
+          else { w = Math.round(w * maxDim / h); h = maxDim; }
+        }
+        canvas.width = w;
+        canvas.height = h;
+        canvas.getContext('2d').drawImage(img, 0, 0, w, h);
+        // 返回 data URL（base64），生图 API 通常接受 data URL 或纯 base64
+        resolve(canvas.toDataURL('image/png', 0.85));
+      };
+      img.onerror = function() { reject(new Error('图片加载失败')); };
+      img.src = e.target.result;
+    };
+    reader.onerror = function() { reject(new Error('文件读取失败')); };
+    reader.readAsDataURL(file);
+  });
+}
+
+// F1: 图片文件存储（APK 模式用 Filesystem 分离存储，避免 localStorage 配额超限）
+// settings.images 只存元数据 + fileName；dataUrl 在 APK 模式下存到 Filesystem，浏览器模式仍存 dataUrl
+var IMAGE_STORE_DIR = 'chatlite_images';  // Filesystem 目录名（DATA）
+
+// 把 dataUrl 写入 Filesystem，返回文件名（不含路径）
+async function writeImageFile(dataUrl, imgId) {
+  if (!isCapacitor() || !CapFilesystem) return null;
+  try {
+    var parts = dataUrl.split(',');
+    var mime = (parts[0].match(/data:(.*?);base64/) || [])[1] || 'image/png';
+    var ext = mime === 'image/jpeg' ? 'jpg' : (mime === 'image/webp' ? 'webp' : 'png');
+    var fileName = imgId + '.' + ext;
+    await CapFilesystem.writeFile({
+      path: IMAGE_STORE_DIR + '/' + fileName,
+      data: parts[1] || '',
+      directory: 'DATA',
+      recursive: true,
+      encoding: 'utf8'  // base64 是 ASCII，用 utf8 直写
+    });
+    return fileName;
+  } catch (e) {
+    console.warn('writeImageFile failed:', e);
+    return null;
+  }
+}
+
+// 从 Filesystem 读取图片文件，返回 dataUrl
+async function readImageFile(fileName) {
+  if (!isCapacitor() || !CapFilesystem || !fileName) return null;
+  try {
+    var result = await CapFilesystem.readFile({
+      path: IMAGE_STORE_DIR + '/' + fileName,
+      directory: 'DATA',
+      encoding: 'utf8'
+    });
+    var ext = fileName.split('.').pop().toLowerCase();
+    var mime = ext === 'jpg' ? 'image/jpeg' : (ext === 'webp' ? 'image/webp' : 'image/png');
+    return 'data:' + mime + ';base64,' + result.data;
+  } catch (e) {
+    console.warn('readImageFile failed:', e);
+    return null;
+  }
+}
+
+// 删除 Filesystem 中的图片文件
+async function deleteImageFile(fileName) {
+  if (!isCapacitor() || !CapFilesystem || !fileName) return;
+  try {
+    await CapFilesystem.deleteFile({
+      path: IMAGE_STORE_DIR + '/' + fileName,
+      directory: 'DATA'
+    });
+  } catch (e) {
+    console.warn('deleteImageFile failed:', e);
+  }
+}
+
+// 获取图片 dataUrl：优先内存缓存 → Filesystem → dataUrl 字段（兼容旧数据）
+async function getImageDataUrl(img) {
+  if (!img) return null;
+  // 旧数据/浏览器模式：dataUrl 直接存在 img.dataUrl
+  if (img.dataUrl) return img.dataUrl;
+  // APK 模式：从 Filesystem 读取
+  if (img.fileName) {
+    var dataUrl = await readImageFile(img.fileName);
+    if (dataUrl) {
+      img.dataUrl = dataUrl;  // 缓存到内存，避免重复 IO
+      return dataUrl;
+    }
+  }
+  return null;
+}
+
+
+// 返回 { size: 'WxH' 或 'auto', imageConfig: {aspectRatio, imageSize} 或 null }
+var _IMAGE_SIZE_MAP = {
+  '1K': { '1:1': '1024x1024', '4:3': '1024x768', '3:4': '768x1024', '16:9': '1792x1024', '9:16': '1024x1792' },
+  '2K': { '1:1': '2048x2048', '4:3': '2048x1536', '3:4': '1536x2048', '16:9': '2048x1152', '9:16': '1152x2048' },
+  '4K': { '1:1': '3072x3072', '4:3': '3840x2880', '3:4': '2880x3840', '16:9': '3840x2160', '9:16': '2160x3840' }
+};
+// gpt-image-2 只支持 4 个 size：1024x1024 / 1024x1536 / 1536x1024 / auto
+// 16:9/4:3 统一映射到 1536x1024（横屏，最接近电影宽幅）；9:16/3:4 映射到 1024x1536（竖屏）
+var _GPT_IMAGE_SIZE_MAP = {
+  '1:1': '1024x1024',
+  '4:3': '1536x1024',
+  '3:4': '1024x1536',
+  '16:9': '1536x1024',
+  '9:16': '1024x1536'
+};
+function buildImageSizeConfig(provider, resolution, aspect, customSize) {
+  var template = provider ? provider.template : 'gpt_image';
+  var result = { size: 'auto', imageConfig: null };
+  // 自定义：直接用用户输入（支持 WxH 或 W:H）
+  if (aspect === 'custom' && customSize) {
+    if (template === 'nano_banana') {
+      // Gemini 接受 aspectRatio "W:H"，也接受 size "WxH"（lumenfall 兼容层）
+      if (/^\d+:\d+$/.test(customSize)) {
+        result.imageConfig = { aspectRatio: customSize };
+      } else {
+        result.size = customSize;
+      }
+    } else {
+      result.size = customSize;
+    }
+    return result;
+  }
+  // gpt_image 模板：只用 gpt-image-2 支持的 3 个固定 size + auto
+  // 重要：gpt-image-2 的 size='auto' 是「模型默认比例」（通常 1:1），不会读提示词里的宽高描述
+  if (template === 'gpt_image') {
+    if (aspect === 'auto') {
+      result.size = 'auto';  // 模型默认（不读提示词宽高）
+    } else {
+      result.size = _GPT_IMAGE_SIZE_MAP[aspect] || '1024x1024';
+    }
+    return result;
+  }
+  // auto 分辨率或 auto 宽高比 → 让模型自由
+  if (resolution === 'auto' && aspect === 'auto') {
+    return result;  // size='auto', imageConfig=null
+  }
+  if (template === 'nano_banana') {
+    // Gemini：imageConfig = {aspectRatio, imageSize}
+    var cfg = {};
+    if (resolution !== 'auto') cfg.imageSize = resolution;  // "1K"/"2K"/"4K"
+    if (aspect !== 'auto') cfg.aspectRatio = aspect;        // "1:1"/"16:9" 等
+    result.imageConfig = Object.keys(cfg).length > 0 ? cfg : null;
+    return result;
+  }
+  // OpenAI 系（dall-e 等）：size = "WxH" 或 "auto"
+  if (resolution === 'auto' || aspect === 'auto') {
+    // 一边 auto 一边具体：交给模型决定，返回 auto
+    return result;
+  }
+  var sizeTable = _IMAGE_SIZE_MAP[resolution] || {};
+  result.size = sizeTable[aspect] || '1024x1024';
+  return result;
+}
+
+// F1: 构建生图 API 请求 URL 和 headers
+function buildImageRequestPayload(provider, body) {
+  var p = normalizeImageProvider(provider);
+  var useEdits = !!(body && body._useEdits && p.editsPath);
+  var endpointPath = useEdits ? (p.editsPath) : (p.endpointPath || '');
+  // nano_banana 等模板用 {model} 占位符（model 从 body 中读）
+  if (endpointPath.indexOf('{model}') >= 0 && body && body.model) {
+    endpointPath = endpointPath.replace('{model}', encodeURIComponent(body.model));
+  }
+  var url = new URL(endpointPath, p.baseUrl).toString();
+  var headers = {};
+  var payload = body;
+  if (p.authType === 'bearer') {
+    headers[p.authHeader] = (p.authPrefix || 'Bearer ') + p.apiKey;
+  } else if (p.authType === 'api-key') {
+    headers[p.authHeader] = p.apiKey;
+  } else if (p.authType === 'header') {
+    headers[p.authHeader] = (p.authPrefix || '') + p.apiKey;
+  } else if (p.authType === 'query') {
+    url += (url.indexOf('?') >= 0 ? '&' : '?') + (p.authHeader || 'api_key') + '=' + encodeURIComponent(p.apiKey);
+  }
+  // gpt_image 图生图：构建 multipart/form-data
+  if (useEdits) {
+    var formData = new FormData();
+    formData.append('model', body.model || '');
+    formData.append('prompt', body.prompt || '');
+    if (body.size && body.size !== 'auto') formData.append('size', body.size);
+    if (body.quality) formData.append('quality', body.quality);
+    if (body.output_format) formData.append('output_format', body.output_format);
+    formData.append('n', String(body.n || 1));
+    // 多张参考图：dataUrl → Blob，重复 append image 字段（OpenAI edits 端点支持多图，顺序即 append 顺序）
+    var refArr = body._refDataUrls || (body._refDataUrl ? [body._refDataUrl] : []);
+    for (var ri3 = 0; ri3 < refArr.length; ri3++) {
+      var refParts = refArr[ri3].split(',');
+      var refMime = (refParts[0].match(/data:(.*?);base64/) || [])[1] || 'image/png';
+      var refExt = refMime === 'image/jpeg' ? 'jpg' : (refMime === 'image/webp' ? 'webp' : 'png');
+      var refBytes = base64ToBytes(refParts[1] || '');
+      var refBlob = new Blob([refBytes], { type: refMime });
+      formData.append('image', refBlob, 'reference_' + (ri3 + 1) + '.' + refExt);
+    }
+    payload = formData;
+    // 不设 Content-Type，让浏览器自动加 multipart boundary
+  } else {
+    headers['Content-Type'] = 'application/json';
+  }
+  return { url: url, headers: headers, payload: payload };
+}
+
+// base64 字符串 → Uint8Array（用于构建 Blob）
+function base64ToBytes(b64) {
+  var binary = atob(b64);
+  var len = binary.length;
+  var bytes = new Uint8Array(len);
+  for (var i = 0; i < len; i++) bytes[i] = binary.charCodeAt(i);
+  return bytes;
+}
+
+// F1: 核心生图函数 —— 调用 API、处理响应、存入图库
+async function generateImage() {
+  var promptInput = document.getElementById('image-prompt-input');
+  var prompt = (promptInput ? promptInput.innerText.trim() : '');
+  if (!prompt) {
+    showToast('请输入提示词', 'warn');
+    return;
+  }
+  var provider = getCurrentImageProvider();
+  if (!provider) {
+    showToast('请先在设置中添加生图接口', 'warn');
+    return;
+  }
+  var modelInput = document.getElementById('image-model-input');
+  var model = modelInput ? modelInput.value.trim() : '';
+  if (!model) model = provider.defaultModel || 'dall-e-3';
+
+  // 尺寸：从「分辨率 + 宽高比」两层下拉读取
+  var resolutionSel = document.getElementById('image-resolution-select');
+  var aspectSel = document.getElementById('image-aspect-select');
+  var aspectCustom = document.getElementById('image-aspect-custom');
+  var resolution = resolutionSel ? resolutionSel.value : '2K';
+  var aspect = aspectSel ? aspectSel.value : 'auto';
+  var customSize = (aspect === 'custom' && aspectCustom) ? aspectCustom.value.trim() : '';
+  var sizeConfig = buildImageSizeConfig(provider, resolution, aspect, customSize);
+
+  // 高级参数
+  var negPromptEl = document.getElementById('image-negative-prompt');
+  var batchNEl = document.getElementById('image-batch-n');
+  var promptExtendEl = document.getElementById('image-prompt-extend');
+  var watermarkEl = document.getElementById('image-watermark');
+  var negativePrompt = negPromptEl ? negPromptEl.value.trim() : '';
+  var n = Math.max(1, Math.min(4, parseInt(batchNEl ? batchNEl.value : '1') || 1));
+  if (provider.features && provider.features.maxBatch) {
+    n = Math.min(n, provider.features.maxBatch);
+  }
+  var promptExtend = promptExtendEl ? promptExtendEl.checked : true;
+  var watermark = watermarkEl ? watermarkEl.checked : false;
+
+  // 参考图（图生图）：多张数组，兼容旧字段 _imageRefDataUrl
+  var refDataUrls = [];
+  if (Array.isArray(state._imageRefDataUrls) && state._imageRefDataUrls.length > 0) {
+    refDataUrls = state._imageRefDataUrls.map(function(r) { return r.dataUrl; });
+  } else if (state._imageRefDataUrl) {
+    refDataUrls = [state._imageRefDataUrl];  // 兼容旧字段
+  }
+  if (refDataUrls.length > 0 && provider.features && !provider.features.supportsReferenceImage) {
+    showToast('当前接口模板不支持参考图，已忽略', 'warn');
+    refDataUrls = [];
+  }
+
+  // 构建请求体
+  var reqBody = { model: model };
+  if (provider.template === 'nano_banana') {
+    // Nano Banana / Gemini Image：generateContent 格式（Gemini 支持多图 parts）
+    var parts = [{ text: prompt }];
+    if (refDataUrls.length > 0) {
+      // 多张参考图作为 inline_data（Gemini 原生支持多图 parts）
+      for (var ri = 0; ri < refDataUrls.length; ri++) {
+        var refParts = refDataUrls[ri].split(',');
+        var refMime = (refParts[0].match(/data:(.*?);base64/) || [])[1] || 'image/png';
+        parts.push({ inline_data: { mime_type: refMime, data: refParts[1] || '' } });
+      }
+    }
+    reqBody.contents = [{ parts: parts }];
+    var genConfig = { responseModalities: ['IMAGE'] };
+    if (sizeConfig.imageConfig) genConfig.imageConfig = sizeConfig.imageConfig;
+    reqBody.generationConfig = genConfig;
+  } else if (provider.template === 'openai_compat' || provider.template === 'custom') {
+    // nested 格式：input.messages[].content[].text/image
+    var contentParts = [{ type: 'text', text: prompt }];
+    if (refDataUrls.length > 0) {
+      // 多张参考图作为 base64（去掉 data URL 前缀），通义万相 nested 支持多 image
+      for (var ri2 = 0; ri2 < refDataUrls.length; ri2++) {
+        var base64 = refDataUrls[ri2].split(',')[1];
+        contentParts.push({ type: 'image', image: base64 });
+      }
+    }
+    reqBody.input = { messages: [{ role: 'user', content: contentParts }] };
+    reqBody.parameters = {
+      prompt_extend: promptExtend,
+      watermark: watermark,
+      n: n,
+      size: sizeConfig.size || '1024x1024'
+    };
+    if (negativePrompt && provider.features && provider.features.supportsNegativePrompt) {
+      reqBody.parameters.negative_prompt = negativePrompt;
+    }
+  } else if (provider.template === 'gpt_image') {
+    if (refDataUrls.length > 0) {
+      // GPT Image 图生图：走 /v1/images/edits 端点，multipart/form-data，支持多图
+      reqBody._useEdits = true;
+      reqBody.prompt = prompt;
+      reqBody.size = sizeConfig.size || 'auto';
+      var qualitySel2 = document.getElementById('image-quality-select');
+      reqBody.quality = qualitySel2 ? qualitySel2.value : 'auto';
+      reqBody.output_format = 'png';
+      reqBody.n = 1;  // edits 端点只支持 n=1
+      // 多张参考图通过 FormData 重复 append image 字段传入（在主调用逻辑中处理）
+      reqBody._refDataUrls = refDataUrls;
+    } else {
+      // GPT Image 文生图：走 /v1/images/generations 端点，flat JSON
+      reqBody.prompt = prompt;
+      reqBody.n = n;
+      reqBody.size = sizeConfig.size || 'auto';
+      var qualitySel = document.getElementById('image-quality-select');
+      var quality = qualitySel ? qualitySel.value : 'auto';
+      reqBody.quality = quality;
+      reqBody.output_format = 'png';
+      reqBody.moderation = 'auto';
+    }
+  } else {
+    // openai_standard：flat 格式
+    reqBody.prompt = prompt;
+    reqBody.n = n;
+    reqBody.size = sizeConfig.size || '1024x1024';
+  }
+
+  var req = buildImageRequestPayload(provider, reqBody);
+
+  // 设置状态指示器
+  var indicator = document.getElementById('image-status-indicator');
+  if (indicator) { indicator.className = 'image-status-indicator loading'; }
+  var sendBtn = document.getElementById('btn-image-send');
+  if (sendBtn) sendBtn.disabled = true;
+
+  // 显示用户消息气泡
+  var stream = document.getElementById('image-stream');
+  if (stream) {
+    // 若是首次生成，清空 empty 提示
+    var empty = document.getElementById('image-empty');
+    if (empty) empty.remove();
+    var userMsg = document.createElement('div');
+    userMsg.className = 'image-msg user';
+    userMsg.innerHTML = '<div class="img-bubble"><p>' + escapeHtml(prompt) + '</p>' + (refDataUrls.length > 0 ? '<p style="font-size:11px;opacity:0.8">[' + refDataUrls.length + ' 张参考图]</p>' : '') + '</div>';
+    stream.appendChild(userMsg);
+    // 加载占位
+    var loadingMsg = document.createElement('div');
+    loadingMsg.className = 'image-msg assistant';
+    loadingMsg.id = 'image-loading-msg';
+    loadingMsg.innerHTML = '<div class="img-bubble"><div class="image-loading"><div class="loading-spinner"></div><div class="loading-text">生成中...</div></div></div>';
+    stream.appendChild(loadingMsg);
+    stream.scrollTop = stream.scrollHeight;
+  }
+
+  // 调用 API（gpt_image 图生图/nano_banana 生图较慢，超时 600s；其他 120s）
+  // 注：app 切后台时 Android WebView 会暂停 JS，fetch 挂起但不会报错，切回前台后继续等待
+  var timeoutMs = settings.nativeTimeoutMs || 120000;
+  if ((provider.template === 'nano_banana' || reqBody._useEdits) && timeoutMs < 600000) timeoutMs = 600000;
+  state._imageGenerating = true;  // 标记请求进行中，供 appStateChange 监听用
+  try {
+    var controller = new AbortController();
+    var timer = setTimeout(function() { controller.abort(); }, timeoutMs);
+    var resp;
+    try {
+      resp = await fetch(req.url, {
+        method: 'POST',
+        headers: req.headers,
+        body: (req.payload instanceof FormData) ? req.payload : JSON.stringify(req.payload),
+        signal: controller.signal
+      });
+    } finally {
+      clearTimeout(timer);
+    }
+    if (!resp.ok) {
+      var errText = '';
+      try { errText = await resp.text(); } catch(e) {}
+      throw new Error('HTTP ' + resp.status + (errText ? ': ' + errText.slice(0, 200) : ''));
+    }
+    var data = await resp.json();
+    // 移除加载占位
+    var loadingEl = document.getElementById('image-loading-msg');
+    if (loadingEl) loadingEl.remove();
+    // 解析响应：统一归一化为 results = [{b64_json|url|revised_prompt}]
+    var results = [];
+    if (provider.template === 'nano_banana') {
+      // Gemini 格式：candidates[0].content.parts[].inlineData.data
+      var candidates = data.candidates || [];
+      for (var ci = 0; ci < candidates.length; ci++) {
+        var parts = (candidates[ci].content || {}).parts || [];
+        for (var pi = 0; pi < parts.length; pi++) {
+          var inlineData = parts[pi].inlineData || parts[pi].inline_data;
+          if (inlineData && inlineData.data) {
+            var mime = inlineData.mimeType || inlineData.mime_type || 'image/png';
+            results.push({ b64_json: inlineData.data, mime: mime });
+          }
+        }
+      }
+    } else {
+      // OpenAI 格式：data[].b64_json 或 data[].url
+      results = (data.data || []) || [];
+    }
+    if (results.length === 0) throw new Error('响应中无图片数据');
+    for (var i = 0; i < results.length; i++) {
+      var item = results[i];
+      var dataUrl = '';
+      if (item.b64_json) {
+        var mime = item.mime || 'image/png';
+        dataUrl = 'data:' + mime + ';base64,' + item.b64_json;
+      } else if (item.url) {
+        // 下载 URL 转 base64
+        dataUrl = await fetchImageAsDataUrl(item.url);
+      }
+      if (!dataUrl) continue;
+      // 存入图库：APK 模式把 dataUrl 存 Filesystem，settings.images 只存元数据+fileName，避免 localStorage 配额超限
+      var newImgId = uid();
+      var fileName = null;
+      if (isCapacitor() && CapFilesystem) {
+        fileName = await writeImageFile(dataUrl, newImgId);
+      }
+      var imgObj = {
+        id: newImgId,
+        // APK 模式 fileName 非空时不存 dataUrl（从 Filesystem 读）；浏览器模式或写入失败时仍存 dataUrl
+        dataUrl: fileName ? null : dataUrl,
+        fileName: fileName,
+        thumbnailDataUrl: null,  // TODO: F2/F4 优化时再生成缩略图
+        prompt: prompt,
+        negativePrompt: negativePrompt,
+        referenceImageId: null,
+        model: model,
+        providerId: provider.id,
+        size: sizeConfig.size || (sizeConfig.imageConfig ? JSON.stringify(sizeConfig.imageConfig) : ''),
+        resolution: resolution,
+        aspect: aspect,
+        createdAt: Date.now(),
+        tags: [],
+        source: 'f1_generate',
+        starred: false,
+        revisedPrompt: item.revised_prompt || ''
+      };
+      if (!settings.images) settings.images = [];
+      settings.images.push(imgObj);
+    }
+    saveImageProviders();
+    renderImageStream();
+    updateImageGalleryCount();
+    if (indicator) indicator.className = 'image-status-indicator ok';
+    showToast('生成完成，共 ' + results.length + ' 张');
+  } catch(e) {
+    var loadingEl2 = document.getElementById('image-loading-msg');
+    if (loadingEl2) loadingEl2.remove();
+    if (indicator) indicator.className = 'image-status-indicator err';
+    var errMsg = e.name === 'AbortError' ? '请求超时（' + (timeoutMs / 1000) + 's）' : (e.message || '生成失败');
+    // 在图片流中显示错误消息
+    if (stream) {
+      var errEl = document.createElement('div');
+      errEl.className = 'image-msg assistant';
+      errEl.innerHTML = '<div class="img-bubble"><div class="image-error">' + escapeHtml(errMsg) + '</div></div>';
+      stream.appendChild(errEl);
+      stream.scrollTop = stream.scrollHeight;
+    }
+    showToast(errMsg, 'warn');
+    console.error('generateImage failed:', e);
+  } finally {
+    if (sendBtn) sendBtn.disabled = false;
+    state._imageGenerating = false;  // 清除请求进行中标记
+  }
+}
+
+// F1: 把图片 URL 下载为 data URL（避免外链失效）
+async function fetchImageAsDataUrl(url) {
+  try {
+    var resp = await fetch(url);
+    var blob = await resp.blob();
+    return await new Promise(function(resolve, reject) {
+      var reader = new FileReader();
+      reader.onload = function() { resolve(reader.result); };
+      reader.onerror = function() { reject(new Error('FileReader 失败')); };
+      reader.readAsDataURL(blob);
+    });
+  } catch(e) {
+    console.warn('fetchImageAsDataUrl failed, fallback to url:', e);
+    return url;  // 失败时回退为直接 URL（外链）
+  }
+}
+
+// F1: 清空图库
+function clearImageGallery() {
+  if (!settings.images || settings.images.length === 0) {
+    showToast('图库已为空');
+    return;
+  }
+  if (!confirm('确定清空图库？共 ' + settings.images.length + ' 张图片，此操作不可撤销。')) return;
+  settings.images = [];
+  saveImageProviders();
+  renderImageStream();
+  updateImageGalleryCount();
+  showToast('图库已清空');
+}
+
+// F1: 生图界面事件监听初始化
+function initImageView() {
+  var btnOpen = document.getElementById('btn-open-image-view');
+  if (btnOpen) btnOpen.addEventListener('click', function() { toggleImageView(true); });
+
+  var btnBack = document.getElementById('btn-image-back');
+  if (btnBack) btnBack.addEventListener('click', function() { toggleImageView(false); });
+
+  // 接口选择切换
+  var imgProvSel = document.getElementById('image-provider-select');
+  if (imgProvSel) imgProvSel.addEventListener('change', function() {
+    settings.imageProviderId = imgProvSel.value;
+    saveImageProviders();
+    var modelInput = document.getElementById('image-model-input');
+    var current = getCurrentImageProvider();
+    if (modelInput && current) modelInput.value = current.defaultModel || '';
+    updateImageAdvancedVisibility();
+  });
+
+  // 参考图选择
+  var btnRef = document.getElementById('btn-image-ref');
+  var refFileInput = document.getElementById('image-ref-file');
+  if (btnRef && refFileInput) {
+    btnRef.addEventListener('click', function() {
+      // 模板不支持参考图时提示
+      var provider = getCurrentImageProvider();
+      if (provider && provider.features && !provider.features.supportsReferenceImage) {
+        showToast('当前接口模板（' + provider.template + '）不支持参考图', 'warn');
+        return;
+      }
+      refFileInput.click();
+    });
+    refFileInput.addEventListener('change', async function(e) {
+      var files = e.target.files;
+      if (!files || files.length === 0) return;
+      // 多选：最多 16 张（OpenAI 上限）
+      if (!state._imageRefDataUrls) state._imageRefDataUrls = [];
+      var maxAdd = 16 - state._imageRefDataUrls.length;
+      if (maxAdd <= 0) { showToast('最多 16 张参考图', 'warn'); e.target.value = ''; return; }
+      var toAdd = Array.from(files).slice(0, maxAdd);
+      try {
+        for (var i = 0; i < toAdd.length; i++) {
+          var dataUrl = await compressImageForGeneration(toAdd[i]);
+          state._imageRefDataUrls.push({ dataUrl: dataUrl, name: toAdd[i].name, size: toAdd[i].size });
+        }
+        renderImageRefPreview();
+        if (btnRef) btnRef.classList.add('has-ref');
+        if (toAdd.length < files.length) showToast('已达 16 张上限，部分图片未添加', 'warn');
+      } catch(err) {
+        showToast('参考图加载失败: ' + (err.message || err), 'warn');
+      }
+      e.target.value = '';
+    });
+  }
+
+  // 渲染参考图预览（多张）
+  function renderImageRefPreview() {
+    var preview = document.getElementById('image-ref-preview');
+    if (!preview) return;
+    var refs = state._imageRefDataUrls || [];
+    if (refs.length === 0) {
+      preview.classList.remove('has-ref');
+      preview.innerHTML = '<img id="image-ref-thumb" alt="参考图"><span class="ref-info" id="image-ref-info">参考图</span><button class="ref-clear" id="image-ref-clear" title="移除全部">×</button>';
+      bindRefClear();
+      return;
+    }
+    preview.classList.add('has-ref');
+    var html = '';
+    refs.forEach(function(r, idx) {
+      html += '<div class="ref-thumb-item" data-idx="' + idx + '">' +
+        '<img src="' + r.dataUrl + '" alt="参考图' + (idx + 1) + '">' +
+        '<span class="ref-order">' + (idx + 1) + '</span>' +
+        '<button class="ref-item-clear" data-idx="' + idx + '" title="移除此图">×</button>' +
+      '</div>';
+    });
+    html += '<span class="ref-info">' + refs.length + ' 张参考图</span>';
+    html += '<button class="ref-clear" id="image-ref-clear" title="移除全部">清空</button>';
+    preview.innerHTML = html;
+    bindRefClear();
+    // 绑定单张删除
+    preview.querySelectorAll('.ref-item-clear').forEach(function(btn) {
+      btn.addEventListener('click', function(ev) {
+        ev.stopPropagation();
+        var idx = parseInt(btn.dataset.idx);
+        if (!isNaN(idx) && state._imageRefDataUrls) {
+          state._imageRefDataUrls.splice(idx, 1);
+          renderImageRefPreview();
+        }
+      });
+    });
+  }
+
+  function bindRefClear() {
+    var refClear = document.getElementById('image-ref-clear');
+    if (refClear) refClear.addEventListener('click', function() {
+      state._imageRefDataUrls = [];
+      renderImageRefPreview();
+      var btnRef = document.getElementById('btn-image-ref');
+      if (btnRef) btnRef.classList.remove('has-ref');
+    });
+  }
+
+  // 宽高比自定义切换
+  var aspectSel = document.getElementById('image-aspect-select');
+  var aspectCustom = document.getElementById('image-aspect-custom');
+  if (aspectSel && aspectCustom) {
+    aspectSel.addEventListener('change', function() {
+      aspectCustom.style.display = (aspectSel.value === 'custom') ? '' : 'none';
+    });
+  }
+
+  // 提示词输入：Enter 生成，Shift+Enter 换行
+  var promptInput = document.getElementById('image-prompt-input');
+  var sendBtn = document.getElementById('btn-image-send');
+  if (promptInput) {
+    promptInput.addEventListener('keydown', function(e) {
+      if (e.key === 'Enter' && !e.shiftKey) {
+        e.preventDefault();
+        generateImage();
+      }
+    });
+    promptInput.addEventListener('input', function() {
+      var hasText = promptInput.innerText.trim().length > 0;
+      if (sendBtn) sendBtn.disabled = !hasText;
+    });
+  }
+  if (sendBtn) sendBtn.addEventListener('click', generateImage);
+
+  // 高级参数折叠
+  var advToggle = document.getElementById('image-advanced-toggle');
+  var advBody = document.getElementById('image-advanced-body');
+  if (advToggle && advBody) {
+    advToggle.addEventListener('click', function() {
+      advToggle.classList.toggle('open');
+      advBody.classList.toggle('open');
+    });
+  }
+
+  // 设置面板 - 生图 API 分组按钮
+  var btnAddImgProv = document.getElementById('btn-add-image-provider');
+  if (btnAddImgProv) btnAddImgProv.addEventListener('click', function() { openImageProviderEditor(-1); });
+  // 模板切换：自动填充推荐默认模型（仅新建时，编辑已有时不覆盖）
+  var imgProvTmplSel = document.getElementById('img-provider-template-select');
+  if (imgProvTmplSel) {
+    imgProvTmplSel.addEventListener('change', function() {
+      var editor = document.getElementById('image-provider-editor');
+      var isnew = !editor || editor.dataset.editIdx === '';
+      if (!isnew) return;  // 编辑已有时不覆盖
+      var tmpl = imgProvTmplSel.value;
+      var recommendedModel = '';
+      if (tmpl === 'gpt_image') recommendedModel = 'gpt-image-2';
+      else if (tmpl === 'nano_banana') recommendedModel = 'gemini-2.5-flash-image';
+      else if (tmpl === 'openai_compat') recommendedModel = 'wanx2.1-t2i-turbo';
+      else if (tmpl === 'openai_standard') recommendedModel = 'dall-e-3';
+      var modelInput = document.getElementById('img-provider-default-model-input');
+      if (modelInput && recommendedModel) modelInput.value = recommendedModel;
+    });
+  }
+  var btnSaveImgProv = document.getElementById('btn-save-image-provider');
+  if (btnSaveImgProv) btnSaveImgProv.addEventListener('click', saveImageProviderFromEditor);
+  var btnCloseImgProv = document.getElementById('btn-close-image-provider-editor');
+  if (btnCloseImgProv) btnCloseImgProv.addEventListener('click', closeImageProviderEditor);
+  var btnClearGallery = document.getElementById('btn-clear-image-gallery');
+  if (btnClearGallery) btnClearGallery.addEventListener('click', clearImageGallery);
+
+  // 边缘滑动返回（从左边缘 24px 内向右滑动 >80px 触发）
+  var imageView = document.getElementById('image-view');
+  if (imageView) {
+    var touchStartX = 0, touchStartY = 0, touchStartT = 0;
+    var swiping = false;
+    imageView.addEventListener('touchstart', function(e) {
+      if (!state.imageViewOpen) return;
+      var t = e.touches[0];
+      if (t.clientX < 24) {
+        swiping = true;
+        touchStartX = t.clientX;
+        touchStartY = t.clientY;
+        touchStartT = Date.now();
+      }
+    }, { passive: true });
+    imageView.addEventListener('touchend', function(e) {
+      if (!swiping) return;
+      swiping = false;
+      var t = e.changedTouches[0];
+      var dx = t.clientX - touchStartX;
+      var dy = Math.abs(t.clientY - touchStartY);
+      var dt = Date.now() - touchStartT;
+      // 横向滑动 >80px，纵向偏移 <60px，时间 <500ms
+      if (dx > 80 && dy < 60 && dt < 500) {
+        toggleImageView(false);
+      }
+    }, { passive: true });
+  }
+
+  // Android 物理返回键拦截（ Capacitor 平台用 BackButton 事件）
+  if (isCapacitor() && Capacitor.Plugins && Capacitor.Plugins.App) {
+    var App = Capacitor.Plugins.App;
+    App.addListener('backButton', function() {
+      if (state.imageViewOpen) {
+        toggleImageView(false);
+      } else if (state.settingsOpen) {
+        toggleSettings(false);
+      } else {
+        // 默认行为：退出应用（Capacitor 推荐方式）
+        App.exitApp();
+      }
+    });
+    // F1: 监听前后台切换，生图请求进行中时切后台不报错（请求继续在原生层等待，切回前台后正常处理）
+    App.addListener('appStateChange', function(info) {
+      var isActive = info.isActive;
+      console.log('appStateChange:', isActive ? 'active' : 'background');
+      if (isActive && state._imageGenerating) {
+        // 切回前台时生图请求仍在进行，更新状态指示器提示用户
+        var indicator = document.getElementById('image-status-indicator');
+        if (indicator) indicator.className = 'image-status-indicator loading';
+        showToast('生图请求进行中，请稍候...', 'info');
+      }
+    });
+  }
+}
+
+
 var _saveQueue = Promise.resolve();
 function save() {
   const conv = state.conversations.find(c => c.id === state.currentId);
@@ -785,48 +1984,97 @@ function migrateV1toV2(conv) {
   delete conv.messages;
 }
 
-function loadSettings() {
-  var defaults = {
+// settings 默认值（同步，不读存储）
+function defaultSettings() {
+  return {
     thinkingEnabled: true, apiKey: '', fontSize: '15', lineSpacing: '1.6',
     directMode: false, hapticFeedback: true, nativeStreamingMode: 'auto', nativeTimeoutMs: 120000,
     // B2: 分模型修饰语 {"<providerId>:<modelId>": {text: "修饰语\n\n===强调===\n强调内容"}}
     modelPrompts: {},
     // C5: 设置分组收折状态记忆 {groupKey: true=折叠/false=展开}
-    groupCollapse: {}
+    groupCollapse: {},
+    // F1: 生图 API 配置
+    imageProviders: [],
+    imageProviderId: null,
+    images: []
   };
+}
+
+// 对从存储（IDB 或 localStorage）读出的 settings 应用字段迁移和归一化
+function migrateSettings(s) {
+  if (!s || typeof s !== 'object') return defaultSettings();
+  // 迁移：旧版有 settings.global，提示词字段已回归会话级，移除 global
+  if (s.global) {
+    if (s.global.thinkingEnabled !== undefined && s.thinkingEnabled === undefined) {
+      s.thinkingEnabled = s.global.thinkingEnabled;
+    }
+    delete s.global;
+  }
+  // 迁移：旧 modelPrompts[key] = {systemPrompt, emphasis} -> 合并为 {text}
+  if (s.modelPrompts) {
+    for (var k in s.modelPrompts) {
+      var mp = s.modelPrompts[k];
+      if (mp && mp.text === undefined && (mp.systemPrompt || mp.emphasis)) {
+        var parts = [];
+        if (mp.systemPrompt) parts.push(mp.systemPrompt);
+        if (mp.emphasis) parts.push('===强调===\n' + mp.emphasis);
+        mp.text = parts.join('\n\n');
+        delete mp.systemPrompt;
+        delete mp.emphasis;
+      }
+    }
+  } else {
+    s.modelPrompts = {};
+  }
+  // C5: 确保 groupCollapse 字段存在且为对象
+  if (!s.groupCollapse || typeof s.groupCollapse !== 'object') s.groupCollapse = {};
+  // F1: 生图 API 字段迁移（旧用户无此字段时补默认值，并对 imageProviders 做归一化）
+  if (!Array.isArray(s.imageProviders)) s.imageProviders = [];
+  else s.imageProviders = s.imageProviders.map(function(p) { return normalizeImageProvider(p); });
+  if (typeof s.imageProviderId !== 'string') s.imageProviderId = null;
+  // imageProviderId 指向不存在的 provider 时回退到首个
+  if (s.imageProviderId && !s.imageProviders.some(function(p) { return p.id === s.imageProviderId; })) {
+    s.imageProviderId = s.imageProviders.length > 0 ? s.imageProviders[0].id : null;
+  }
+  if (!Array.isArray(s.images)) s.images = [];
+  return s;
+}
+
+// 从 IndexedDB 异步加载 settings，首次启动时从旧 localStorage 迁移
+// init() 中 await 调用；失败时使用内存中的默认值，不阻断启动
+async function initSettings() {
+  // 1. 先尝试从 IDB 读
   try {
-    const raw = localStorage.getItem(SETTINGS_KEY);
+    var idbData = await idbGet(SETTINGS_IDB_KEY);
+    if (idbData && typeof idbData === 'object') {
+      settings = migrateSettings(idbData);
+      _settingsLoaded = true;
+      return;
+    }
+  } catch(e) { console.warn('initSettings: IDB read failed:', e); }
+
+  // 2. IDB 无数据：尝试从旧 localStorage 迁移（仅一次）
+  try {
+    var raw = localStorage.getItem(SETTINGS_KEY);
     if (raw) {
       var s = JSON.parse(raw);
-      // 迁移：旧版有 settings.global，提示词字段已回归会话级，移除 global
-      if (s.global) {
-        if (s.global.thinkingEnabled !== undefined && s.thinkingEnabled === undefined) {
-          s.thinkingEnabled = s.global.thinkingEnabled;
-        }
-        delete s.global;
+      settings = migrateSettings(s);
+      // 写入 IDB，迁移成功后清理 localStorage
+      try {
+        await idbPut(SETTINGS_IDB_KEY, settings);
+        localStorage.removeItem(SETTINGS_KEY);
+        console.log('[chat-lite] settings 已从 localStorage 迁移到 IndexedDB');
+      } catch(e2) {
+        console.warn('[chat-lite] settings 迁移到 IDB 失败，保留 localStorage:', e2);
       }
-      // 迁移：旧 modelPrompts[key] = {systemPrompt, emphasis} -> 合并为 {text}
-      if (s.modelPrompts) {
-        for (var k in s.modelPrompts) {
-          var mp = s.modelPrompts[k];
-          if (mp && mp.text === undefined && (mp.systemPrompt || mp.emphasis)) {
-            var parts = [];
-            if (mp.systemPrompt) parts.push(mp.systemPrompt);
-            if (mp.emphasis) parts.push('===强调===\n' + mp.emphasis);
-            mp.text = parts.join('\n\n');
-            delete mp.systemPrompt;
-            delete mp.emphasis;
-          }
-        }
-      } else {
-        s.modelPrompts = {};
-      }
-      // C5: 确保 groupCollapse 字段存在且为对象
-      if (!s.groupCollapse || typeof s.groupCollapse !== 'object') s.groupCollapse = {};
-      return s;
+      _settingsLoaded = true;
+      return;
     }
-  } catch(e) {}
-  return defaults;
+  } catch(e) { console.warn('initSettings: localStorage 迁移失败:', e); }
+
+  // 3. 都没有：使用默认值
+  settings = defaultSettings();
+  _settingsLoaded = true;
 }
 
 // 状态栏有效值（直接读 conv，兼容旧 template 字段名）
@@ -846,9 +2094,33 @@ function effectiveModelPrompt(conv) {
   return settings.modelPrompts[key] || null;
 }
 
+// 异步写入 IndexedDB（替代 localStorage.setItem）
+// 内存中 settings 已同步更新（调用方修改 settings.xxx 后调本函数持久化）
+// 失败时仅提示，不影响内存数据；图片 dataUrl 已通过 Filesystem 分离存储，settings 通常体积可控
 function saveSettings() {
   settings.directMode = document.getElementById('direct-mode-check')?.checked || false;
-  localStorage.setItem(SETTINGS_KEY, JSON.stringify(settings));
+  // 防御：剥离残留的图片 dataUrl（理论上 APK 模式下 fileName 非空时 dataUrl 已为 null）
+  var toPersist = settings;
+  var hasInlineImg = (settings.images || []).some(function(img) { return img.dataUrl && img.fileName; });
+  if (hasInlineImg) {
+    try {
+      toPersist = JSON.parse(JSON.stringify(settings));
+      toPersist.images = toPersist.images.map(function(img) {
+        if (img.fileName) img.dataUrl = null;  // 有 fileName 的剥离 dataUrl（图片文件在 Filesystem）
+        return img;
+      });
+    } catch(e) {
+      console.warn('saveSettings: clone for persist failed, use raw settings:', e);
+      toPersist = settings;
+    }
+  }
+  // 异步写 IDB，不阻塞 UI；写入失败仅提示
+  idbPut(SETTINGS_IDB_KEY, toPersist).then(function() {
+    // 静默成功
+  }).catch(function(e) {
+    console.error('saveSettings: IDB write failed:', e);
+    showToast('设置保存失败：' + (e && e.message ? e.message : e), 'warn');
+  });
 }
 
 // ===== Conversation Model =====
@@ -1000,7 +2272,8 @@ const apiKeyInput = null; // deprecated, providers managed separately
 
 // ===== Init =====
 async function init() {
-  await loadData(); // IndexedDB (async)
+  await loadData(); // IndexedDB (async) — 加载 conversations
+  await initSettings(); // IndexedDB — 加载 settings（首次启动从 localStorage 迁移）
   state._dataLoaded = true;
   state.deletedIds = state.deletedIds || [];
   // Server is source of truth — always prefer server data
@@ -1019,6 +2292,11 @@ async function init() {
   await loadProviders();
   migrateOldApiKey();
   renderModelSelector();
+
+  // F1: 启动时迁移旧图片数据（localStorage 中残留 dataUrl 的图片转存 Filesystem）
+  if (isCapacitor() && CapFilesystem && Array.isArray(settings.images)) {
+    migrateImportedImagesToFilesystem();
+  }
 
   // Apply settings to UI
   thinkingToggle.checked = settings.thinkingEnabled;
@@ -1234,6 +2512,9 @@ async function init() {
     // 打开面板时初始触发一次，避免按钮一直 display:none
     state._updateSettingsScrollBtn = updateScrollBtn;
   }
+
+  // F1: 初始化生图界面事件监听
+  initImageView();
 
   // Long press + drag to reorder conversations
   let longPressTimer = null;
@@ -4138,6 +5419,8 @@ function toggleSettings(open) {
   settingsPanel.style.display = open ? 'flex' : 'none';
   if (open) {
     renderProviderList();
+    renderImageProviderList();   // F1: 生图 API provider 列表
+    updateImageGalleryCount();   // F1: 图库计数
     fillSettingsForm();
     // 刷新回顶/底按钮状态（等 DOM 布局完成）
     setTimeout(function() { if (state._updateSettingsScrollBtn) state._updateSettingsScrollBtn(); }, 0);
@@ -4410,7 +5693,7 @@ async function importAllData(jsonText, mode) {
     if (data.providers) state.providers = data.providers;
     if (data.settings) {
       Object.assign(settings, data.settings);
-      localStorage.setItem(SETTINGS_KEY, JSON.stringify(settings));
+      saveSettings();  // 走 IDB 持久化（不再用 localStorage）
     }
     if (data.currentId) {
       state.currentId = data.currentId;
@@ -4431,7 +5714,7 @@ async function importAllData(jsonText, mode) {
     }
     if (data.settings) {
       Object.assign(settings, data.settings);
-      localStorage.setItem(SETTINGS_KEY, JSON.stringify(settings));
+      saveSettings();  // 走 IDB 持久化
     }
     // currentId 保留本地当前选中的，除非本地没有了
     if (!state.conversations.find(c => c.id === state.currentId)) {
@@ -4443,7 +5726,38 @@ async function importAllData(jsonText, mode) {
   renderSidebar();
   renderModelSelector();
   if (state.currentId) renderMessages();
+  // F1: 导入的图片若含 dataUrl（旧备份或浏览器导出），APK 模式下转存到 Filesystem，剥离 dataUrl 避免撑爆 localStorage
+  if (isCapacitor() && CapFilesystem && Array.isArray(settings.images)) {
+    migrateImportedImagesToFilesystem();
+  }
   showToast('已' + modeText + '导入数据');
+}
+
+// F1: 把 settings.images 中残留的 dataUrl 转存到 Filesystem（导入旧备份后的清理）
+async function migrateImportedImagesToFilesystem() {
+  if (!isCapacitor() || !CapFilesystem) return;
+  var images = settings.images || [];
+  var migrated = 0;
+  for (var i = 0; i < images.length; i++) {
+    var img = images[i];
+    if (img.dataUrl && !img.fileName) {
+      try {
+        var fileName = await writeImageFile(img.dataUrl, img.id);
+        if (fileName) {
+          img.fileName = fileName;
+          img.dataUrl = null;  // 剥离，释放 localStorage 空间
+          migrated++;
+        }
+      } catch (e) {
+        console.warn('migrate image failed:', img.id, e);
+      }
+    }
+  }
+  if (migrated > 0) {
+    saveImageProviders();  // 持久化（此时 dataUrl 已剥离，settings 体积小）
+    renderImageStream();
+    console.log('已迁移 ' + migrated + ' 张图片到 Filesystem');
+  }
 }
 
 // 文件选择回调（用于 importAllData 的 <input type="file">）
