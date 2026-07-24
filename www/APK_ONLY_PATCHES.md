@@ -1,4 +1,4 @@
-# APK 专属改动清单（v1.3.0+）
+﻿# APK 专属改动清单（v1.3.0+）
 
 > 此文件由 `sync-from-upstream.ps1` 同步主仓库 `chat-lite/` 时**不会**自动维护。
 > 主仓库同步会**直接覆盖** `www/`，凡下方列出的段落，sync 后**必须手动重新打补丁**。
@@ -105,3 +105,39 @@ Select-String -Path C:\Users\86176\chat-lite-android\www\app.js -Pattern "showBu
 | `app.js` triggerHapticFeedback | 优先 `CapHaptics.impact({style:'LIGHT',duration:8})` 走原生 Vibrator，回退 `navigator.vibrate` |
 
 > 振感涉及 Capacitor 原生插件 + VIBRATE 权限，**不推主仓库**。
+
+
+### 7. v1.3.0 批次 1+ 优化：线性马达质感五档分层（cache-bust v50 -> v52）
+**背景**：用户反馈震感有效但手感偏粗，希望更大程度发挥 X 轴线性马达质感、更顺滑自然，优先参考小米/Redmi RichTap 调校。
+
+**研究依据**（Android 官方触觉指南 + RichTap 文档）：
+- LRA 单次干脆点击信号仅 10-20ms；两 primitive 间隔需 >=50ms 才不被融合
+- 强度档差比需 >=1.4 倍才可感知；scale=0 是"最小可感知"非关闭
+- sharpness 映射：0.0-0.2 THUD / 0.2-0.4 LOW_TICK / 0.4-0.6 TICK / 0.6-0.8 CLICK(弱) / 0.8-1.0 CLICK(满)
+- RichTap 机型（Redmi Note 11/12 Turbo、K50 电竞版）对 LOW_TICK/TICK 还原度最高
+- 流式 tick 强度应 <=0.3 避免反噬注意力；连续 30s 同强度会引发感觉适应
+
+**修复**（重写 triggerHapticFeedback，5 档预加载 + 节奏分类 + 强度抖动）：
+| 档位 | primitive | intensity | sharpness | gap | 场景 |
+|---|---|---|---|---|---|
+| CHAR  | TICK     | 0.18 | 0.55 | 38ms  | 字符主路径，轻脆不扰人 |
+| SOFT  | TICK     | 0.28 | 0.55 | 50ms  | 逗号/空格次重音 |
+| LOW   | LOW_TICK | 0.14 | 0.35 | 38ms  | 每 10 字低频点缀破单调 |
+| CLICK | CLICK    | 0.55 | 0.85 | 60ms  | 。！？句末锐利清脆 |
+| THUD  | THUD     | 0.72 | 0.15 | 120ms | \n 段落低频沉闷收束 |
+
+**关键改进**：
+- 原 2 档（tick 0.3 / punct 0.6）-> 5 档分层，频段+强度双维度对比
+- 字符强度 0.3 -> 0.18（降 40%，避免密集 tick 疲劳）
+- sharpness 0.9 -> 0.55（TICK 中频，原 0.9 太锐刺）
+- 段落换行：原 CLICK 0.6 -> THUD 0.72（低频沉闷，与句号 CLICK 形成质感对比）
+- 字符主路径每 3 次用 play 覆盖抖动强度 ±15%（0.15-0.21），模拟自然书写轻重
+- throttle：90/180/250/300ms -> 38/50/60/120ms（更跟手不丢字感，不糊成一片）
+- 仅 composition 引擎（Android 12+）下启用抖动，basic/web 引擎退回原行为
+
+| 文件 | 改动 |
+|---|---|
+| `app.js` | 重写 _initStreamHaptics（5 档 preload）+ triggerHapticFeedback（节奏分类+抖动） |
+| `index.html` | cache-bust v50 -> v52 |
+
+> 振感涉及 Capacitor 原生插件，**不推主仓库**。

@@ -11,6 +11,7 @@ let CapShare = null;
 let CapHttp = null;
 let CapStreamHttp = null;
 let CapHaptics = null;
+let CapRichHaptics = null;
 if (isCapacitor()) {
   try {
     CapFilesystem = Capacitor.Plugins && Capacitor.Plugins.Filesystem;
@@ -18,6 +19,7 @@ if (isCapacitor()) {
     CapHttp = Capacitor.Plugins && Capacitor.Plugins.CapacitorHttp;
     CapStreamHttp = Capacitor.Plugins && Capacitor.Plugins.StreamHttp;
     CapHaptics = Capacitor.Plugins && Capacitor.Plugins.Haptics;
+    CapRichHaptics = Capacitor.Plugins && (Capacitor.Plugins.RichHaptics || Capacitor.Plugins['capacitor-rich-haptics']);
   } catch (e) {
     console.warn('Capacitor plugins init failed:', e);
   }
@@ -1845,24 +1847,89 @@ function flashBubbleMenuToast() {
   }
 }
 
-// ===== C3: 流式振感反馈（带开关，节流 100ms） =====
-// 注意：navigator.vibrate 在 Android WebView 中默认无效（API 30+ 禁用），
-// 必须用 Capacitor Haptics 原生插件才能真正触发设备振动。
+// ===== C3: 流式振感反馈（针对 X 轴线性马达优化，参考小米/Redmi RichTap 调校）=====
+// 使用 capacitor-rich-haptics 的 preload/playPreloaded 实现低延迟触觉。
+// Android 12+ 走 VibrationEffect.Composition 原语（PRIMITIVE_TICK/CLICK/LOW_TICK/THUD），
+// 真正发挥 X 轴线性马达的短促颗粒质感，避免连续嗡嗡震。
+// 五档质感分层（强度按 1.4 倍可感知差设计，参考 Android 官方触觉指南）：
+//   CHAR  TICK     intensity 0.18 sharpness 0.55  字符主路径，轻脆不扰人
+//   SOFT  TICK     intensity 0.28 sharpness 0.55  逗号/空格次重音
+//   LOW   LOW_TICK intensity 0.14 sharpness 0.35  每 10 字低频点缀破单调
+//   CLICK CLICK    intensity 0.55 sharpness 0.85  。！？句末锐利清脆
+//   THUD  THUD     intensity 0.72 sharpness 0.15  \n 段落低频沉闷收束
+// throttle：CHAR 38ms / SOFT 50ms / LOW 38ms / CLICK 60ms / THUD 120ms
+// 字符路径每 3 次用 play 覆盖抖动强度（±15%）模拟自然书写轻重，避免感觉适应
 let _hapticLastTriggered = 0;
-function triggerHapticFeedback() {
+let _richHapticsInitStarted = false;
+let _richHapticsReady = false;
+let _hapticEngineType = 'none';
+let _hapticCharCount = 0;
+const _HAPTIC_CHAR_ID = 'streamChar';
+const _HAPTIC_SOFT_ID = 'streamSoft';
+const _HAPTIC_LOW_ID = 'streamLow';
+const _HAPTIC_CLICK_ID = 'streamClick';
+const _HAPTIC_THUD_ID = 'streamThud';
+
+// 懒初始化 rich-haptics 并预加载五档模式（首次流式时触发，async 不阻塞）
+function _initStreamHaptics() {
+  if (_richHapticsInitStarted) return;
+  _richHapticsInitStarted = true;
+  if (!CapRichHaptics) return;
+  CapRichHaptics.isSupported().then(function(r) {
+    if (!r.supported || !r.userEnabled) return;
+    _richHapticsReady = true;
+    _hapticEngineType = r.engine || 'none';
+    CapRichHaptics.preload({ id: _HAPTIC_CHAR_ID,  intensity: 0.18, sharpness: 0.55 });
+    CapRichHaptics.preload({ id: _HAPTIC_SOFT_ID,  intensity: 0.28, sharpness: 0.55 });
+    CapRichHaptics.preload({ id: _HAPTIC_LOW_ID,   intensity: 0.14, sharpness: 0.35 });
+    CapRichHaptics.preload({ id: _HAPTIC_CLICK_ID, intensity: 0.55, sharpness: 0.85 });
+    CapRichHaptics.preload({ id: _HAPTIC_THUD_ID,  intensity: 0.72, sharpness: 0.15 });
+  }).catch(function(){});
+}
+
+// 根据内容节奏触发震感。content 为本次 delta.content（可选）
+function triggerHapticFeedback(content) {
   if (!settings.hapticFeedback) return;
+  if (!_richHapticsInitStarted) _initStreamHaptics();
   const now = Date.now();
-  if (now - _hapticLastTriggered < 100) return; // 节流，避免每 chunk 振动
+  let kind = 'char';
+  let gap = 38;
+  if (content && content.length > 0) {
+    const last = content[content.length - 1];
+    if (last === '\n') { kind = 'thud'; gap = 120; }
+    else if ('。！？.!?'.indexOf(last) >= 0) { kind = 'click'; gap = 60; }
+    else if ('，,;；、'.indexOf(last) >= 0) { kind = 'soft'; gap = 60; }
+    else if (last === ' ' || last === '\t') { kind = 'soft'; gap = 50; }
+    else {
+      _hapticCharCount++;
+      if (_hapticCharCount % 10 === 0) { kind = 'low'; gap = 38; }
+    }
+  }
+  if (now - _hapticLastTriggered < gap) return;
   _hapticLastTriggered = now;
+  let id;
+  if (kind === 'thud') id = _HAPTIC_THUD_ID;
+  else if (kind === 'click') id = _HAPTIC_CLICK_ID;
+  else if (kind === 'soft') id = _HAPTIC_SOFT_ID;
+  else if (kind === 'low') id = _HAPTIC_LOW_ID;
+  else id = _HAPTIC_CHAR_ID;
   try {
-    if (CapHaptics && typeof CapHaptics.impact === 'function') {
-      // APK 原生路径：Haptics.impact 走 Vibrator 系统 API
-      CapHaptics.impact({ style: 'LIGHT', duration: 8 });
+    if (CapRichHaptics && _richHapticsReady) {
+      CapRichHaptics.playPreloaded({ id: id });
+      // 字符主路径每 3 次用 play 覆盖抖动强度（±15%），仅 composition 引擎下生效
+      if (kind === 'char' && _hapticCharCount % 3 === 0 && _hapticEngineType === 'composition') {
+        const jitter = 0.18 + (Math.random() * 0.06 - 0.03); // 0.15–0.21
+        CapRichHaptics.play({ intensity: jitter, sharpness: 0.55 });
+      }
       return;
     }
-    // 回退：仅在支持的浏览器/PWA 上生效
+    if (CapHaptics && typeof CapHaptics.impact === 'function') {
+      CapHaptics.impact({ style: (kind === 'thud' || kind === 'click') ? 'MEDIUM' : 'LIGHT' });
+      return;
+    }
     if (typeof navigator !== 'undefined' && navigator.vibrate) {
-      navigator.vibrate(8);
+      const ms = (kind === 'thud') ? 18 : (kind === 'click' ? 12 : (kind === 'soft' ? 8 : 5));
+      navigator.vibrate(ms);
     }
   } catch(e) {}
 }
@@ -2480,7 +2547,7 @@ async function executeStreamHttp(req, assistantMsg, opts) {
             if (delta.content) {
               assistantMsg.content = (assistantMsg.content || '') + delta.content;
               // C3: 流式振感反馈（默认关，节流 100ms）
-              triggerHapticFeedback();
+              triggerHapticFeedback(delta.content);
             }
 
             // 渲染节流：触摸滚动时暂停 DOM 更新（避免 innerHTML 重建阻塞 touchmove）
@@ -2894,7 +2961,7 @@ async function sendFromMessage(context) {
             if (delta.content) {
               fullContent += delta.content;
               assistantMsg.content = fullContent;
-              triggerHapticFeedback(); // C3: web 流式路径也触发振感（保险）
+              triggerHapticFeedback(delta.content); // C3: web 流式路径也触发振感（保险）
             }
             // Update display: pass both reasoning and content
             updateMessageContent(assistantMsg.id, fullContent, fullReasoning);
@@ -3098,7 +3165,7 @@ async function sendFromMessageContinue(context, assistantMsg) {
             if (delta.content) {
               fullContent += delta.content;
               assistantMsg.content = fullContent;
-              triggerHapticFeedback(); // C3: web 流式路径也触发振感（保险）
+              triggerHapticFeedback(delta.content); // C3: web 流式路径也触发振感（保险）
             }
             updateMessageContent(assistantMsg.id, fullContent, fullReasoning);
           }

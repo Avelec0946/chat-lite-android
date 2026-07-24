@@ -22,6 +22,7 @@
     "@capacitor/filesystem": "^6.0.1",
     "@capacitor/haptics": "^6.0.3",
     "@capacitor/share": "^6.0.2",
+    "capacitor-rich-haptics": "^0.10.4",
     "capacitor-stream-http": "^0.1.0"
   },
   "devDependencies": {

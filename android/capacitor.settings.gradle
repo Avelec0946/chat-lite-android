@@ -11,5 +11,8 @@ project(':capacitor-haptics').projectDir = new File('../node_modules/@capacitor/
 include ':capacitor-share'
 project(':capacitor-share').projectDir = new File('../node_modules/@capacitor/share/android')
 
+include ':capacitor-rich-haptics'
+project(':capacitor-rich-haptics').projectDir = new File('../node_modules/capacitor-rich-haptics/android')
+
 include ':capacitor-stream-http'
 project(':capacitor-stream-http').projectDir = new File('../node_modules/capacitor-stream-http/android')
