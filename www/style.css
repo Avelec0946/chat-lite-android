@@ -445,3 +445,11 @@ body:not(.capacitor-mode) .capacitor-only{display:none !important}
 /* A6+D6+D7: 气泡上下文菜单（复用 .tree-node-menu 基础样式） */
 .bubble-context-menu { z-index: 1100; max-height: 70vh; overflow-y: auto; }
 .bubble-context-menu .tree-menu-danger { color: #ef4444; }
+/* 接口管理分组可收折（仅此分组，不影响其他 .setting-group）*/
+.setting-group-collapsible{padding:0}
+.setting-group-collapsible > .setting-group-summary{display:flex;align-items:center;padding:12px;cursor:pointer;list-style:none;font-size:14px;font-weight:600;color:var(--text)}
+.setting-group-collapsible > .setting-group-summary::-webkit-details-marker{display:none}
+.setting-group-collapsible > .setting-group-summary::before{content:"";width:0;height:0;border-left:5px solid currentColor;border-top:4px solid transparent;border-bottom:4px solid transparent;margin-right:8px;transition:transform .2s;flex-shrink:0}
+.setting-group-collapsible[open] > .setting-group-summary::before{transform:rotate(90deg)}
+.setting-group-collapsible[open] > .setting-group-summary{border-bottom:1px solid var(--border)}
+.setting-group-collapsible > .setting-group-body{padding:12px}

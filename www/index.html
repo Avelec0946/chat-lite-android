@@ -5,7 +5,7 @@
   <link rel="icon" href="favicon.png" type="image/png">
 <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0">
 <title>chat-lite</title>
-<link rel="stylesheet" href="style.css?v=55">
+<link rel="stylesheet" href="style.css?v=56">
 <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github-dark.min.css">
   <meta name="theme-color" content="#7c3aed">
   <link rel="manifest" href="manifest.json">
@@ -263,8 +263,9 @@
         </div>
 
         <!-- ===== 接口管理（全局）===== -->
-        <div class="setting-group">
-          <span class="setting-group-title">接口管理 <span class="setting-scope">全局·所有会话可用</span></span>
+        <details class="setting-group setting-group-collapsible" open>
+          <summary class="setting-group-summary">接口管理 <span class="setting-scope">全局·所有会话可用</span></summary>
+          <div class="setting-group-body">
           <button id="btn-add-provider" class="btn btn-small" style="margin-bottom:8px">+ 添加接口</button>
           <div id="provider-list" class="provider-list"></div>
           <div id="provider-editor" class="provider-editor" style="display:none">
@@ -326,7 +327,8 @@
               <button id="btn-close-provider-editor" class="btn btn-small" style="background:var(--bg3);color:var(--text)">取消</button>
             </div>
           </div>
-        </div>
+          </div>
+        </details>
 
         <!-- ===== 模型修饰 ===== -->
         <div class="setting-group">
