@@ -289,11 +289,12 @@ Select-String -Path C:\Users\86176\chat-lite-android\www\app.js -Pattern "showBu
 **UI**：模型修饰分组内单 textarea `model-prompt-text` + 两个复选框（禁用/自定义覆盖）+ 条件显示的覆盖 textarea。
 
 #### 10.3 设置面板快速回顶/底按钮
-**方案同批次 1 C1**：设置面板内悬浮 sticky 按钮，基于滚动位置动态切换箭头方向。
+**方案同批次 1 C1**：`position:fixed` 悬浮按钮（同 C1 的 fixed 方案），基于滚动位置动态切换箭头方向。
+**关键**：滚动容器是 `.settings-content`（`overflow-y:auto;max-height:80vh`），不是 `.settings-body`（无 overflow）。scroll 监听必须挂在 `.settings-content` 上，否则事件不触发、按钮永不显示。
 | 文件 | 改动 |
 |---|---|
-| `index.html` | settings-body 开头加 `<button id="settings-scroll-btn" class="settings-scroll-btn">` |
-| `style.css` | `.settings-scroll-btn` sticky+float:right 圆形按钮 |
-| `app.js` | settings-body scroll 监听：scrollTop<200=nearTop，底部-200=nearBottom；按钮在 nearBottom&&nearTop 时隐藏，nearBottom&&!nearTop 显示↑（回顶），否则显示↓（回底） |
+| `index.html` | settings-body 开头加 `<button id="settings-scroll-btn" class="settings-scroll-btn" style="display:none">` |
+| `style.css` | `.settings-scroll-btn` `position:fixed;right:16px;bottom:16px` 圆形按钮（z-index:200）；不用 sticky（sticky bottom 在 flex 容器内对顶部元素不生效，按钮会随内容滚走） |
+| `app.js` | scroll 监听挂 `.settings-content`：scrollTop<200=nearTop，底部-200=nearBottom；按钮在 nearBottom&&nearTop 时隐藏，nearBottom&&!nearTop 显示↑（回顶），否则显示↓（回底）；`toggleSettings` 打开时 setTimeout 触发一次 updateScrollBtn 初始化按钮状态 |
 
 > 本节全部改动不含 Capacitor 专属符号，**可推主仓库**。sync 后需确认 `settings.global` 迁移逻辑、`effectiveStatusBar`/`effectiveModelPrompt` 新签名未被覆盖。

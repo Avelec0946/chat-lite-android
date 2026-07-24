@@ -1207,25 +1207,28 @@ async function init() {
     });
   }
 
-  // 设置面板快速回顶/底按钮
-  var settingsBody = document.getElementById('settings-body');
+  // 设置面板快速回顶/底按钮（滚动容器是 .settings-content，非 settings-body）
+  var settingsScrollCt = document.querySelector('.settings-content');
   var settingsScrollBtn = document.getElementById('settings-scroll-btn');
-  if (settingsBody && settingsScrollBtn) {
-    settingsBody.addEventListener('scroll', function() {
-      var nearTop = settingsBody.scrollTop < 200;
-      var nearBottom = settingsBody.scrollTop + settingsBody.clientHeight >= settingsBody.scrollHeight - 200;
+  if (settingsScrollCt && settingsScrollBtn) {
+    var updateScrollBtn = function() {
+      var nearTop = settingsScrollCt.scrollTop < 200;
+      var nearBottom = settingsScrollCt.scrollTop + settingsScrollCt.clientHeight >= settingsScrollCt.scrollHeight - 200;
       settingsScrollBtn.style.display = (nearTop && nearBottom) ? 'none' : '';
       settingsScrollBtn.textContent = (nearBottom && !nearTop) ? '↑' : '↓';
-    });
+    };
+    settingsScrollCt.addEventListener('scroll', updateScrollBtn);
     settingsScrollBtn.addEventListener('click', function() {
-      var nearTop = settingsBody.scrollTop < 200;
-      var nearBottom = settingsBody.scrollTop + settingsBody.clientHeight >= settingsBody.scrollHeight - 200;
+      var nearTop = settingsScrollCt.scrollTop < 200;
+      var nearBottom = settingsScrollCt.scrollTop + settingsScrollCt.clientHeight >= settingsScrollCt.scrollHeight - 200;
       if (nearBottom && !nearTop) {
-        settingsBody.scrollTo({ top: 0, behavior: 'smooth' });
+        settingsScrollCt.scrollTo({ top: 0, behavior: 'smooth' });
       } else {
-        settingsBody.scrollTo({ top: settingsBody.scrollHeight, behavior: 'smooth' });
+        settingsScrollCt.scrollTo({ top: settingsScrollCt.scrollHeight, behavior: 'smooth' });
       }
     });
+    // 打开面板时初始触发一次，避免按钮一直 display:none
+    state._updateSettingsScrollBtn = updateScrollBtn;
   }
 
   // Long press + drag to reorder conversations
@@ -4108,6 +4111,8 @@ function toggleSettings(open) {
   if (open) {
     renderProviderList();
     fillSettingsForm();
+    // 刷新回顶/底按钮状态（等 DOM 布局完成）
+    setTimeout(function() { if (state._updateSettingsScrollBtn) state._updateSettingsScrollBtn(); }, 0);
   }
 }
 
