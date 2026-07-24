@@ -3978,8 +3978,14 @@ async function ensureDataLoaded() {
 
 // 导出全部数据（对话 + Provider + 设置）
 // APK 模式：用 Filesystem 写入 + Share 分享；Web 模式：用 <a download>
+// 修复（v1.3.0 批次1+）：原方案 btoa(unescape(encodeURIComponent(jsonText))) 在大数据
+//   （几十MB）时会同时持有 5 份字符串副本，峰值内存约 5x 数据量，触发 Android WebView OOM 卡退。
+//   改用 Filesystem 6.x 原生 encoding:'utf8' 直接写文本，峰值降到 2x；JSON 也用紧凑格式省 30%+。
 async function exportAllData() {
   await ensureDataLoaded();
+  showToast('正在导出数据，请稍候...');
+  // 让 UI 有机会渲染 toast 再开始重活，避免点击后无反馈误解为卡死
+  await new Promise(r => setTimeout(r, 50));
 
   const data = {
     version: 1,
@@ -3989,16 +3995,17 @@ async function exportAllData() {
     settings: settings,
     currentId: state.currentId
   };
-  const jsonText = JSON.stringify(data, null, 2);
+  // 紧凑格式（无缩进），相比 null,2 节省约 30% 体积，备份格式不需要人工阅读
+  const jsonText = JSON.stringify(data);
   const fileName = 'chat-lite-backup-' + new Date().toISOString().slice(0, 10) + '.json';
 
   if (isCapacitor() && CapFilesystem && CapShare) {
     try {
       const result = await CapFilesystem.writeFile({
         path: fileName,
-        data: btoa(unescape(encodeURIComponent(jsonText))),  // UTF-8 转 base64
-        directory: 'CACHE',  // 临时目录，分享后系统会清理
-        // 不传 encoding，Capacitor 会把 data 当 base64 字符串自动解码
+        data: jsonText,           // 直接传 UTF-8 字符串，无需 base64 转换
+        directory: 'CACHE',
+        encoding: 'utf8',         // 关键：Filesystem 6.x 原生支持 UTF-8 写入
         recursive: true
       });
       await CapShare.share({
@@ -4027,9 +4034,16 @@ async function exportAllData() {
 
 // 导入全部数据
 // mode: 'overwrite'（覆盖，默认）或 'merge'（按 ID 合并，冲突时导入数据优先）
+// 修复（v1.3.0 批次1+）：导入前自动备份原走 btoa(unescape(encodeURIComponent(...))) 路径，
+//   若用户当前数据也大，导入大文件时会在备份步骤 OOM 崩溃，反而把当前数据搞丢。
+//   改用 encoding:'utf8' 直接写文本，与 exportAllData 一致。
 async function importAllData(jsonText, mode) {
   await ensureDataLoaded();
   mode = mode || 'overwrite';
+
+  // 大文件 JSON.parse 会阻塞主线程，先提示用户避免误解为卡死
+  showToast('正在解析数据，请稍候...');
+  await new Promise(r => setTimeout(r, 50));
 
   let data;
   try {
@@ -4064,15 +4078,23 @@ async function importAllData(jsonText, mode) {
       const backupName = 'chat-lite-pre-import-' + Date.now() + '.json';
       await CapFilesystem.writeFile({
         path: backupName,
-        data: btoa(unescape(encodeURIComponent(JSON.stringify(preBackup, null, 2)))),
+        data: JSON.stringify(preBackup),   // 紧凑 + UTF-8 直写，避免 OOM
         directory: 'CACHE',
+        encoding: 'utf8',
         recursive: true
       });
       console.log('导入前自动备份已保存：', backupName);
     } catch (e) {
       console.warn('导入前自动备份失败：', e);
+      // 备份失败不阻断导入（用户已确认），仅提示
+      showToast('注意：导入前自动备份失败，原数据将无法恢复', 'warn');
+      await new Promise(r => setTimeout(r, 100));
     }
   }
+
+  // 让 UI 渲染 toast 后再做重活（替换 state + save + render）
+  showToast('正在写入数据...');
+  await new Promise(r => setTimeout(r, 50));
 
   if (mode === 'overwrite') {
     // 覆盖模式：直接替换
@@ -4117,14 +4139,26 @@ async function importAllData(jsonText, mode) {
 }
 
 // 文件选择回调（用于 importAllData 的 <input type="file">）
+// 修复（v1.3.0 批次1+）：加 loading toast 提示，超大文件（>80MB）警告但不禁阻
 function importAllDataFromFile(e) {
   const file = e.target.files[0];
   if (!file) return;
   const modeEl = document.getElementById('import-mode-select');
   const mode = modeEl ? modeEl.value : 'overwrite';
+  // 大文件警告（80MB 经验阈值，约对应 200-300MB 解析后内存峰值）
+  if (file.size > 80 * 1024 * 1024) {
+    if (!confirm('文件较大（' + Math.round(file.size / 1024 / 1024) + ' MB），导入可能耗时较长，且内存不足时有崩溃风险。\n\n建议先在数据充足设备上备份当前数据。\n\n是否继续？')) {
+      e.target.value = '';
+      return;
+    }
+  }
+  showToast('正在读取文件...');
   const reader = new FileReader();
   reader.onload = (ev) => {
     importAllData(ev.target.result, mode);
+  };
+  reader.onerror = () => {
+    showToast('文件读取失败', 'warn');
   };
   reader.readAsText(file);
   e.target.value = '';
@@ -4134,16 +4168,19 @@ async function exportConversation() {
   const conv = currentConv();
   if (!conv) return;
   const data = { version: 2, exportedAt: new Date().toISOString(), conversation: conv };
-  const jsonText = JSON.stringify(data, null, 2);
+  // 紧凑格式，与会话图片/长文累积场景兼容
+  const jsonText = JSON.stringify(data);
   const fileName = `chat-lite-${conv.title || 'conversation'}-${new Date().toISOString().slice(0, 10)}.json`;
 
   if (isCapacitor() && CapFilesystem && CapShare) {
     // APK 模式：<a download> 在 WebView 里不生效，改用 Filesystem + Share
+    // 修复（v1.3.0 批次1+）：encoding:'utf8' 直写，避免 base64 转换的内存峰值
     try {
       const result = await CapFilesystem.writeFile({
         path: fileName,
-        data: btoa(unescape(encodeURIComponent(jsonText))),
+        data: jsonText,
         directory: 'CACHE',
+        encoding: 'utf8',
         recursive: true
       });
       await CapShare.share({
