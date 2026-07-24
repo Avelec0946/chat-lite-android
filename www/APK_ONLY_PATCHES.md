@@ -1,4 +1,4 @@
-# APK 专属改动清单（v1.3.0+）
+﻿# APK 专属改动清单（v1.3.0+）
 
 > 此文件由 `sync-from-upstream.ps1` 同步主仓库 `chat-lite/` 时**不会**自动维护。
 > 主仓库同步会**直接覆盖** `www/`，凡下方列出的段落，sync 后**必须手动重新打补丁**。
@@ -216,3 +216,31 @@ Select-String -Path C:\Users\86176\chat-lite-android\www\app.js -Pattern "showBu
 **注意**：模型提示词在 tab 切换时不变（它是全局设置，按模型键存），不受 conv/global tab 影响。
 
 > 本节全部改动不含 Capacitor 专属符号，**可推主仓库**。sync 后仅需确认 `settings.global`/`modelPrompts` 迁移逻辑未被覆盖。
+
+
+### 9. v1.3.0 批次 2：A4 接口弹窗位置 + A5 接口标签收折（cache-bust v53 -> v54）
+**范围**：接口编辑器紧邻被编辑项插入（A4）+ 每个 provider 可独立收折（A5）。
+**不含 Capacitor 专属 API，属于通用 UI 重构，可推主仓库**。
+
+#### 9.1 A5 接口标签收折
+**改动**：`renderProviderList` 中每个 provider 从 `<div class="provider-item">` 改为 `<details class="provider-group">` + `<summary class="provider-summary">`。
+
+| 文件 | 改动 |
+|---|---|
+| `app.js` | `renderProviderList`：`.provider-item` div → `<details class="provider-group">` + `<summary class="provider-summary">`；按钮 click 加 `e.stopPropagation()` 防止误触收折 |
+| `style.css` | 新增 `.provider-group`/`.provider-group[open]`/`.provider-summary`/`.provider-summary::-webkit-details-marker`/`.provider-group .provider-detail`/`.provider-group .provider-editor` 样式 |
+
+**交互**：点击 summary 任意空白处切换收折；编辑/删除按钮因 `stopPropagation` 不触发收折。
+
+#### 9.2 A4 接口弹窗位置
+**改动**：编辑器从固定挂在列表末尾改为紧邻被编辑项插入。
+
+| 函数 | 改动 |
+|---|---|
+| `renderProviderList` | 开头加"编辑器救援"：若 `#provider-editor` 在 `#provider-list` 内，先 `insertBefore` 移出到列表后，防止 `innerHTML` 重建时销毁编辑器 |
+| `openProviderEditor` | 末尾加移动逻辑：编辑已有(idx>=0)时 `group.appendChild(editor)` + `group.open=true`；新增(idx<0)时 `container.appendChild(editor)` |
+| `closeProviderEditor` | 隐藏编辑器后 `insertBefore(editor, container.nextSibling)` 移回原位（`#provider-list` 之后） |
+
+**DOM 移动原理**：`appendChild` 对已有元素是"移动"而非"复制"，不会产生重复 ID，原有事件监听器保持有效。
+
+> 本节全部改动不含 Capacitor 专属符号，**可推主仓库**。sync 后仅需确认 `renderProviderList`/`openProviderEditor`/`closeProviderEditor` 三个函数的 A4/A5 标记段落未被覆盖。

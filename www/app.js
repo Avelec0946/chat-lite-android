@@ -1,4 +1,4 @@
-// ===== Capacitor Environment Detection =====
+﻿// ===== Capacitor Environment Detection =====
 // 在 Capacitor APK 环境下返回 true，浏览器/PWA 环境下返回 false
 // 所有 APK 特有逻辑都用 isCapacitor() 分支隔离，主仓库同步时一眼能识别
 function isCapacitor() {
@@ -453,6 +453,11 @@ function buildFileContent(m) {
 function renderProviderList() {
   var container = document.getElementById('provider-list');
   if (!container) return;
+  // A4: Move editor out of container before rebuilding to prevent destruction
+  var editor = document.getElementById('provider-editor');
+  if (editor && container.contains(editor)) {
+    container.parentNode.insertBefore(editor, container.nextSibling);
+  }
   if (!state.providers || state.providers.length === 0) {
     container.innerHTML = '<div class="provider-empty">暂无接口，点击上方按钮添加</div>';
     return;
@@ -460,27 +465,28 @@ function renderProviderList() {
   container.innerHTML = state.providers.map(function(p, i) {
     var templateLabel = p.template ? '[' + p.template.toUpperCase() + '] ' : '';
     var models = (p.models || []).map(function(m) { return m.name || m.id; }).join(', ') || '(无模型)';
-    return '<div class="provider-item" data-idx="' + i + '">' +
-      '<div class="provider-header">' +
+    // A5: Wrap each provider in <details> for collapsibility
+    return '<details class="provider-group" data-idx="' + i + '">' +
+      '<summary class="provider-summary">' +
         '<span class="provider-name">' + escapeHtml(templateLabel + p.name) + '</span>' +
         '<div class="provider-actions">' +
           '<button class="btn btn-small provider-edit" data-idx="' + i + '">编辑</button>' +
           '<button class="btn btn-small provider-delete" data-idx="' + i + '" style="background:var(--bg3);color:var(--text)">删除</button>' +
         '</div>' +
-      '</div>' +
+      '</summary>' +
       '<div class="provider-detail">' +
         '<span class="provider-url">' + escapeHtml(p.baseUrl) + '</span>' +
         '<span class="provider-endpoint">' + escapeHtml(p.endpointPath || '') + '</span>' +
         '<span class="provider-models">模型: ' + escapeHtml(models) + '</span>' +
       '</div>' +
-    '</div>';
+    '</details>';
   }).join('');
 
   container.querySelectorAll('.provider-edit').forEach(function(btn) {
-    btn.addEventListener('click', function() { openProviderEditor(parseInt(btn.dataset.idx)); });
+    btn.addEventListener('click', function(e) { e.stopPropagation(); openProviderEditor(parseInt(btn.dataset.idx)); });
   });
   container.querySelectorAll('.provider-delete').forEach(function(btn) {
-    btn.addEventListener('click', function() { deleteProvider(parseInt(btn.dataset.idx)); });
+    btn.addEventListener('click', function(e) { e.stopPropagation(); deleteProvider(parseInt(btn.dataset.idx)); });
   });
 }
 
@@ -503,10 +509,28 @@ function openProviderEditor(idx) {
   document.getElementById('provider-test-result').textContent = '';
   document.getElementById('provider-test-result').className = 'provider-test-result';
   toggleProviderAuthFields();
+  // A4: Move editor adjacent to the clicked provider item
+  var container = document.getElementById('provider-list');
+  if (idx !== undefined && idx >= 0) {
+    var group = container.querySelector('.provider-group[data-idx="' + idx + '"]');
+    if (group) {
+      group.appendChild(editor);
+      group.open = true;
+    }
+  } else {
+    // Adding new: append at the end of the list
+    container.appendChild(editor);
+  }
 }
 
 function closeProviderEditor() {
-  document.getElementById('provider-editor').style.display = 'none';
+  var editor = document.getElementById('provider-editor');
+  editor.style.display = 'none';
+  // A4: Move editor back to its home position (after provider-list)
+  var container = document.getElementById('provider-list');
+  if (container && container.parentNode) {
+    container.parentNode.insertBefore(editor, container.nextSibling);
+  }
 }
 
 async function testProviderConnection() {

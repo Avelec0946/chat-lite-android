@@ -1,4 +1,4 @@
-/* ===== Reset & Base ===== */
+﻿/* ===== Reset & Base ===== */
 *,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
 
 /* ===== Splash Screen（开屏动画）===== */
@@ -347,6 +347,12 @@ body.dark .chat-bg::after{background:rgba(0,0,0,var(--bg-overlay,0.35))}
 .provider-list{display:flex;flex-direction:column;gap:8px;margin-top:8px}
 .provider-empty{color:var(--text2);font-size:13px;padding:8px 0}
 .provider-item{background:var(--bg2);border:1px solid var(--border);border-radius:8px;padding:10px 12px}
+.provider-group{background:var(--bg2);border:1px solid var(--border);border-radius:8px;overflow:hidden}
+.provider-group[open]{border-color:var(--primary)}
+.provider-summary{display:flex;justify-content:space-between;align-items:center;padding:10px 12px;cursor:pointer;list-style:none}
+.provider-summary::-webkit-details-marker{display:none}
+.provider-group .provider-detail{padding:0 12px 10px}
+.provider-group .provider-editor{border:none;border-top:1px solid var(--border);border-radius:0;margin-top:0}
 .provider-header{display:flex;justify-content:space-between;align-items:center;margin-bottom:4px}
 .provider-name{font-weight:600;font-size:14px}
 .provider-actions{display:flex;gap:6px}
