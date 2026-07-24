@@ -1207,8 +1207,8 @@ async function init() {
     });
   }
 
-  // 设置面板快速回顶/底按钮（滚动容器是 .settings-content，非 settings-body）
-  var settingsScrollCt = document.querySelector('.settings-content');
+  // 设置面板快速回顶/底按钮（滚动容器是 #settings-body；按钮挂在 settings-content 上不随内容滚）
+  var settingsScrollCt = document.getElementById('settings-body');
   var settingsScrollBtn = document.getElementById('settings-scroll-btn');
   if (settingsScrollCt && settingsScrollBtn) {
     var updateScrollBtn = function() {
