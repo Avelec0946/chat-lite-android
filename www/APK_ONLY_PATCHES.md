@@ -1,4 +1,4 @@
-﻿# APK 专属改动清单（v1.3.0+）
+# APK 专属改动清单（v1.3.0+）
 
 > 此文件由 `sync-from-upstream.ps1` 同步主仓库 `chat-lite/` 时**不会**自动维护。
 > 主仓库同步会**直接覆盖** `www/`，凡下方列出的段落，sync 后**必须手动重新打补丁**。
@@ -141,3 +141,78 @@ Select-String -Path C:\Users\86176\chat-lite-android\www\app.js -Pattern "showBu
 | `index.html` | cache-bust v50 -> v52 |
 
 > 振感涉及 Capacitor 原生插件，**不推主仓库**。
+
+
+### 8. v1.3.0 批次 2：核心架构重构 B1+B3+B2（cache-bust v52 -> v53）
+**范围**：全局/单独设置分离（B1）+ 状态栏模板/显示项分离（B3 剩余）+ 分模型提示词微调（B2）。
+**不含 Capacitor 专属 API，属于通用架构重构，可推主仓库**。
+
+#### 8.1 B1 全局/单独设置分离
+**数据结构**：
+- `settings.global = { thinkingEnabled, systemPrompt, emphasis, userIdentity, statusBar }` — 全局默认层
+- `settings.modelPrompts = {}` — B2 模型级提示词（见 8.3）
+- 会话级 `conv.{thinkingEnabled,systemPrompt,emphasis,userIdentity,statusBar}` 字段为 `null/undefined` 时继承全局
+
+**新增函数**：
+| 函数 | 作用 |
+|---|---|
+| `effective(conv, key)` | 读取有效设置：conv 非空优先，回退 settings.global |
+| `effectiveStatusBar(conv)` | 状态栏对象有效值，兼容旧 `template` 字段名 → `templateRule` |
+| `effectiveModelPrompt(conv)` | B2 模型级提示词，key 为 `providerId:modelId` |
+| `fillSettingsForm()` | 根据 `state._settingsTab` 回填表单（conv tab 时 conv 优先回退 global） |
+
+**改动函数**：
+| 函数 | 改动 |
+|---|---|
+| `loadSettings` | 默认值加 `global` + `modelPrompts`；旧 settings 无 global 时从顶层 thinkingEnabled 派生迁移 |
+| `newConversation` | 移除 `thinkingEnabled/systemPrompt/userIdentity` 硬编码，改为继承全局 |
+| `buildContext` / `buildContextForContinue` | 用 `effective`/`effectiveStatusBar`/`effectiveModelPrompt` 取值；注入顺序：全局 → 会话 → 模型 → 状态栏 → userIdentity |
+| `toggleSettings` | 拆出 `fillSettingsForm`，根据 tab 回填 |
+| `saveSettingsHandler` | 根据 tab 保存到 global 或 conv；conv 空字符串转 null 继承全局 |
+| `init` thinkingToggle 监听 | 同时更新 `settings.global.thinkingEnabled`；仅 conv tab 下同步到 conv |
+| `restoreConversationState` / `newChat` | 移除 `conv.thinkingEnabled = settings.thinkingEnabled`（新会话继承全局） |
+| `executeRequest` / `sendFromMessageContinue` reqBody | `conv.thinkingEnabled !== false` → `effective(conv,'thinkingEnabled') !== false` |
+| 状态栏渲染 | `conv?.statusBar?.position` → `effectiveStatusBar(conv).position` |
+
+**UI 改动**：
+| 文件 | 改动 |
+|---|---|
+| `index.html` | settings-body 开头加 `settings-tabs`（当前会话/全局默认 tab + "使用全局设置"按钮） |
+| `index.html` | tab 提示行 `tab-hint-conv`/`tab-hint-global` |
+| `style.css` | `.settings-tabs` / `.settings-tab` / `.settings-tab.active` 样式 |
+| `app.js` init | tab 切换 click 监听；"使用全局设置"按钮把 conv 提示词字段全设 null |
+
+**数据迁移**：旧用户 conv 字段保留原值（非 null），不强制继承全局；新会话默认继承。`loadSettings` 自动补全 `global`/`modelPrompts` 字段。
+
+#### 8.2 B3 剩余：状态栏模板/显示项分离
+**数据结构**：`statusBar.template`（旧）→ `statusBar.templateRule`（新）+ `statusBar.displayFields`（新增）。
+- `templateRule`：注入系统提示的指令（告诉模型输出什么）
+- `displayFields`：UI 展示字段过滤（可选，留空展示全部）
+- `effectiveStatusBar` 兼容旧 `template` 字段名自动迁移到 `templateRule`
+
+**UI 改动**：
+| 文件 | 改动 |
+|---|---|
+| `index.html` | 原 `statusbar-template` textarea 拆为 `statusbar-template-rule` + `statusbar-display-fields` 两个 textarea；新增 `statusbar-display-fields-row` |
+| `app.js` | `statusbar-toggle` change 监听加 `statusbar-display-fields-row` 显示控制 |
+| `app.js` | `fillSettingsForm`/`saveSettingsHandler` 读写 `templateRule`/`displayFields` |
+
+**代码块排除正则**（B3 验收点）：
+| 位置 | 改动 |
+|---|---|
+| `app.js` 状态栏提取 | 提取 `<status>` 前先把 ``` ```...``` ``` 和内联 `` `...` `` 替换为 `\u0000CBn\u0000` 占位符，避免代码块内的 `<status>` 示例被误提取为真状态栏 |
+
+#### 8.3 B2 分模型提示词微调
+**数据结构**：`settings.modelPrompts["<providerId>:<modelId>"] = { systemPrompt, emphasis }`
+
+**注入顺序**（buildContext）：`[全局 systemPrompt] → [会话 systemPrompt] → [会话 emphasis] → [模型 systemPrompt] → [模型 emphasis] → [状态栏] → [userIdentity]`
+
+**UI 改动**：
+| 文件 | 改动 |
+|---|---|
+| `index.html` | 接口管理与数据管理之间加"模型提示词"section：`model-prompts-key-label` + `model-prompt-sys` + `model-prompt-emp` 两个 textarea |
+| `app.js` | `fillSettingsForm` 回填当前会话 provider+model 对应的提示词；`saveSettingsHandler` 保存到 `settings.modelPrompts[key]`（空则 delete） |
+
+**注意**：模型提示词在 tab 切换时不变（它是全局设置，按模型键存），不受 conv/global tab 影响。
+
+> 本节全部改动不含 Capacitor 专属符号，**可推主仓库**。sync 后仅需确认 `settings.global`/`modelPrompts` 迁移逻辑未被覆盖。

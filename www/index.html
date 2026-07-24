@@ -1,11 +1,11 @@
-﻿<!DOCTYPE html>
+<!DOCTYPE html>
 <html lang="zh-CN">
 <head>
 <meta charset="UTF-8">
   <link rel="icon" href="favicon.png" type="image/png">
 <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0">
 <title>chat-lite</title>
-<link rel="stylesheet" href="style.css?v=52">
+<link rel="stylesheet" href="style.css?v=53">
 <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github-dark.min.css">
   <meta name="theme-color" content="#7c3aed">
   <link rel="manifest" href="manifest.json">
@@ -131,6 +131,13 @@
         </button>
       </div>
       <div class="settings-body">
+        <div class="settings-tabs">
+          <button type="button" class="settings-tab active" data-tab="conv">当前会话</button>
+          <button type="button" class="settings-tab" data-tab="global">全局默认</button>
+          <button type="button" id="btn-reset-conv-prompts" class="btn btn-small" style="margin-left:auto;display:none">使用全局设置</button>
+        </div>
+        <span class="setting-hint" id="tab-hint-conv" style="display:block">当前会话：留空字段自动继承全局默认</span>
+        <span class="setting-hint" id="tab-hint-global" style="display:none">全局默认：新建会话将继承这些设置</span>
         <label class="setting-row">
           <span>深度思考</span>
           <label class="toggle-switch">
@@ -158,10 +165,14 @@
         </label>
         <span class="setting-hint">模型回复末尾自动附加结构化状态信息（&lt;status&gt; 标签）</span>
         <label class="setting-row setting-row-col" id="statusbar-template-row" style="display:none">
-          <span>提示模板</span>
-          <textarea id="statusbar-template" class="setting-textarea" rows="3" placeholder="告诉模型状态栏应该包含哪些内容..."></textarea>
+          <span>提示规则（templateRule）</span>
+          <textarea id="statusbar-template-rule" class="setting-textarea" rows="3" placeholder="告诉模型状态栏应输出哪些内容，如：当前地点、当前行动、当前穿搭、内心独白"></textarea>
         </label>
-        <span class="setting-hint" id="statusbar-template-hint" style="display:none">留空则使用默认模板。此内容会注入到每轮对话的系统提示中。</span>
+        <label class="setting-row setting-row-col" id="statusbar-display-fields-row" style="display:none">
+          <span>展示字段（displayFields，可选）</span>
+          <textarea id="statusbar-display-fields" class="setting-textarea" rows="2" placeholder="UI 上仅展示的字段名，逗号分隔，如：地点, 行动。留空则展示全部"></textarea>
+        </label>
+        <span class="setting-hint" id="statusbar-template-hint" style="display:none">提示规则注入系统提示；展示字段用于 UI 过滤（可留空）</span>
         <label class="setting-row" id="statusbar-position-row" style="display:none">
           <span>显示位置</span>
           <select id="statusbar-position" class="setting-select">
@@ -311,6 +322,20 @@
           </div>
         </div>
         <div class="setting-divider"></div>
+        <span class="setting-section-title">模型提示词（B2 分模型微调）</span>
+        <span class="setting-hint">为当前会话的 provider+model 组合设置独立提示词，注入顺序：全局 → 会话 → 模型。留空则不注入。</span>
+        <label class="setting-row setting-row-col">
+          <span>当前模型键：<span id="model-prompts-key-label" style="color:var(--text2);font-size:12px">-</span></span>
+        </label>
+        <label class="setting-row setting-row-col">
+          <span>模型级 systemPrompt</span>
+          <textarea id="model-prompt-sys" class="setting-textarea" rows="2" placeholder="留空则不注入模型级提示"></textarea>
+        </label>
+        <label class="setting-row setting-row-col">
+          <span>模型级 emphasis</span>
+          <textarea id="model-prompt-emp" class="setting-textarea" rows="2" placeholder="留空则不注入"></textarea>
+        </label>
+        <div class="setting-divider"></div>
         <span class="setting-section-title">数据管理（全量导出/导入）</span>
         <span class="setting-hint">导出当前所有对话、接口配置和设置；可用于网页版与 APK 之间迁移数据。</span>
         <div class="card-import-row" style="margin-top:8px">
@@ -338,6 +363,6 @@
 
 <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/marked/12.0.1/marked.min.js"></script>
-<script src="app.js?v=52"></script>
+<script src="app.js?v=53"></script>
 </body>
 </html>

@@ -1,4 +1,4 @@
-﻿// ===== Capacitor Environment Detection =====
+// ===== Capacitor Environment Detection =====
 // 在 Capacitor APK 环境下返回 true，浏览器/PWA 环境下返回 false
 // 所有 APK 特有逻辑都用 isCapacitor() 分支隔离，主仓库同步时一眼能识别
 function isCapacitor() {
@@ -762,11 +762,54 @@ function migrateV1toV2(conv) {
 }
 
 function loadSettings() {
+  var defaults = {
+    thinkingEnabled: true, apiKey: '', fontSize: '15', lineSpacing: '1.6',
+    directMode: false, hapticFeedback: true, nativeStreamingMode: 'auto', nativeTimeoutMs: 120000,
+    // B1: 全局提示词层（会话级 null/空表示继承）
+    global: { thinkingEnabled: true, systemPrompt: '', emphasis: '', userIdentity: '', statusBar: { enabled: false, templateRule: '', displayFields: '', position: 'bottom' } },
+    // B2: 分模型提示词 {"<providerId>:<modelId>": {systemPrompt, emphasis}}
+    modelPrompts: {}
+  };
   try {
     const raw = localStorage.getItem(SETTINGS_KEY);
-    if (raw) return JSON.parse(raw);
+    if (raw) {
+      var s = JSON.parse(raw);
+      // B1 迁移：旧 settings 无 global 字段，从顶层 thinkingEnabled 派生
+      if (!s.global) {
+        s.global = {
+          thinkingEnabled: s.thinkingEnabled !== undefined ? s.thinkingEnabled : defaults.global.thinkingEnabled,
+          systemPrompt: '', emphasis: '', userIdentity: '',
+          statusBar: { enabled: false, templateRule: '', displayFields: '', position: 'bottom' }
+        };
+      } else {
+        if (!s.global.statusBar) s.global.statusBar = { enabled: false, templateRule: '', displayFields: '', position: 'bottom' };
+        if (s.global.statusBar.template && !s.global.statusBar.templateRule) s.global.statusBar.templateRule = s.global.statusBar.template;
+        if (s.global.thinkingEnabled === undefined) s.global.thinkingEnabled = s.thinkingEnabled !== undefined ? s.thinkingEnabled : true;
+      }
+      if (!s.modelPrompts) s.modelPrompts = {};
+      return s;
+    }
   } catch(e) {}
-  return { thinkingEnabled: true, apiKey: '', fontSize: '15', lineSpacing: '1.6', directMode: false, hapticFeedback: true };
+  return defaults;
+}
+
+// B1: 读取有效设置（conv 非空优先，否则回退 global）
+function effective(conv, key) {
+  if (conv && conv[key]) return conv[key];
+  return (settings.global && settings.global[key]) || null;
+}
+// B1: 状态栏有效值（对象特殊处理，兼容旧 template 字段名）
+function effectiveStatusBar(conv) {
+  var sb = (conv && conv.statusBar) || (settings.global && settings.global.statusBar) || null;
+  if (!sb) return { enabled: false, templateRule: '', displayFields: '', position: 'bottom' };
+  if (sb.template && !sb.templateRule) sb.templateRule = sb.template;
+  return sb;
+}
+// B2: 读取模型级提示词
+function effectiveModelPrompt(conv) {
+  if (!settings.modelPrompts || !conv) return null;
+  var key = (conv.providerId || '') + ':' + (conv.model || '');
+  return settings.modelPrompts[key] || null;
 }
 
 function saveSettings() {
@@ -784,14 +827,13 @@ function newConversation() {
     versions: [{ content: '', timestamp: Date.now(), reason: 'original' }],
     activeVersion: 0, files: [], editing: false, createdAt: Date.now()
   };
+  // B1: 新会话默认继承全局设置（systemPrompt/emphasis/userIdentity/statusBar 不设即继承）
   return {
     id: uid(),
     title: '新对话',
     model: (state.providers && state.providers[0] && state.providers[0].models && state.providers[0].models[0] && state.providers[0].models[0].id) || 'deepseek-v4-flash',
     providerId: (state.providers && state.providers[0] && state.providers[0].id) || null,
-    thinkingEnabled: settings.thinkingEnabled,
-    systemPrompt: '',
-    userIdentity: '',
+    // thinkingEnabled 不设，继承 settings.global.thinkingEnabled
     rootId: msgId,
     activePath: [msgId],
     messageMap: { [msgId]: rootMsg },
@@ -956,13 +998,14 @@ async function init() {
   if (hapticCheck) hapticCheck.checked = (settings.hapticFeedback !== false);
   applyDisplaySettings();
 
-  // Thinking toggle auto-saves immediately
+  // Thinking toggle auto-saves immediately (B1: 同时更新 global)
   thinkingToggle.addEventListener('change', () => {
     settings.thinkingEnabled = thinkingToggle.checked;
+    if (settings.global) settings.global.thinkingEnabled = thinkingToggle.checked;
     saveSettings();
     const conv = currentConv();
-    if (conv) {
-      conv.thinkingEnabled = settings.thinkingEnabled;
+    if (conv && (state._settingsTab || 'conv') === 'conv') {
+      conv.thinkingEnabled = thinkingToggle.checked;
       save();
     }
   });
@@ -1118,13 +1161,41 @@ async function init() {
   });
   $('bg-overlay-slider').addEventListener('change', () => { save(); });
 
-  // Status bar toggle
+  // Status bar toggle (B3: 含 displayFields 行控制)
   $('statusbar-toggle').addEventListener('change', function() {
     var show = this.checked;
     $('statusbar-template-row').style.display = show ? '' : 'none';
+    var dfRow = document.getElementById('statusbar-display-fields-row');
+    if (dfRow) dfRow.style.display = show ? '' : 'none';
     $('statusbar-template-hint').style.display = show ? '' : 'none';
     $('statusbar-position-row').style.display = show ? '' : 'none';
   });
+
+  // B1: settings tab 切换
+  document.querySelectorAll('.settings-tab').forEach(function(tab) {
+    tab.addEventListener('click', function() {
+      state._settingsTab = tab.dataset.tab;
+      fillSettingsForm();
+    });
+  });
+
+  // B1: "使用全局设置"按钮（会话 tab 下把 conv 提示词字段清空为 null 继承全局）
+  var resetBtn = document.getElementById('btn-reset-conv-prompts');
+  if (resetBtn) {
+    resetBtn.addEventListener('click', function() {
+      var conv = currentConv();
+      if (!conv) return;
+      if (!confirm('清空当前会话的提示词设置，改为继承全局？')) return;
+      conv.thinkingEnabled = null;
+      conv.systemPrompt = null;
+      conv.emphasis = null;
+      conv.userIdentity = null;
+      conv.statusBar = null;
+      save();
+      fillSettingsForm();
+      showToast('已切换为继承全局设置');
+    });
+  }
 
   // Long press + drag to reorder conversations
   let longPressTimer = null;
@@ -1279,7 +1350,6 @@ function restoreConversationState() {
   if (state.conversations.length === 0) {
     const conv = newConversation();
     conv.title = '对话 1';
-    conv.thinkingEnabled = settings.thinkingEnabled;
     state.conversations.push(conv);
     state.currentId = conv.id;
     save();
@@ -1527,7 +1597,6 @@ function newChat() {
   if (state.loading) return;
   const conv = newConversation();
   conv.title = `对话 ${state.conversations.length + 1}`;
-  conv.thinkingEnabled = settings.thinkingEnabled;
   state.conversations.push(conv);
   state.currentId = conv.id;
   save();
@@ -2043,21 +2112,28 @@ function renderContent(msg) {
   html += rendered;
 
   // Status bar: extract <status>...</status> and render as styled block
-  // Use lastIndexOf to find the LAST <status> tag (avoid matching examples in debug output)
+  // B3: 先把代码块替换成占位符，避免代码块内的 <status> 示例被误提取
   var content = msg.content || '';
-  var lastStatusStart = content.lastIndexOf('<status>');
-  var lastStatusEnd = content.lastIndexOf('</status>');
+  var _codeBlocks = [];
+  var contentNoCode = content.replace(/```[\s\S]*?```/g, function(m) {
+    var i = _codeBlocks.length; _codeBlocks.push(m); return '\u0000CB' + i + '\u0000';
+  }).replace(/`[^`\n]+`/g, function(m) {
+    var i = _codeBlocks.length; _codeBlocks.push(m); return '\u0000CB' + i + '\u0000';
+  });
+  var lastStatusStart = contentNoCode.lastIndexOf('<status>');
+  var lastStatusEnd = contentNoCode.lastIndexOf('</status>');
   var statusMatch = null;
   if (lastStatusStart !== -1 && lastStatusEnd !== -1 && lastStatusEnd > lastStatusStart) {
-    statusMatch = [content.slice(lastStatusStart, lastStatusEnd + '</status>'.length), content.slice(lastStatusStart + '<status>'.length, lastStatusEnd)];
+    statusMatch = [contentNoCode.slice(lastStatusStart, lastStatusEnd + '</status>'.length), contentNoCode.slice(lastStatusStart + '<status>'.length, lastStatusEnd)];
   }
   if (statusMatch) {
     var statusHtml = marked.parse(statusMatch[1].trim(), { breaks: true, gfm: true });
     var conv = currentConv();
-    var position = (conv?.statusBar?.position) || 'bottom';
+    // B1: position 支持 effectiveStatusBar（继承全局）
+    var sbEff = effectiveStatusBar(conv);
+    var position = sbEff.position || 'bottom';
     var statusBarHtml = '<div class="status-bar status-bar-' + position + '">' + statusHtml + '</div>';
     if (position === 'top') {
-      // Insert after reasoning, before main content
       var reasoningEnd = html.indexOf('</details>');
       if (reasoningEnd !== -1) {
         reasoningEnd += '</details>'.length;
@@ -2394,25 +2470,34 @@ async function sendMessage() {
 
 function buildContext(conv) {
   const msgs = [];
-
-  // System prompt
   const sysParts = [];
-  if (conv.systemPrompt) {
-    sysParts.push(conv.systemPrompt);
+  const sb = effectiveStatusBar(conv);
+  const mp = effectiveModelPrompt(conv);
+
+  // B1: 全局 systemPrompt
+  if (settings.global && settings.global.systemPrompt) sysParts.push(settings.global.systemPrompt);
+  // B1: 会话级 systemPrompt override（null/空继承全局）
+  if (conv.systemPrompt) sysParts.push(conv.systemPrompt);
+  // B1: 会话级 emphasis
+  if (conv.emphasis) sysParts.push('【重要强调】' + conv.emphasis);
+  // B2: 模型级提示词
+  if (mp) {
+    if (mp.systemPrompt) sysParts.push(mp.systemPrompt);
+    if (mp.emphasis) sysParts.push('【重要强调】' + mp.emphasis);
   }
-  // Emphasis prompt (after system prompt, before status bar)
-  if (conv.emphasis) {
-    sysParts.push('【重要强调】' + conv.emphasis);
+  // B3: 状态栏指令（templateRule + displayFields 分离）
+  if (sb && sb.enabled) {
+    var rule = sb.templateRule || '当前地点、当前行动、当前穿搭、内心独白';
+    var df = sb.displayFields || '';
+    var sbExample = rule.split(/[,，、]/).map(function(s){ return s.trim()+'：xxx'; }).join('\\n');
+    var ruleText = '【状态栏指令】每次回复末尾，请用 <status>...</status> 标签输出角色当前状态信息。状态栏应包含以下内容：' + rule + '。请根据上下文合理填写数值和描述，保持角色一致性。示例格式：\\n<status>\\n' + sbExample + '\\n</status>';
+    if (df) ruleText += '\\n（UI 仅展示以下字段，其余可省略：' + df + '）';
+    sysParts.push(ruleText);
   }
-  // Status bar instruction (before user identity)
-  if (conv.statusBar && conv.statusBar.enabled) {
-    var sbTemplate = conv.statusBar.template || '当前地点、当前行动、当前穿搭、内心独白';
-    var sbExample = sbTemplate.split(/[,，、]/).map(function(s){ return s.trim()+'：xxx'; }).join('\\n');
-    sysParts.push('【状态栏指令】每次回复末尾，请用 <status>...</status> 标签输出角色当前状态信息。状态栏应包含以下内容：' + sbTemplate + '。请根据上下文合理填写数值和描述，保持角色一致性。示例格式：\\n<status>\\n' + sbExample + '\\n</status>');
-  }
-  if (conv.userIdentity) {
-    sysParts.push('用户身份：' + conv.userIdentity);
-  }
+  // B1: 用户身份（会话级优先，回退全局）
+  var userId = effective(conv, 'userIdentity');
+  if (userId) sysParts.push('用户身份：' + userId);
+
   if (sysParts.length > 0) {
     msgs.push({ role: 'system', content: sysParts.join('\n\n') });
   }
@@ -2422,23 +2507,21 @@ function buildContext(conv) {
   for (const m of chain) {
     if (!m || m.role === 'system') continue;
     let content = m.content;
-
-    // Process files (text and images)
     content = buildFileContent(m);
     msgs.push({ role: m.role, content });
 
     // Mid-context injection: remind every 4 messages
-    if (conv.statusBar && conv.statusBar.enabled && msgs.length % 4 === 0) {
-      var sbTemplate = conv.statusBar.template || '当前地点、当前行动、当前穿搭、内心独白';
-      msgs.push({ role: 'system', content: '【格式提醒】回复末尾须包含 <status>...</status> 标签，内容包括：' + sbTemplate });
+    if (sb && sb.enabled && msgs.length % 4 === 0) {
+      var ruleMid = sb.templateRule || '当前地点、当前行动、当前穿搭、内心独白';
+      msgs.push({ role: 'system', content: '【格式提醒】回复末尾须包含 <status>...</status> 标签，内容包括：' + ruleMid });
     }
   }
 
   // Post-History Instruction: status bar reminder right before generation
-  if (conv.statusBar && conv.statusBar.enabled) {
-    var sbTemplate = conv.statusBar.template || '当前地点、当前行动、当前穿搭、内心独白';
-    msgs.push({ role: 'system', content: '【格式提醒】你的每次回复必须在最末尾包含 <status>...</status> 标签的状态栏，内容包括：' + sbTemplate + '。这是强制格式要求，不可省略。' });
-    msgs.push({ role: 'user', content: '【格式要求】你必须在本次回复的最末尾，用 <status>...</status> 标签输出状态栏，内容包括：' + sbTemplate + '。这是强制要求，不可省略。' });
+  if (sb && sb.enabled) {
+    var rulePost = sb.templateRule || '当前地点、当前行动、当前穿搭、内心独白';
+    msgs.push({ role: 'system', content: '【格式提醒】你的每次回复必须在最末尾包含 <status>...</status> 标签的状态栏，内容包括：' + rulePost + '。这是强制格式要求，不可省略。' });
+    msgs.push({ role: 'user', content: '【格式要求】你必须在本次回复的最末尾，用 <status>...</status> 标签输出状态栏，内容包括：' + rulePost + '。这是强制要求，不可省略。' });
   }
 
   return msgs;
@@ -2899,7 +2982,7 @@ async function sendFromMessage(context) {
     messages: context,
     model: conv.model,
     stream: !isCapacitor(),
-    thinkingEnabled: conv.thinkingEnabled !== false
+    thinkingEnabled: effective(conv, 'thinkingEnabled') !== false
   };
 
   var req;
@@ -3021,19 +3104,33 @@ async function continueGeneration(msgId) {
 
 function buildContextForContinue(conv, targetMsg) {
   const msgs = [];
-
-  // System prompt
   const sysParts = [];
+  const sb = effectiveStatusBar(conv);
+  const mp = effectiveModelPrompt(conv);
+
+  // B1: 全局 systemPrompt
+  if (settings.global && settings.global.systemPrompt) sysParts.push(settings.global.systemPrompt);
+  // B1: 会话级 systemPrompt override
   if (conv.systemPrompt) sysParts.push(conv.systemPrompt);
-  // Emphasis prompt (after system prompt, before status bar)
+  // B1: 会话级 emphasis
   if (conv.emphasis) sysParts.push('【重要强调】' + conv.emphasis);
-  // Status bar instruction (before user identity)
-  if (conv.statusBar && conv.statusBar.enabled) {
-    var sbTemplate = conv.statusBar.template || '当前地点、当前行动、当前穿搭、内心独白';
-    var sbExample = sbTemplate.split(/[,，、]/).map(function(s){ return s.trim()+'：xxx'; }).join('\\n');
-    sysParts.push('【状态栏指令】每次回复末尾，请用 <status>...</status> 标签输出角色当前状态信息。状态栏应包含以下内容：' + sbTemplate + '。请根据上下文合理填写数值和描述，保持角色一致性。示例格式：\\n<status>\\n' + sbExample + '\\n</status>');
+  // B2: 模型级提示词
+  if (mp) {
+    if (mp.systemPrompt) sysParts.push(mp.systemPrompt);
+    if (mp.emphasis) sysParts.push('【重要强调】' + mp.emphasis);
   }
-  if (conv.userIdentity) sysParts.push('用户身份：' + conv.userIdentity);
+  // B3: 状态栏指令
+  if (sb && sb.enabled) {
+    var rule = sb.templateRule || '当前地点、当前行动、当前穿搭、内心独白';
+    var df = sb.displayFields || '';
+    var sbExample = rule.split(/[,，、]/).map(function(s){ return s.trim()+'：xxx'; }).join('\\n');
+    var ruleText = '【状态栏指令】每次回复末尾，请用 <status>...</status> 标签输出角色当前状态信息。状态栏应包含以下内容：' + rule + '。请根据上下文合理填写数值和描述，保持角色一致性。示例格式：\\n<status>\\n' + sbExample + '\\n</status>';
+    if (df) ruleText += '\\n（UI 仅展示以下字段，其余可省略：' + df + '）';
+    sysParts.push(ruleText);
+  }
+  // B1: 用户身份
+  var userId = effective(conv, 'userIdentity');
+  if (userId) sysParts.push('用户身份：' + userId);
   if (sysParts.length > 0) msgs.push({ role: 'system', content: sysParts.join('\\n\\n') });
 
   // Walk up from targetMsg to root, collect messages
@@ -3050,18 +3147,16 @@ function buildContextForContinue(conv, targetMsg) {
     content = buildFileContent(m);
     msgs.push({ role: m.role, content });
 
-    // Mid-context injection: remind every 4 messages
-    if (conv.statusBar && conv.statusBar.enabled && msgs.length % 4 === 0) {
-      var sbTemplate = conv.statusBar.template || '当前地点、当前行动、当前穿搭、内心独白';
-      msgs.push({ role: 'system', content: '【格式提醒】回复末尾须包含 <status>...</status> 标签，内容包括：' + sbTemplate });
+    if (sb && sb.enabled && msgs.length % 4 === 0) {
+      var ruleMid = sb.templateRule || '当前地点、当前行动、当前穿搭、内心独白';
+      msgs.push({ role: 'system', content: '【格式提醒】回复末尾须包含 <status>...</status> 标签，内容包括：' + ruleMid });
     }
   }
 
-  // Post-History Instruction: status bar reminder right before generation
-  if (conv.statusBar && conv.statusBar.enabled) {
-    var sbTemplate = conv.statusBar.template || '当前地点、当前行动、当前穿搭、内心独白';
-    msgs.push({ role: 'system', content: '【格式提醒】你的每次回复必须在最末尾包含 <status>...</status> 标签的状态栏，内容包括：' + sbTemplate + '。这是强制格式要求，不可省略。' });
-    msgs.push({ role: 'user', content: '【格式要求】你必须在本次回复的最末尾，用 <status>...</status> 标签输出状态栏，内容包括：' + sbTemplate + '。这是强制要求，不可省略。' });
+  if (sb && sb.enabled) {
+    var rulePost = sb.templateRule || '当前地点、当前行动、当前穿搭、内心独白';
+    msgs.push({ role: 'system', content: '【格式提醒】你的每次回复必须在最末尾包含 <status>...</status> 标签的状态栏，内容包括：' + rulePost + '。这是强制格式要求，不可省略。' });
+    msgs.push({ role: 'user', content: '【格式要求】你必须在本次回复的最末尾，用 <status>...</status> 标签输出状态栏，内容包括：' + rulePost + '。这是强制要求，不可省略。' });
   }
 
   return msgs;
@@ -3099,7 +3194,7 @@ async function sendFromMessageContinue(context, assistantMsg) {
       messages: context,
       model: conv.model,
       stream: !isCapacitor(),
-      thinkingEnabled: conv.thinkingEnabled !== false
+      thinkingEnabled: effective(conv, 'thinkingEnabled') !== false
     };
 
     var req;
@@ -3916,41 +4011,81 @@ function applyDisplaySettings() {
   document.documentElement.style.setProperty('--lh', settings.lineSpacing);
 }
 
+// B1: 根据 tab 回填表单（conv tab 时 conv 字段优先，回退 global；global tab 时只读 global）
+function fillSettingsForm() {
+  var tab = state._settingsTab || 'conv';
+  var conv = currentConv();
+  var src = {};
+  if (tab === 'global') {
+    src = settings.global || {};
+    src.statusBar = src.statusBar || { enabled: false, templateRule: '', displayFields: '', position: 'bottom' };
+  } else {
+    var g = settings.global || {};
+    src.thinkingEnabled = conv ? (conv.thinkingEnabled != null ? conv.thinkingEnabled : g.thinkingEnabled) : g.thinkingEnabled;
+    src.systemPrompt = conv ? (conv.systemPrompt != null ? conv.systemPrompt : g.systemPrompt) : g.systemPrompt;
+    src.emphasis = conv ? (conv.emphasis != null ? conv.emphasis : g.emphasis) : g.emphasis;
+    src.userIdentity = conv ? (conv.userIdentity != null ? conv.userIdentity : g.userIdentity) : g.userIdentity;
+    src.statusBar = effectiveStatusBar(conv);
+  }
+  thinkingToggle.checked = src.thinkingEnabled !== false;
+  systemPromptInput.value = src.systemPrompt || '';
+  $('emphasis-prompt').value = src.emphasis || '';
+  userIdentityInput.value = src.userIdentity || '';
+  var sb = src.statusBar || { enabled: false, templateRule: '', displayFields: '', position: 'bottom' };
+  if (sb.template && !sb.templateRule) sb.templateRule = sb.template;
+  $('statusbar-toggle').checked = sb.enabled;
+  var ruleEl = document.getElementById('statusbar-template-rule');
+  var dfEl = document.getElementById('statusbar-display-fields');
+  if (ruleEl) ruleEl.value = sb.templateRule || '';
+  if (dfEl) dfEl.value = sb.displayFields || '';
+  $('statusbar-position').value = sb.position || 'bottom';
+  var showRows = sb.enabled ? '' : 'none';
+  $('statusbar-template-row').style.display = showRows;
+  var dfRow = document.getElementById('statusbar-display-fields-row');
+  if (dfRow) dfRow.style.display = showRows;
+  $('statusbar-template-hint').style.display = showRows;
+  $('statusbar-position-row').style.display = showRows;
+  // "使用全局设置"按钮：仅 conv tab 且有会话时显示
+  var resetBtn = document.getElementById('btn-reset-conv-prompts');
+  if (resetBtn) resetBtn.style.display = (tab === 'conv' && conv) ? '' : 'none';
+  // tab 高亮
+  document.querySelectorAll('.settings-tab').forEach(function(t) {
+    t.classList.toggle('active', t.dataset.tab === tab);
+  });
+  // B2: 模型提示词回填
+  var mpKey = conv ? ((conv.providerId || '') + ':' + (conv.model || '')) : '';
+  var mpLabel = document.getElementById('model-prompts-key-label');
+  if (mpLabel) mpLabel.textContent = mpKey || '(无当前会话)';
+  var mp = (conv && settings.modelPrompts && settings.modelPrompts[mpKey]) || {};
+  var mpSys = document.getElementById('model-prompt-sys');
+  var mpEmp = document.getElementById('model-prompt-emp');
+  if (mpSys) mpSys.value = mp.systemPrompt || '';
+  if (mpEmp) mpEmp.value = mp.emphasis || '';
+}
+
 function toggleSettings(open) {
   state.settingsOpen = open;
   settingsPanel.style.display = open ? 'flex' : 'none';
   if (open) {
+    if (!state._settingsTab) state._settingsTab = 'conv';
     renderProviderList();
-    const conv = currentConv();
-    thinkingToggle.checked = conv ? conv.thinkingEnabled : settings.thinkingEnabled;
-    systemPromptInput.value = conv?.systemPrompt || '';
-    $('emphasis-prompt').value = conv?.emphasis || '';
-    userIdentityInput.value = conv?.userIdentity || '';
-    // Display settings
+    // Display settings（全局）
     const fsSelect = document.getElementById('font-size-select');
     const lsSelect = document.getElementById('line-spacing-select');
     if (fsSelect) fsSelect.value = settings.fontSize || '15';
     if (lsSelect) lsSelect.value = settings.lineSpacing || '1.6';
-    // Status bar settings (per-conversation)
-    var sb = conv?.statusBar || { enabled: false, template: '', position: 'bottom' };
-    $('statusbar-toggle').checked = sb.enabled;
-    $('statusbar-template').value = sb.template || '';
-    $('statusbar-position').value = sb.position || 'bottom';
-    $('statusbar-template-row').style.display = sb.enabled ? '' : 'none';
-    $('statusbar-template-hint').style.display = sb.enabled ? '' : 'none';
-    $('statusbar-position-row').style.display = sb.enabled ? '' : 'none';
+    fillSettingsForm();
   }
 }
 
 function saveSettingsHandler() {
+  // 全局设置（永远保存）
   settings.thinkingEnabled = thinkingToggle.checked;
-  // 流式模式（APK 专用）
+  if (settings.global) settings.global.thinkingEnabled = thinkingToggle.checked;
   const streamingModeSelect = document.getElementById('native-streaming-mode-select');
   if (streamingModeSelect) settings.nativeStreamingMode = streamingModeSelect.value;
-  // C3: 振感反馈开关
   const hapticCheck = document.getElementById('haptic-feedback-check');
   if (hapticCheck) settings.hapticFeedback = hapticCheck.checked;
-  // Display settings
   const fsSelect = document.getElementById('font-size-select');
   const lsSelect = document.getElementById('line-spacing-select');
   if (fsSelect) settings.fontSize = fsSelect.value;
@@ -3958,19 +4093,48 @@ function saveSettingsHandler() {
   applyDisplaySettings();
   saveSettings();
 
-  // Per-conversation: save prompts and status bar settings
-  const conv = currentConv();
-  if (conv) {
-    conv.thinkingEnabled = thinkingToggle.checked;
-    conv.systemPrompt = systemPromptInput.value.trim();
-    conv.emphasis = $('emphasis-prompt').value.trim();
-    conv.userIdentity = userIdentityInput.value.trim();
-    conv.statusBar = {
-      enabled: $('statusbar-toggle').checked,
-      template: $('statusbar-template').value.trim(),
-      position: $('statusbar-position').value
-    };
-    save();
+  // B1: 提示词相关根据 tab 保存
+  var tab = state._settingsTab || 'conv';
+  var sbData = {
+    enabled: $('statusbar-toggle').checked,
+    templateRule: (document.getElementById('statusbar-template-rule') || {}).value ? (document.getElementById('statusbar-template-rule').value || '').trim() : '',
+    displayFields: (document.getElementById('statusbar-display-fields') || {}).value ? (document.getElementById('statusbar-display-fields').value || '').trim() : '',
+    position: $('statusbar-position').value
+  };
+  if (tab === 'global') {
+    settings.global = settings.global || {};
+    settings.global.systemPrompt = systemPromptInput.value.trim();
+    settings.global.emphasis = $('emphasis-prompt').value.trim();
+    settings.global.userIdentity = userIdentityInput.value.trim();
+    settings.global.statusBar = sbData;
+    saveSettings();
+  } else {
+    const conv = currentConv();
+    if (conv) {
+      conv.thinkingEnabled = thinkingToggle.checked;
+      // B1: 空字符串转 null 表示继承全局
+      conv.systemPrompt = systemPromptInput.value.trim() || null;
+      conv.emphasis = $('emphasis-prompt').value.trim() || null;
+      conv.userIdentity = userIdentityInput.value.trim() || null;
+      conv.statusBar = sbData;
+      save();
+    }
+  }
+
+  // B2: 模型提示词保存
+  var b2conv = currentConv();
+  if (b2conv) {
+    var mpKey = (b2conv.providerId || '') + ':' + (b2conv.model || '');
+    var mpSysEl = document.getElementById('model-prompt-sys');
+    var mpEmpEl = document.getElementById('model-prompt-emp');
+    var newSys = mpSysEl ? mpSysEl.value.trim() : '';
+    var newEmp = mpEmpEl ? mpEmpEl.value.trim() : '';
+    if (newSys || newEmp) {
+      settings.modelPrompts[mpKey] = { systemPrompt: newSys, emphasis: newEmp };
+    } else {
+      delete settings.modelPrompts[mpKey];
+    }
+    saveSettings();
   }
 
   toggleSettings(false);
