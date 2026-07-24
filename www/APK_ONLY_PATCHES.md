@@ -92,3 +92,16 @@ Select-String -Path C:\Users\86176\chat-lite-android\www\app.js -Pattern "showBu
 | `app.js` | `getDefaultSettings` 中 `hapticFeedback:true`；`applySettings` 用 `!== false` 兼容旧用户；web 流式路径（约 2884/3088 行）补 `triggerHapticFeedback()` |
 
 > 设置面板布局修复属于通用 CSS 优化，可推主仓库；振感默认值/触发属 APK 专属行为，不推。
+
+### 6. v1.3.0 批次 1+ 修正：振感反馈真正生效（Capacitor Haptics 原生插件）
+**根因**：原实现用 `navigator.vibrate(8)`，但 Android WebView 从 API 30+ 起默认禁用此 API，导致无论开关状态如何设备都不振动。
+
+**修复**：
+| 项 | 改动 |
+|---|---|
+| `package.json` | 新增依赖 `@capacitor/haptics@^6`（npm install --legacy-peer-deps） |
+| `AndroidManifest.xml` | 新增 `<uses-permission android:name="android.permission.VIBRATE" />` |
+| `app.js` 插件初始化 | 新增 `CapHaptics = Capacitor.Plugins.Haptics` |
+| `app.js` triggerHapticFeedback | 优先 `CapHaptics.impact({style:'LIGHT',duration:8})` 走原生 Vibrator，回退 `navigator.vibrate` |
+
+> 振感涉及 Capacitor 原生插件 + VIBRATE 权限，**不推主仓库**。

@@ -1,4 +1,4 @@
-// ===== Capacitor Environment Detection =====
+﻿// ===== Capacitor Environment Detection =====
 // 在 Capacitor APK 环境下返回 true，浏览器/PWA 环境下返回 false
 // 所有 APK 特有逻辑都用 isCapacitor() 分支隔离，主仓库同步时一眼能识别
 function isCapacitor() {
@@ -10,12 +10,14 @@ let CapFilesystem = null;
 let CapShare = null;
 let CapHttp = null;
 let CapStreamHttp = null;
+let CapHaptics = null;
 if (isCapacitor()) {
   try {
     CapFilesystem = Capacitor.Plugins && Capacitor.Plugins.Filesystem;
     CapShare = Capacitor.Plugins && Capacitor.Plugins.Share;
     CapHttp = Capacitor.Plugins && Capacitor.Plugins.CapacitorHttp;
     CapStreamHttp = Capacitor.Plugins && Capacitor.Plugins.StreamHttp;
+    CapHaptics = Capacitor.Plugins && Capacitor.Plugins.Haptics;
   } catch (e) {
     console.warn('Capacitor plugins init failed:', e);
   }
@@ -1844,14 +1846,25 @@ function flashBubbleMenuToast() {
 }
 
 // ===== C3: 流式振感反馈（带开关，节流 100ms） =====
+// 注意：navigator.vibrate 在 Android WebView 中默认无效（API 30+ 禁用），
+// 必须用 Capacitor Haptics 原生插件才能真正触发设备振动。
 let _hapticLastTriggered = 0;
 function triggerHapticFeedback() {
   if (!settings.hapticFeedback) return;
-  if (typeof navigator === 'undefined' || !navigator.vibrate) return;
   const now = Date.now();
   if (now - _hapticLastTriggered < 100) return; // 节流，避免每 chunk 振动
   _hapticLastTriggered = now;
-  try { navigator.vibrate(8); } catch(e) {}
+  try {
+    if (CapHaptics && typeof CapHaptics.impact === 'function') {
+      // APK 原生路径：Haptics.impact 走 Vibrator 系统 API
+      CapHaptics.impact({ style: 'LIGHT', duration: 8 });
+      return;
+    }
+    // 回退：仅在支持的浏览器/PWA 上生效
+    if (typeof navigator !== 'undefined' && navigator.vibrate) {
+      navigator.vibrate(8);
+    }
+  } catch(e) {}
 }
 
 // ===== C1: 回到底部按钮 =====
