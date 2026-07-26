@@ -45,8 +45,7 @@ const state = {
   _streamingMsg: null,
 };
 
-const STORAGE_KEY = 'chatlite_data';
-const SETTINGS_KEY = 'chatlite_settings';
+// STORAGE_KEY / SETTINGS_KEY 已迁移到 db.js
 
 // ===== Flat SVG Icons (stroke-based, consistent with toolbar) =====
 const ICON = {
@@ -61,51 +60,10 @@ const ICON = {
   x: '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="vertical-align:-2px"><circle cx="12" cy="12" r="10"/><line x1="15" y1="9" x2="9" y2="15"/><line x1="9" y1="9" x2="15" y2="15"/></svg>',
 };
 
-// ===== IndexedDB (replaces localStorage for large data) =====
-const IDB_NAME = 'chatlite_db';
-const IDB_VER = 1;
-const IDB_STORE = 'data';
-
-function openDB() {
-  return new Promise(function(resolve, reject) {
-    var req = indexedDB.open(IDB_NAME, IDB_VER);
-    req.onupgradeneeded = function(e) {
-      var db = e.target.result;
-      if (!db.objectStoreNames.contains(IDB_STORE)) db.createObjectStore(IDB_STORE);
-    };
-    req.onsuccess = function() { resolve(req.result); };
-    req.onerror = function() { reject(req.error); };
-  });
-}
-
-function idbPut(key, val) {
-  return openDB().then(function(db) {
-    return new Promise(function(resolve, reject) {
-      var tx = db.transaction(IDB_STORE, 'readwrite');
-      tx.objectStore(IDB_STORE).put(val, key);
-      tx.oncomplete = function() { resolve(); };
-      tx.onerror = function() { reject(tx.error); };
-    });
-  });
-}
-
-function idbGet(key) {
-  return openDB().then(function(db) {
-    return new Promise(function(resolve, reject) {
-      var tx = db.transaction(IDB_STORE, 'readonly');
-      var req = tx.objectStore(IDB_STORE).get(key);
-      req.onsuccess = function() { resolve(req.result); };
-      req.onerror = function() { reject(req.error); };
-    });
-  });
-}
-
-// ===== settings 存储基底重构：localStorage → IndexedDB =====
-// 旧基底 localStorage 配额仅 5-10MB，图库元数据 + imageProviders + modelPrompts 累积会撑爆
-// IndexedDB 配额通常数百 MB 起步，按域名可达 GB 级，且无 QuotaExceededError 风险
-// 启动时 init() 中 await initSettings() 从 IDB 加载或从 localStorage 迁移
-const SETTINGS_IDB_KEY = 'chatlite_settings_v2';  // 与旧 localStorage 的 SETTINGS_KEY 区分，避免双写
+// IndexedDB 存储层（openDB / idbPut / idbGet / 常量）已迁移到 db.js
+// SETTINGS_IDB_KEY 已迁移到 db.js
 // 同步初始化默认值，init 中 await initSettings() 会从 IDB 覆盖
+// defaultSettings 由 db.js 提供（db.js 先于 app.js 加载）
 let settings = defaultSettings();
 let _settingsLoaded = false;  // 标记 settings 是否已从 IDB 加载完成
 let isLongPress = false;
@@ -2102,50 +2060,7 @@ function notifyImageComplete(count) {
 }
 
 
-var _saveQueue = Promise.resolve();
-function save() {
-  const conv = state.conversations.find(c => c.id === state.currentId);
-  if (conv) conv.updatedAt = Date.now();
-  // IndexedDB (async, fire-and-forget)
-  var payload = { conversations: state.conversations, currentId: state.currentId, version: 2 };
-  idbPut(STORAGE_KEY, payload).catch(function(e) {
-    console.warn('IndexedDB save failed:', e);
-    showToast('本地存储保存失败', 'warn');
-  });
-  // Sync to server (queued, with retry) — 仅浏览器模式需要，APK 无后端
-  if (!isCapacitor()) {
-    _saveQueue = _saveQueue.then(function() {
-      return fetch('/api/save', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          conversations: state.conversations,
-          currentId: state.currentId,
-          deletedIds: state.deletedIds || []
-        })
-      }).then(function(resp) {
-        if (!resp.ok) throw new Error('Server save failed: ' + resp.status);
-        return resp.json();
-      }).catch(function(err) {
-        console.error('Server save error:', err);
-        // Retry once after 2s
-        return new Promise(function(resolve) {
-          setTimeout(function() {
-            fetch('/api/save', {
-              method: 'POST',
-              headers: { 'Content-Type': 'application/json' },
-              body: JSON.stringify({
-                conversations: state.conversations,
-                currentId: state.currentId,
-                deletedIds: state.deletedIds || []
-              })
-            }).then(resolve).catch(resolve);
-          }, 2000);
-        });
-      });
-    });
-  }
-}
+// save / _saveQueue 已迁移到 db.js
 
 async function loadData() {
   // Try IndexedDB first
@@ -2240,61 +2155,7 @@ function migrateV1toV2(conv) {
   delete conv.messages;
 }
 
-// settings 默认值（同步，不读存储）
-function defaultSettings() {
-  return {
-    thinkingEnabled: true, apiKey: '', fontSize: '15', lineSpacing: '1.6',
-    directMode: false, hapticFeedback: true, nativeStreamingMode: 'auto', nativeTimeoutMs: 120000,
-    // B2: 分模型修饰语 {"<providerId>:<modelId>": {text: "修饰语\n\n===强调===\n强调内容"}}
-    modelPrompts: {},
-    // C5: 设置分组收折状态记忆 {groupKey: true=折叠/false=展开}
-    groupCollapse: {},
-    // F1: 生图 API 配置
-    imageProviders: [],
-    imageProviderId: null,
-    images: []
-  };
-}
-
-// 对从存储（IDB 或 localStorage）读出的 settings 应用字段迁移和归一化
-function migrateSettings(s) {
-  if (!s || typeof s !== 'object') return defaultSettings();
-  // 迁移：旧版有 settings.global，提示词字段已回归会话级，移除 global
-  if (s.global) {
-    if (s.global.thinkingEnabled !== undefined && s.thinkingEnabled === undefined) {
-      s.thinkingEnabled = s.global.thinkingEnabled;
-    }
-    delete s.global;
-  }
-  // 迁移：旧 modelPrompts[key] = {systemPrompt, emphasis} -> 合并为 {text}
-  if (s.modelPrompts) {
-    for (var k in s.modelPrompts) {
-      var mp = s.modelPrompts[k];
-      if (mp && mp.text === undefined && (mp.systemPrompt || mp.emphasis)) {
-        var parts = [];
-        if (mp.systemPrompt) parts.push(mp.systemPrompt);
-        if (mp.emphasis) parts.push('===强调===\n' + mp.emphasis);
-        mp.text = parts.join('\n\n');
-        delete mp.systemPrompt;
-        delete mp.emphasis;
-      }
-    }
-  } else {
-    s.modelPrompts = {};
-  }
-  // C5: 确保 groupCollapse 字段存在且为对象
-  if (!s.groupCollapse || typeof s.groupCollapse !== 'object') s.groupCollapse = {};
-  // F1: 生图 API 字段迁移（旧用户无此字段时补默认值，并对 imageProviders 做归一化）
-  if (!Array.isArray(s.imageProviders)) s.imageProviders = [];
-  else s.imageProviders = s.imageProviders.map(function(p) { return normalizeImageProvider(p); });
-  if (typeof s.imageProviderId !== 'string') s.imageProviderId = null;
-  // imageProviderId 指向不存在的 provider 时回退到首个
-  if (s.imageProviderId && !s.imageProviders.some(function(p) { return p.id === s.imageProviderId; })) {
-    s.imageProviderId = s.imageProviders.length > 0 ? s.imageProviders[0].id : null;
-  }
-  if (!Array.isArray(s.images)) s.images = [];
-  return s;
-}
+// defaultSettings / migrateSettings 已迁移到 db.js
 
 // 从 IndexedDB 异步加载 settings，首次启动时从旧 localStorage 迁移
 // init() 中 await 调用；失败时使用内存中的默认值，不阻断启动
@@ -2350,34 +2211,7 @@ function effectiveModelPrompt(conv) {
   return settings.modelPrompts[key] || null;
 }
 
-// 异步写入 IndexedDB（替代 localStorage.setItem）
-// 内存中 settings 已同步更新（调用方修改 settings.xxx 后调本函数持久化）
-// 失败时仅提示，不影响内存数据；图片 dataUrl 已通过 Filesystem 分离存储，settings 通常体积可控
-function saveSettings() {
-  settings.directMode = document.getElementById('direct-mode-check')?.checked || false;
-  // 防御：剥离残留的图片 dataUrl（理论上 APK 模式下 fileName 非空时 dataUrl 已为 null）
-  var toPersist = settings;
-  var hasInlineImg = (settings.images || []).some(function(img) { return img.dataUrl && img.fileName; });
-  if (hasInlineImg) {
-    try {
-      toPersist = JSON.parse(JSON.stringify(settings));
-      toPersist.images = toPersist.images.map(function(img) {
-        if (img.fileName) img.dataUrl = null;  // 有 fileName 的剥离 dataUrl（图片文件在 Filesystem）
-        return img;
-      });
-    } catch(e) {
-      console.warn('saveSettings: clone for persist failed, use raw settings:', e);
-      toPersist = settings;
-    }
-  }
-  // 异步写 IDB，不阻塞 UI；写入失败仅提示
-  idbPut(SETTINGS_IDB_KEY, toPersist).then(function() {
-    // 静默成功
-  }).catch(function(e) {
-    console.error('saveSettings: IDB write failed:', e);
-    showToast('设置保存失败：' + (e && e.message ? e.message : e), 'warn');
-  });
-}
+// saveSettings 已迁移到 db.js
 
 // ===== Conversation Model =====
 function newConversation() {

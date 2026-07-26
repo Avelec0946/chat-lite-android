@@ -736,3 +736,54 @@ image: <reference.png Blob>
 - Android WebView onPause 行为：https://developer.android.com/reference/android/webkit/WebView#onPause()
 
 **状态**：遗留问题，等待后续攻关。当前 v71 的 WakeLock + WebView.onResume 方案作为部分缓解保留，不回滚（第一次切后台仍能保持，比完全无缓解好）。
+
+
+### 21. v2.0 模块化拆分阶段 0.5.1：db.js 存储层模块（cache-bust v73 -> v74）
+
+**背景**：app.js 已达 264KB / 6138 行，单文件维护困难，影响任务分割与并行开发。按任务看板§十一 v2.0 模块化拆分执行规则，启动阶段 0.5.1：将存储层（IndexedDB + 持久化函数）拆分到独立 db.js 模块。这是 v2.0 拆分的第一步，遵循"逐个验证"原则（拆一个→APK 验证→commit→拆下一个）。
+
+**新增文件**：
+- `www/db.js`（8.3KB）：存储层模块，包含 IndexedDB 操作 + 持久化函数 + settings 默认值与迁移
+
+**迁移清单**（从 app.js 剪切到 db.js）：
+| 类型 | 内容 |
+|---|---|
+| 常量 | `STORAGE_KEY`, `SETTINGS_KEY`, `IDB_NAME`, `IDB_VER`, `IDB_STORE`, `SETTINGS_IDB_KEY` |
+| 变量 | `_saveQueue`（save 函数的私有队列） |
+| 函数 | `openDB`, `idbPut`, `idbGet`（IndexedDB 基础操作） |
+| 函数 | `save`（会话持久化，IndexedDB + 浏览器模式同步到服务器） |
+| 函数 | `defaultSettings`（settings 默认值，同步返回） |
+| 函数 | `migrateSettings`（settings 字段迁移与归一化） |
+| 函数 | `saveSettings`（异步写 IDB，替代 localStorage.setItem） |
+
+**保留在 app.js**（全局状态变量，多模块共享）：
+- `let settings = defaultSettings();`（db.js 加载后立即调用，初始化默认值）
+- `let _settingsLoaded = false;`（initSettings 中维护）
+- `let isLongPress = false;`（与存储无关）
+
+**加载顺序**（index.html，依赖从下到上）：
+```html
+<script src="db.js?v=74"></script>             <!-- 1. 存储层（新增） -->
+<script src="gesture-helpers.js?v=74"></script> <!-- 2. 手势 -->
+<script src="app.js?v=74"></script>             <!-- 3. 入口（最后加载） -->
+```
+
+**关键设计**：
+1. **全局函数风格**：db.js 不用 IIFE 包裹，与 app.js 保持一致的全局函数风格，便于 onclick 事件绑定和跨文件调用
+2. **加载顺序保证**：db.js 必须在 app.js 之前加载，因为 app.js 顶层 `let settings = defaultSettings();` 依赖 db.js 提供的 defaultSettings 函数
+3. **全局变量保留**：`settings` / `_settingsLoaded` / `isLongPress` 保留在 app.js，避免引入 window 全局访问的复杂性（后续 0.5.6 app.js 瘦身时再统一处理）
+4. **依赖方向**：db.js 中的 save/saveSettings 调用 app.js 运行时提供的 state/settings/showToast/isCapacitor/normalizeImageProvider（运行时才解析，加载顺序无影响）
+
+**验证结果**（APK 实测通过）：
+- [x] 应用启动正常，无白屏/报错
+- [x] 历史会话列表正常加载
+- [x] 新建对话 + 杀进程重启后数据保留
+- [x] 切换会话消息内容正确
+- [x] 设置修改（字体/振感/背景透明度）持久化正常
+- [x] 导入导出功能正常
+
+**app.js 变化**：264KB → 257KB（减少约 7KB / 170 行）
+
+**回滚**：`git reset --hard HEAD~1` 即可恢复 app.js 单文件版本。db.js 删除 + index.html 还原 v73 即可。
+
+> 本次改动**不含 Capacitor 专属 API**（纯 JS 模块拆分），**可推主仓库**。sync 后确认 db.js 文件存在 + index.html 中 db.js script 标签未被移除 + app.js 中 STORAGE_KEY/SETTINGS_KEY/IDB_NAME/IDB_VER/IDB_STORE/SETTINGS_IDB_KEY/_saveQueue/openDB/idbPut/idbGet/save/defaultSettings/migrateSettings/saveSettings 定义未被恢复即可。
