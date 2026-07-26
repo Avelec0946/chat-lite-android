@@ -843,3 +843,76 @@ image: <reference.png Blob>
 **回滚**：`git reset --hard HEAD~1` 即可恢复。haptics.js 删除 + index.html 还原 v74 + app.js 恢复 haptic 块即可。
 
 > 本次改动**不含 Capacitor 专属 API**（纯 JS 模块拆分，CapRichHaptics/CapHaptics 仍在 app.js 初始化），**可推主仓库**。sync 后确认 haptics.js 文件存在 + index.html 中 haptics.js script 标签未被移除 + app.js 中 _initStreamHaptics/triggerHapticFeedback/_HAPTIC_* 定义未被恢复即可。
+
+### 23. v2.0 模块化拆分阶段 0.5.3：providers.js 接口管理模块（cache-bust v75 -> v76 -> v77，含 TDZ 修复）
+
+**背景**：v2.0 模块化拆分继续，0.5.2 haptics.js 完成后启动 0.5.3：将聊天 Provider 系统（模板、归一化、UI 渲染、编辑、测试、保存、迁移）拆分到独立 providers.js 模块。这是 v2.0 拆分中体积最大的一个。
+
+**新增文件**：
+- `www/providers.js`（21.4KB）：聊天 Provider 系统完整逻辑
+
+**迁移清单**（从 app.js 剪切到 providers.js）：
+| 类型 | 内容 |
+|---|---|
+| 常量 | `PROVIDERS_KEY`, `PROVIDER_TEMPLATES` |
+| 函数 | `getProvider`, `normalizeBaseUrl`, `getProviderTemplate` |
+| 函数 | `normalizeProvider`, `normalizeModels` |
+| 函数 | `modelToUpstreamId`, `resolveTemplate`, `buildUpstreamPayload`, `getModelsEndpoint` |
+| 函数 | `loadProviders`, `saveProviders`, `migrateOldApiKey` |
+| 函数 | `renderModelSelector`, `syncModelSelector` |
+| 函数 | `renderProviderList`, `openProviderEditor`, `closeProviderEditor`, `testProviderConnection`, `saveProviderFromEditor`, `deleteProvider` |
+| 函数 | `parseJsonField`, `toggleProviderAuthFields`（provider 编辑器专用辅助） |
+
+**保留在 app.js**：
+- `state.providers = []` 初始化（**关键**：必须保留在 app.js 的 `const state = {...}` 中，否则触发 TDZ 报错，详见下方修复）
+- 生图相关：`IMAGE_PROVIDER_TEMPLATES`, `getImageProviderTemplate`, `normalizeImageProvider`, `getImageProvider`, `getCurrentImageProvider`, `saveImageProviders`, `renderImageProviderList`（留给 0.5.4 image-gen.js）
+- `compressImageForUpload`（视觉上传，与 provider 无关）
+
+**加载顺序**（index.html，依赖从下到上）：
+```html
+<script src="db.js?v=77"></script>              <!-- 1. 存储层 -->
+<script src="haptics.js?v=77"></script>          <!-- 2. 振感 -->
+<script src="providers.js?v=77"></script>        <!-- 3. 接口管理（新增） -->
+<script src="gesture-helpers.js?v=77"></script>  <!-- 4. 手势 -->
+<script src="app.js?v=77"></script>              <!-- 5. 入口（最后加载） -->
+```
+
+**严重 Bug：TDZ（暂时性死区）报错导致接口数据丢失**
+
+**现象**：用户安装 v76 APK 后，所有已配置的接口数据消失，接口列表为空。
+
+**根因**：
+1. `state` 在 app.js#L29 用 `const state = {...}` 声明
+2. 原来 `state.providers = []` 在 app.js 中紧跟 `const state` 之后执行，给 state 动态添加 providers 字段
+3. 拆分时这行被迁移到 providers.js#L65，但 providers.js 在 app.js **之前**加载
+4. providers.js 加载时 `state` 处于 TDZ（const 声明未初始化），`state.providers = []` 抛出 `ReferenceError`
+5. providers.js 加载中断 → loadProviders/renderProviderList 等函数全部未定义
+6. init() 调用 loadProviders() 报错 → 接口数据未从 IndexedDB 加载 → 列表为空
+
+**修复**（v77）：
+1. providers.js：删除 `state.providers = []` 立即执行语句
+2. app.js：在 `const state = {...}` 中添加 `providers: []` 字段（与 conversations/currentId 等同级）
+3. cache-bust 升级 v76 → v77（避免 WebView 缓存旧版本导致修复不生效）
+
+**关键经验（已写入任务看板§十四）**：
+> **TDZ 陷阱**：任何对 `state` / `settings` 等 app.js 中 `const` 声明的全局变量的**立即执行语句**（如 `state.providers = []`），
+> **不能放在 app.js 之前加载的模块中**。因为 const 声明在加载时处于 TDZ，访问会抛出 ReferenceError。
+> **正确做法**：在 app.js 的 `const state = {...}` 初始化时直接定义所有字段；
+> 其他模块只声明函数，运行时（init 之后）才访问 state。
+
+**验证结果**（APK v77 实测通过）：
+- [x] 应用启动正常，无白屏/报错
+- [x] 接口列表正常显示原有接口配置（数据已恢复）
+- [x] 接口编辑器字段预填正确
+- [x] 修改/删除接口后持久化正常
+- [x] 测试连接按钮工作正常
+- [x] 模型选择器正常显示（按接口分组）
+- [x] 切换会话时模型下拉框自动同步
+- [x] 发送消息流式回复正常
+- [x] 生图功能不受影响（IMAGE_PROVIDER_TEMPLATES 保留在 app.js）
+
+**app.js 变化**：253KB → 234KB（减少约 19KB / 600 行）
+
+**回滚**：`git reset --hard HEAD~1` 即可恢复。providers.js 删除 + index.html 还原 v75 + app.js 恢复 provider 相关代码即可。
+
+> 本次改动**不含 Capacitor 专属 API**（纯 JS 模块拆分），**可推主仓库**。sync 后确认 providers.js 文件存在 + index.html 中 providers.js script 标签未被移除 + app.js 中 const state 包含 providers 字段 + PROVIDER_TEMPLATES 等定义未被恢复即可。
