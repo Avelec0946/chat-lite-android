@@ -787,3 +787,59 @@ image: <reference.png Blob>
 **回滚**：`git reset --hard HEAD~1` 即可恢复 app.js 单文件版本。db.js 删除 + index.html 还原 v73 即可。
 
 > 本次改动**不含 Capacitor 专属 API**（纯 JS 模块拆分），**可推主仓库**。sync 后确认 db.js 文件存在 + index.html 中 db.js script 标签未被移除 + app.js 中 STORAGE_KEY/SETTINGS_KEY/IDB_NAME/IDB_VER/IDB_STORE/SETTINGS_IDB_KEY/_saveQueue/openDB/idbPut/idbGet/save/defaultSettings/migrateSettings/saveSettings 定义未被恢复即可。
+
+### 22. v2.0 模块化拆分阶段 0.5.2：haptics.js 振感反馈模块（cache-bust v74 -> v75）
+
+**背景**：v2.0 模块化拆分继续，按任务看板§十一执行规则，0.5.1 db.js 完成后启动 0.5.2：将流式输出振感反馈（五档质感分层）拆分到独立 haptics.js 模块。
+
+**新增文件**：
+- `www/haptics.js`（5.3KB）：振感反馈模块，含五档质感分层 + 懒初始化 + 触发逻辑
+
+**迁移清单**（从 app.js 剪切到 haptics.js）：
+| 类型 | 内容 |
+|---|---|
+| 状态变量 | `_hapticLastTriggered`, `_richHapticsInitStarted`, `_richHapticsReady`, `_hapticEngineType`, `_hapticCharCount` |
+| 常量 | `_HAPTIC_CHAR_ID`, `_HAPTIC_SOFT_ID`, `_HAPTIC_LOW_ID`, `_HAPTIC_CLICK_ID`, `_HAPTIC_THUD_ID` |
+| 函数 | `_initStreamHaptics`（懒初始化 rich-haptics 并预加载五档模式） |
+| 函数 | `triggerHapticFeedback`（根据内容节奏触发震感，五档分层+throttle+抖动） |
+
+**保留在 app.js**：
+- `let CapHaptics = null;` / `let CapRichHaptics = null;`（与其他 Capacitor 插件统一初始化，line 13-14, 21-22）
+- `settings.hapticFeedback`（全局 settings 对象字段）
+- `triggerHapticFeedback(delta.content)` 的 3 处调用点（line 3968/4384/4607，运行时跨文件调用 haptics.js）
+
+**加载顺序**（index.html，依赖从下到上）：
+```html
+<script src="db.js?v=75"></script>              <!-- 1. 存储层 -->
+<script src="haptics.js?v=75"></script>          <!-- 2. 振感（新增） -->
+<script src="gesture-helpers.js?v=75"></script>  <!-- 3. 手势 -->
+<script src="app.js?v=75"></script>              <!-- 4. 入口（最后加载） -->
+```
+
+**设计要点**：
+1. **全局函数风格**：与 db.js / app.js 保持一致，便于跨文件调用
+2. **加载顺序**：haptics.js 在 db.js 之后、app.js 之前加载；app.js 中的 triggerHapticFeedback 调用点在运行时解析 haptics.js 提供的函数
+3. **依赖方向**：haptics.js 中函数运行时调用 app.js 的 CapRichHaptics / CapHaptics / settings.hapticFeedback（运行时解析，加载顺序无影响）
+4. **Capacitor 插件初始化保留**：CapHaptics / CapRichHaptics 的初始化留在 app.js 顶部与其他 Capacitor 插件统一处理，避免分散
+
+**五档质感分层**（针对 X 轴线性马达优化，参考小米/Redmi RichTap 调校）：
+| 档位 | 原语 | intensity | sharpness | 触发条件 | throttle |
+|---|---|---|---|---|---|
+| CHAR | TICK | 0.18 | 0.55 | 字符主路径 | 38ms |
+| SOFT | TICK | 0.28 | 0.55 | 逗号/空格 | 50-60ms |
+| LOW | LOW_TICK | 0.14 | 0.35 | 每 10 字 | 38ms |
+| CLICK | CLICK | 0.55 | 0.85 | 。！？句末 | 60ms |
+| THUD | THUD | 0.72 | 0.15 | \n 段落 | 120ms |
+
+**验证结果**（APK 实测通过）：
+- [x] 应用启动正常
+- [x] 流式输出五档质感分层振感与拆分前一致（CHAR/SOFT/LOW/CLICK/THUD 节奏自然）
+- [x] 设置中关闭振感开关后无振感
+- [x] 开启振感开关后振感恢复
+- [x] 振感开关状态持久化正常
+
+**app.js 变化**：257KB → 253KB（减少约 4KB / 86 行）
+
+**回滚**：`git reset --hard HEAD~1` 即可恢复。haptics.js 删除 + index.html 还原 v74 + app.js 恢复 haptic 块即可。
+
+> 本次改动**不含 Capacitor 专属 API**（纯 JS 模块拆分，CapRichHaptics/CapHaptics 仍在 app.js 初始化），**可推主仓库**。sync 后确认 haptics.js 文件存在 + index.html 中 haptics.js script 标签未被移除 + app.js 中 _initStreamHaptics/triggerHapticFeedback/_HAPTIC_* 定义未被恢复即可。
