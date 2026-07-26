@@ -32,6 +32,8 @@ const state = {
   loading: false,
   abortController: null,
   settingsOpen: false,
+  _isBackground: false,  // v67: 追踪前后台状态用于完成通知
+  _pendingTextNotify: null,  // v67: 文字回复后台完成时的待显示通知
   selectedMsgId: null,
   // Capacitor 特有：标记当前请求是否被用户取消（原生 HTTP 无法真正中断）
   _nativeAborted: false,
@@ -115,7 +117,12 @@ function showToast(msg, type) {
   var t = document.getElementById('app-toast');
   if (!t) { t = document.createElement('div'); t.id = 'app-toast'; t.className = 'toast'; document.body.appendChild(t); }
   t.textContent = msg;
-  t.className = 'toast' + (type === 'warn' ? ' warn' : '');
+  var cls = 'toast';
+  if (type === 'warn') cls += ' warn';
+  else if (type === 'success') cls += ' success';
+  else if (type === 'info') cls += ' info';
+  else if (type === 'danger') cls += ' danger';
+  t.className = cls;
   t.classList.add('show');
   clearTimeout(t._timer);
   t._timer = setTimeout(function() { t.classList.remove('show'); }, 4000);
@@ -1001,12 +1008,21 @@ function renderImageStream() {
     // 优先用内存缓存的 dataUrl；APK 模式下 fileName 非空但 dataUrl 为空时先占位，异步加载
     var imgSrc = img.dataUrl || '';
     var needAsync = !imgSrc && !!img.fileName;
-    html += '<div class="image-msg user"><div class="img-bubble"><p>' + escapeHtml(img.prompt || '(无提示词)') + '</p></div></div>';
+    // v69: 参考图缩略图示意（从 img.referenceImages 读取，不可点击）
+    var refThumbsHtml = '';
+    if (img.referenceImages && img.referenceImages.length > 0) {
+      refThumbsHtml = '<div class="img-ref-thumbs">';
+      for (var ri = 0; ri < img.referenceImages.length; ri++) {
+        refThumbsHtml += '<img class="img-ref-thumb" src="' + img.referenceImages[ri] + '" alt="参考图' + (ri + 1) + '">';
+      }
+      refThumbsHtml += '<span class="img-ref-count">' + img.referenceImages.length + ' 张参考图</span></div>';
+    }
+    html += '<div class="image-msg user"><div class="img-bubble"><p>' + escapeHtml(img.prompt || '(无提示词)') + '</p>' + refThumbsHtml + '</div></div>';
     html += '<div class="image-msg assistant"><div class="img-bubble"><div class="image-card">' +
       '<img src="' + imgSrc + '" alt="生成的图片" data-image-id="' + img.id + '"' + (needAsync ? ' data-need-async="1"' : '') + '>' +
       '<div class="image-card-meta">' +
         '<span class="meta-tag">' + escapeHtml(img.model || '-') + '</span>' +
-        '<span class="meta-tag">' + escapeHtml(img.size || '-') + '</span>' +
+        '<span class="meta-tag">' + escapeHtml(img.actualSize || img.size || '-') + '</span>' +
         (img.negativePrompt ? '<span class="meta-tag">neg</span>' : '') +
       '</div>' +
       '<div class="image-card-actions">' +
@@ -1029,7 +1045,7 @@ function renderImageStream() {
   // 绑定图片点击预览
   stream.querySelectorAll('img[data-image-id]').forEach(function(imgEl) {
     imgEl.addEventListener('click', function() {
-      showImagePreview(imgEl.src);
+      showImagePreview(imgEl.src, imgEl.dataset.imageId);
     });
   });
   // 绑定操作按钮
@@ -1043,19 +1059,149 @@ function renderImageStream() {
   });
   // 滚到底部（最新内容）
   setTimeout(function() { stream.scrollTop = stream.scrollHeight; }, 0);
+  // v66: 若生图请求进行中（如切出后切回），恢复加载占位提示
+  if (state._imageGenerating) {
+    var loadingRestored = document.createElement('div');
+    loadingRestored.className = 'image-msg assistant';
+    loadingRestored.id = 'image-loading-msg';
+    loadingRestored.innerHTML = '<div class="img-bubble"><div class="image-loading"><div class="loading-spinner"></div><div class="loading-text">生成中（后台任务进行中）...</div></div></div>';
+    stream.appendChild(loadingRestored);
+    stream.scrollTop = stream.scrollHeight;
+    var ind = document.getElementById('image-status-indicator');
+    if (ind) ind.className = 'image-status-indicator loading';
+    var sb = document.getElementById('btn-image-send');
+    if (sb) { sb.classList.add('stopping'); sb.title = '点击停止生成'; }
+  }
 }
 
-// F1: 大图预览
-function showImagePreview(src) {
+// v66: 大图预览（支持双指缩放 + 拖动 + 工具栏保存/分享）
+var _previewGestureDestroy = null;
+function showImagePreview(src, imgId) {
+  if (_previewGestureDestroy) { _previewGestureDestroy(); _previewGestureDestroy = null; }
+  var existing = document.querySelector('.image-preview-overlay');
+  if (existing) existing.remove();
   var overlay = document.createElement('div');
   overlay.className = 'image-preview-overlay';
-  overlay.innerHTML = '<button class="image-preview-close" title="关闭"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg></button><img src="' + src + '">';
-  overlay.addEventListener('click', function(e) {
-    if (e.target === overlay || e.target.closest('.image-preview-close')) {
-      overlay.remove();
-    }
-  });
+  var toolbarHtml = imgId
+    ? '<div class="image-preview-toolbar">' +
+        '<button class="preview-save" data-id="' + imgId + '"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M19 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11l5 5v11a2 2 0 0 1-2 2z"/><polyline points="17 21 17 13 7 13 7 21"/><polyline points="7 3 7 8 15 8"/></svg>保存</button>' +
+        '<button class="preview-share" data-id="' + imgId + '"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="18" cy="5" r="3"/><circle cx="6" cy="12" r="3"/><circle cx="18" cy="19" r="3"/><line x1="8.59" y1="13.51" x2="15.42" y2="17.49"/><line x1="15.41" y1="6.51" x2="8.59" y2="10.49"/></svg>分享</button>' +
+      '</div>'
+    : '';
+  overlay.innerHTML = '<button class="image-preview-close" title="关闭"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg></button>' +
+    '<div class="image-preview-hint">单击退出 · 双击缩放 · 双指捏合 · 单指拖动</div>' +
+    '<img src="' + src + '" alt="预览">' +
+    toolbarHtml;
   document.body.appendChild(overlay);
+  var imgEl = overlay.querySelector('img');
+  if (imgEl && window.GestureHelpers) {
+    _previewGestureDestroy = window.GestureHelpers.enableGestures(imgEl, { minScale: 1, maxScale: 5, doubleTapScale: 2 });
+  }
+
+  // v73: 单击退出 + 双击缩放
+  // 社区经验：移动端双击只触发 1 次 click（不是 2 次），基于 click 的双击检测不可靠。
+  // 改用 touchend 检测：单指 touchend 间隔 < 280ms 且位移 < 30px 视为双击。
+  // 单击延迟 250ms（比双击窗口短，保证双击时能取消单击关闭）。
+  // img 上的 gesture-helpers 双击缩放会被 overlay 的 touchend 拦截，这里统一处理。
+  var lastTapTime = 0;
+  var lastTapX = 0, lastTapY = 0;
+  var singleTapTimer = null;
+
+  function handleTapClose(e) {
+    // e 可能是 touchend 或 click（鼠标）
+    var x, y;
+    if (e.changedTouches && e.changedTouches[0]) {
+      x = e.changedTouches[0].clientX;
+      y = e.changedTouches[0].clientY;
+    } else {
+      x = e.clientX;
+      y = e.clientY;
+    }
+    var now = Date.now();
+    var dt = now - lastTapTime;
+    var dx = Math.abs(x - lastTapX);
+    var dy = Math.abs(y - lastTapY);
+
+    if (dt < 280 && dx < 30 && dy < 30) {
+      // 双击：取消单击关闭，执行缩放
+      if (singleTapTimer) { clearTimeout(singleTapTimer); singleTapTimer = null; }
+      lastTapTime = 0;
+      // 触发 img 的缩放（复用 gesture-helpers 的 zoomAt）
+      if (imgEl && imgEl._gestureZoomAt) {
+        var rect = overlay.getBoundingClientRect();
+        imgEl._gestureZoomAt(x - rect.left, y - rect.top, 0);  // 0 = toggle
+      }
+      e.preventDefault();
+      return;
+    }
+    lastTapTime = now;
+    lastTapX = x;
+    lastTapY = y;
+    // 单击：延迟 250ms 关闭
+    if (singleTapTimer) clearTimeout(singleTapTimer);
+    singleTapTimer = setTimeout(function() {
+      singleTapTimer = null;
+      closeImagePreview();
+    }, 250);
+  }
+
+  // touchend 在 img 和 overlay 上分别监听（img 的 gesture-helpers 不会阻止冒泡）
+  overlay.addEventListener('touchend', function(e) {
+    // 多指触摸（缩放/拖动）不处理
+    if (e.touches.length > 0) return;
+    // 点击工具栏/关闭按钮：交给 click handler
+    var t = e.target;
+    if (t.closest('.image-preview-close') || t.closest('.image-preview-toolbar')) return;
+    handleTapClose(e);
+  });
+  // 鼠标 click 兜底（桌面调试用）
+  overlay.addEventListener('click', function(e) {
+    if (e.target.closest('.image-preview-close')) {
+      if (singleTapTimer) { clearTimeout(singleTapTimer); singleTapTimer = null; }
+      closeImagePreview();
+      return;
+    }
+    if (e.target.closest('.image-preview-toolbar')) return;
+    // 桌面端：触摸事件不触发，由 click 处理
+    if (!('ontouchstart' in window)) handleTapClose(e);
+  });
+
+  var btnSave = overlay.querySelector('.preview-save');
+  if (btnSave) btnSave.addEventListener('click', function(e) { e.stopPropagation(); saveImageToDevice(btnSave.dataset.id); });
+  var btnShare = overlay.querySelector('.preview-share');
+  if (btnShare) btnShare.addEventListener('click', function(e) {
+    e.stopPropagation();
+    shareImage(btnShare.dataset.id);
+  });
+  setTimeout(function() { var h = overlay.querySelector('.image-preview-hint'); if (h) h.style.display = 'none'; }, 3000);
+}
+
+function closeImagePreview() {
+  if (_previewGestureDestroy) { _previewGestureDestroy(); _previewGestureDestroy = null; }
+  var overlay = document.querySelector('.image-preview-overlay');
+  if (overlay) overlay.remove();
+}
+
+// v66: 系统分享（Web Share API），不支持则降级为保存
+async function shareImage(id) {
+  var img = (settings.images || []).find(function(x) { return x.id === id; });
+  if (!img) return;
+  try {
+    var dataUrl = await getImageDataUrl(img);
+    if (!dataUrl) { showToast('图片数据不可用', 'warn'); return; }
+    if (navigator.share && navigator.canShare) {
+      var resp = await fetch(dataUrl);
+      var blob = await resp.blob();
+      var file = new File([blob], 'chatlite_' + id + '.png', { type: blob.type });
+      if (navigator.canShare({ files: [file] })) {
+        await navigator.share({ files: [file], title: '分享图片' });
+        return;
+      }
+    }
+    saveImageToDevice(id);
+  } catch(e) {
+    if (e.name !== 'AbortError') showToast('分享失败: ' + (e.message || e), 'warn');
+  }
 }
 
 // F1: 从图库删除单张图片
@@ -1094,7 +1240,7 @@ async function saveImageToDevice(id) {
         directory: 'EXTERNAL_STORAGE',
         recursive: true
       });
-      showToast('已保存到 Download/' + fileName);
+      showToast('已保存到 Download/' + fileName, 'success');
     } else {
       // 浏览器：触发下载
       var a = document.createElement('a');
@@ -1103,7 +1249,7 @@ async function saveImageToDevice(id) {
       document.body.appendChild(a);
       a.click();
       document.body.removeChild(a);
-      showToast('已触发下载');
+      showToast('已触发下载', 'success');
     }
   } catch(e) {
     console.error('saveImageToDevice failed:', e);
@@ -1161,6 +1307,55 @@ async function writeImageFile(dataUrl, imgId) {
     return fileName;
   } catch (e) {
     console.warn('writeImageFile failed:', e);
+    return null;
+  }
+}
+
+// v68: 从 data URL 解析图片实际像素尺寸（支持 PNG/JPEG/WebP），失败返回 null
+// 用途：gpt-image-2 等 API 返回的图片实际像素常小于请求 size 参数，需读取真实尺寸显示
+function parseImageActualSize(dataUrl) {
+  try {
+    var commaIdx = dataUrl.indexOf(',');
+    if (commaIdx < 0) return null;
+    var header = dataUrl.substring(0, commaIdx);  // "data:image/png;base64"
+    var b64 = dataUrl.substring(commaIdx + 1);
+    // 解码前 64 字节即可（所有格式的尺寸信息都在文件头）
+    var binStr = atob(b64.substring(0, Math.min(b64.length, 64)));
+    var bytes = new Uint8Array(binStr.length);
+    for (var i = 0; i < binStr.length; i++) bytes[i] = binStr.charCodeAt(i);
+    // PNG: IHDR chunk 偏移 16-24（width 16-20, height 20-24, big-endian）
+    if (header.indexOf('image/png') >= 0 && bytes.length >= 24) {
+      var w = (bytes[16] << 24) | (bytes[17] << 16) | (bytes[18] << 8) | bytes[19];
+      var h = (bytes[20] << 24) | (bytes[21] << 16) | (bytes[22] << 8) | bytes[23];
+      if (w > 0 && h > 0) return w + 'x' + h;
+    }
+    // JPEG: 扫描 SOF0(0xC0) / SOF2(0xC2) marker，读取段内 5-8 字节（height, width, big-endian）
+    if (header.indexOf('image/jpeg') >= 0 && bytes.length >= 4) {
+      var idx = 2;  // 跳过 SOI(0xFFD8)
+      while (idx + 8 < bytes.length) {
+        if (bytes[idx] !== 0xFF) break;
+        var marker = bytes[idx + 1];
+        if (marker === 0xC0 || marker === 0xC2) {
+          var h2 = (bytes[idx + 5] << 8) | bytes[idx + 6];
+          var w2 = (bytes[idx + 7] << 8) | bytes[idx + 8];
+          if (w2 > 0 && h2 > 0) return w2 + 'x' + h2;
+        }
+        if (marker === 0xD8 || marker === 0xD9) break;  // SOI/EOI
+        var segLen = (bytes[idx + 2] << 8) | bytes[idx + 3];
+        idx += 2 + segLen;
+      }
+    }
+    // WebP: RIFF header + VP8/VP8L/VP8X，简化处理（VP8 lossy 偏移 26-30）
+    if (header.indexOf('image/webp') >= 0 && bytes.length >= 30) {
+      if (bytes[12] === 0x56 && bytes[13] === 0x50 && bytes[14] === 0x38) {
+        var w3 = ((bytes[26] | (bytes[27] << 8)) & 0x3FFF);
+        var h3 = ((bytes[28] | (bytes[29] << 8)) & 0x3FFF);
+        if (w3 > 0 && h3 > 0) return w3 + 'x' + h3;
+      }
+    }
+    return null;
+  } catch(e) {
+    console.warn('parseImageActualSize failed:', e);
     return null;
   }
 }
@@ -1458,7 +1653,7 @@ async function generateImage() {
   var indicator = document.getElementById('image-status-indicator');
   if (indicator) { indicator.className = 'image-status-indicator loading'; }
   var sendBtn = document.getElementById('btn-image-send');
-  if (sendBtn) sendBtn.disabled = true;
+  if (sendBtn) { sendBtn.disabled = false; sendBtn.classList.add('stopping'); sendBtn.title = '点击停止生成'; }
 
   // 显示用户消息气泡
   var stream = document.getElementById('image-stream');
@@ -1468,7 +1663,16 @@ async function generateImage() {
     if (empty) empty.remove();
     var userMsg = document.createElement('div');
     userMsg.className = 'image-msg user';
-    userMsg.innerHTML = '<div class="img-bubble"><p>' + escapeHtml(prompt) + '</p>' + (refDataUrls.length > 0 ? '<p style="font-size:11px;opacity:0.8">[' + refDataUrls.length + ' 张参考图]</p>' : '') + '</div>';
+    // v69: 参考图缩略图示意（不可点击，仅展示）
+    var refThumbsHtml = '';
+    if (refDataUrls.length > 0) {
+      refThumbsHtml = '<div class="img-ref-thumbs">';
+      for (var ri = 0; ri < refDataUrls.length; ri++) {
+        refThumbsHtml += '<img class="img-ref-thumb" src="' + refDataUrls[ri] + '" alt="参考图' + (ri + 1) + '">';
+      }
+      refThumbsHtml += '<span class="img-ref-count">' + refDataUrls.length + ' 张参考图</span></div>';
+    }
+    userMsg.innerHTML = '<div class="img-bubble"><p>' + escapeHtml(prompt) + '</p>' + refThumbsHtml + '</div>';
     stream.appendChild(userMsg);
     // 加载占位
     var loadingMsg = document.createElement('div');
@@ -1486,6 +1690,7 @@ async function generateImage() {
   state._imageGenerating = true;  // 标记请求进行中，供 appStateChange 监听用
   try {
     var controller = new AbortController();
+    state._imageAbortController = controller;  // v66: 暴露给停止按钮
     var timer = setTimeout(function() { controller.abort(); }, timeoutMs);
     var resp;
     try {
@@ -1538,6 +1743,8 @@ async function generateImage() {
         dataUrl = await fetchImageAsDataUrl(item.url);
       }
       if (!dataUrl) continue;
+      // v68: 从 base64 解码实际像素尺寸（gpt-image-2 返回的图片常被压缩，实际尺寸 < 请求 size 参数）
+      var actualSize = parseImageActualSize(dataUrl) || '';
       // 存入图库：APK 模式把 dataUrl 存 Filesystem，settings.images 只存元数据+fileName，避免 localStorage 配额超限
       var newImgId = uid();
       var fileName = null;
@@ -1553,9 +1760,11 @@ async function generateImage() {
         prompt: prompt,
         negativePrompt: negativePrompt,
         referenceImageId: null,
+        referenceImages: (refDataUrls && refDataUrls.length > 0) ? refDataUrls.slice() : null,  // v69: 保存参考图 dataUrl（已压缩）用于消息流缩略图展示
         model: model,
         providerId: provider.id,
         size: sizeConfig.size || (sizeConfig.imageConfig ? JSON.stringify(sizeConfig.imageConfig) : ''),
+        actualSize: actualSize,  // v68: 实际像素尺寸（如 '1248x832'），UI 优先显示
         resolution: resolution,
         aspect: aspect,
         createdAt: Date.now(),
@@ -1571,7 +1780,9 @@ async function generateImage() {
     renderImageStream();
     updateImageGalleryCount();
     if (indicator) indicator.className = 'image-status-indicator ok';
-    showToast('生成完成，共 ' + results.length + ' 张');
+    showToast('生成完成，共 ' + results.length + ' 张', 'success');
+    // v70: 无论前后台都发系统通知（前台 toast + 通知栏，后台仅通知栏）
+    notifyImageComplete(results.length);
   } catch(e) {
     var loadingEl2 = document.getElementById('image-loading-msg');
     if (loadingEl2) loadingEl2.remove();
@@ -1588,7 +1799,8 @@ async function generateImage() {
     showToast(errMsg, 'warn');
     console.error('generateImage failed:', e);
   } finally {
-    if (sendBtn) sendBtn.disabled = false;
+    if (sendBtn) { sendBtn.disabled = false; sendBtn.classList.remove('stopping'); sendBtn.title = ''; }
+    state._imageAbortController = null;  // v66: 清理引用
     state._imageGenerating = false;  // 清除请求进行中标记
   }
 }
@@ -1613,7 +1825,7 @@ async function fetchImageAsDataUrl(url) {
 // F1: 清空图库
 function clearImageGallery() {
   if (!settings.images || settings.images.length === 0) {
-    showToast('图库已为空');
+    showToast('图库已为空', 'info');
     return;
   }
   if (!confirm('确定清空图库？共 ' + settings.images.length + ' 张图片，此操作不可撤销。')) return;
@@ -1621,7 +1833,7 @@ function clearImageGallery() {
   saveImageProviders();
   renderImageStream();
   updateImageGalleryCount();
-  showToast('图库已清空');
+  showToast('图库已清空', 'info');
 }
 
 // F1: 生图界面事件监听初始化
@@ -1750,7 +1962,15 @@ function initImageView() {
       if (sendBtn) sendBtn.disabled = !hasText;
     });
   }
-  if (sendBtn) sendBtn.addEventListener('click', generateImage);
+  if (sendBtn) sendBtn.addEventListener('click', function() {
+    // v66: 生成中点击则停止，否则触发生成
+    if (state._imageGenerating && state._imageAbortController) {
+      state._imageAbortController.abort();
+      showToast('已停止生成', 'info');
+    } else {
+      generateImage();
+    }
+  });
 
   // 高级参数折叠
   var advToggle = document.getElementById('image-advanced-toggle');
@@ -1835,14 +2055,50 @@ function initImageView() {
     App.addListener('appStateChange', function(info) {
       var isActive = info.isActive;
       console.log('appStateChange:', isActive ? 'active' : 'background');
-      if (isActive && state._imageGenerating) {
-        // 切回前台时生图请求仍在进行，更新状态指示器提示用户
-        var indicator = document.getElementById('image-status-indicator');
-        if (indicator) indicator.className = 'image-status-indicator loading';
-        showToast('生图请求进行中，请稍候...', 'info');
+      state._isBackground = !isActive;  // v67: 追踪前后台状态
+      if (isActive) {
+        // 切回前台：恢复进行中任务的 UI 提示
+        if (state._imageGenerating) {
+          var indicator = document.getElementById('image-status-indicator');
+          if (indicator) indicator.className = 'image-status-indicator loading';
+          showToast('生图请求进行中，请稍候...', 'info');
+        }
+        if (state.loading) {
+          showToast('回复请求进行中，请稍候...', 'info');
+        }
+        // v67: 后台期间文字回复已完成，显示待显示通知
+        if (state._pendingTextNotify) {
+          var n = state._pendingTextNotify;
+          state._pendingTextNotify = null;
+          showToast(n, 'success');
+        }
       }
     });
   }
+}
+
+// v70: 生图完成系统通知（无论前后台都发，前台 toast + 通知栏，后台仅通知栏）
+function notifyImageComplete(count) {
+  if (!isCapacitor() || !Capacitor.Plugins || !Capacitor.Plugins.LocalNotifications) return;
+  try {
+    // v70: 权限已在 init 时预申请，这里直接检查并调度
+    Capacitor.Plugins.LocalNotifications.checkPermissions().then(function(perm) {
+      if (perm.display !== 'granted') {
+        console.log('[Notify] permission not granted, skip');
+        return;
+      }
+      Capacitor.Plugins.LocalNotifications.schedule({
+        notifications: [{
+          id: (Date.now() % 1000000) + 1,  // v70: 扩大 id 范围避免重复
+          title: '生图完成',
+          body: '共生成 ' + count + ' 张图片',
+          schedule: { at: new Date(Date.now() + 200) }  // v70: 200ms 后触发确保立即
+        }]
+      }).then(function() {
+        console.log('[Notify] image complete notification scheduled');
+      }).catch(function(e) { console.warn('[Notify] schedule failed:', e); });
+    }).catch(function(e) { console.warn('[Notify] checkPermissions failed:', e); });
+  } catch(e) { console.warn('[Notify] error:', e); }
 }
 
 
@@ -2296,6 +2552,13 @@ async function init() {
   // F1: 启动时迁移旧图片数据（localStorage 中残留 dataUrl 的图片转存 Filesystem）
   if (isCapacitor() && CapFilesystem && Array.isArray(settings.images)) {
     migrateImportedImagesToFilesystem();
+  }
+
+  // v70: 预申请通知权限（Android 13+ 需运行时授权，启动时在前台申请确保弹窗可见）
+  if (isCapacitor() && Capacitor.Plugins && Capacitor.Plugins.LocalNotifications) {
+    Capacitor.Plugins.LocalNotifications.requestPermissions().then(function(perm) {
+      console.log('[Notify] permission:', perm.display);
+    }).catch(function(e) { console.warn('[Notify] permission request failed:', e); });
   }
 
   // Apply settings to UI
@@ -3737,7 +4000,7 @@ function deleteMessage(msgId) {
   state.selectedMsgId = null;
   save();
   renderMessages();
-  showToast('消息已删除');
+  showToast('消息已删除', 'info');
 }
 
 // ===== Send Message =====
@@ -4185,6 +4448,8 @@ async function executeNativeRequest(req, assistantMsg, opts) {
     assistantMsg.content = fullContent;
     save();
     setStatus('ok');
+    // v67: 后台完成时缓存通知，切回前台显示
+    if (state._isBackground) state._pendingTextNotify = '回复已完成';
 
   } catch (err) {
     clearTimeout(timeoutId);
@@ -4383,6 +4648,8 @@ async function sendFromMessage(context) {
     assistantMsg.versions[0] = { content: fullContent, timestamp: Date.now(), reason: 'original' };
     save();
     setStatus('ok');
+    // v67: 后台完成时缓存通知，切回前台显示
+    if (state._isBackground) state._pendingTextNotify = '回复已完成';
 
   } catch (err) {
     console.error('Send error:', err);
@@ -4600,6 +4867,8 @@ async function sendFromMessageContinue(context, assistantMsg) {
     assistantMsg.versions[0] = { content: fullContent, timestamp: Date.now(), reason: 'continued' };
     save();
     setStatus('ok');
+    // v67: 后台完成时缓存通知，切回前台显示
+    if (state._isBackground) state._pendingTextNotify = '回复已完成';
 
   } catch (err) {
     console.error('Continue error:', err);
@@ -5574,7 +5843,7 @@ async function ensureDataLoaded() {
 //   改用 Filesystem 6.x 原生 encoding:'utf8' 直接写文本，峰值降到 2x；JSON 也用紧凑格式省 30%+。
 async function exportAllData() {
   await ensureDataLoaded();
-  showToast('正在导出数据，请稍候...');
+  showToast('正在导出数据，请稍候...', 'info');
   // 让 UI 有机会渲染 toast 再开始重活，避免点击后无反馈误解为卡死
   await new Promise(r => setTimeout(r, 50));
 
@@ -5605,10 +5874,10 @@ async function exportAllData() {
         url: result.uri,
         dialogTitle: '保存备份文件到...'
       });
-      showToast('已导出，请选择保存位置');
+      showToast('已导出，请选择保存位置', 'success');
     } catch (err) {
       console.error('Export failed:', err);
-      showToast('导出失败：' + (err.message || err));
+      showToast('导出失败：' + (err.message || err), 'danger');
     }
   } else {
     // Web 模式
@@ -5619,7 +5888,7 @@ async function exportAllData() {
     a.download = fileName;
     a.click();
     URL.revokeObjectURL(url);
-    showToast('已导出全部数据');
+    showToast('已导出全部数据', 'success');
   }
 }
 
@@ -5633,18 +5902,18 @@ async function importAllData(jsonText, mode) {
   mode = mode || 'overwrite';
 
   // 大文件 JSON.parse 会阻塞主线程，先提示用户避免误解为卡死
-  showToast('正在解析数据，请稍候...');
+  showToast('正在解析数据，请稍候...', 'info');
   await new Promise(r => setTimeout(r, 50));
 
   let data;
   try {
     data = JSON.parse(jsonText);
   } catch (e) {
-    showToast('JSON 解析失败：' + e.message);
+    showToast('JSON 解析失败：' + e.message, 'danger');
     return;
   }
   if (!data.conversations && !data.providers) {
-    showToast('文件格式不正确');
+    showToast('文件格式不正确', 'danger');
     return;
   }
   if (data.version && data.version > 1) {
@@ -5684,7 +5953,7 @@ async function importAllData(jsonText, mode) {
   }
 
   // 让 UI 渲染 toast 后再做重活（替换 state + save + render）
-  showToast('正在写入数据...');
+  showToast('正在写入数据...', 'info');
   await new Promise(r => setTimeout(r, 50));
 
   if (mode === 'overwrite') {
@@ -5730,7 +5999,7 @@ async function importAllData(jsonText, mode) {
   if (isCapacitor() && CapFilesystem && Array.isArray(settings.images)) {
     migrateImportedImagesToFilesystem();
   }
-  showToast('已' + modeText + '导入数据');
+  showToast('已' + modeText + '导入数据', 'success');
 }
 
 // F1: 把 settings.images 中残留的 dataUrl 转存到 Filesystem（导入旧备份后的清理）
@@ -5774,7 +6043,7 @@ function importAllDataFromFile(e) {
       return;
     }
   }
-  showToast('正在读取文件...');
+  showToast('正在读取文件...', 'info');
   const reader = new FileReader();
   reader.onload = (ev) => {
     importAllData(ev.target.result, mode);
@@ -5811,10 +6080,10 @@ async function exportConversation() {
         url: result.uri,
         dialogTitle: '保存会话文件到...'
       });
-      showToast('已导出，请选择保存位置');
+      showToast('已导出，请选择保存位置', 'success');
     } catch (err) {
       console.error('Export conversation failed:', err);
-      showToast('导出失败：' + (err.message || err));
+      showToast('导出失败：' + (err.message || err), 'danger');
     }
   } else {
     // Web 模式

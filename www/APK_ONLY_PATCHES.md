@@ -616,3 +616,123 @@ image: <reference.png Blob>
 - 旧的 localStorage `SETTINGS_KEY` 保留作为迁移源（仅启动时一次性读取），迁移成功后清理
 
 **回滚**：若需回滚到 localStorage，恢复 loadSettings 同步读 localStorage 的版本，删除 initSettings 调用，saveSettings 改回 localStorage.setItem 即可。IDB 中的数据不会自动迁移回 localStorage（需手动）。
+
+
+### 18. v1.3.0 批次 5 扩展：后台任务完成通知（cache-bust v66 -> v67）
+
+**背景**：用户要求确认生图和文字回复的后台稳定性，包括 APP 切出、App 内切其他页面、任务完成通知。
+
+**新增依赖**：`@capacitor/local-notifications@6.1.3`（系统通知插件，npm install 需 `--legacy-peer-deps` 因 capacitor-stream-http 要 v7）
+
+**改动**：
+| 位置 | 改动 |
+|---|---|
+| AndroidManifest.xml | 新增 `<uses-permission android:name="android.permission.POST_NOTIFICATIONS"/>`（Android 13+ 运行时申请，12- 声明即生效）|
+| package.json | 新增 `@capacitor/local-notifications@^6` 依赖 |
+| app.js state 对象 | 新增 `_isBackground: false`（前后台状态追踪）+ `_pendingTextNotify: null`（文字回复后台完成待显示通知）|
+| app.js appStateChange 监听 | 扩展：1) 切后台时 `state._isBackground = true`；2) 切回前台时检查 `state.loading` 显示"回复请求进行中"toast；3) 切回前台时若有 `_pendingTextNotify` 显示通知 |
+| app.js 新增 `notifyImageComplete(count)` | 调用 `Capacitor.Plugins.LocalNotifications.requestPermissions + schedule` 发送系统通知（仅后台时调用）|
+| app.js 生图完成处 | `showToast` 后追加 `if (state._isBackground) notifyImageComplete(results.length)` |
+| app.js 文字回复完成处（3处）| `setStatus('ok')` 后追加 `if (state._isBackground) state._pendingTextNotify = '回复已完成'`（executeRequest + send web + continueGeneration web 三个路径）|
+
+**行为矩阵**：
+| 场景 | 生图 | 文字回复 |
+|---|---|---|
+| 前台完成 | toast 提示（原有）| setStatus('ok')（原有，不打扰）|
+| 后台完成 | 系统通知栏 + 切回前台 toast | 缓存 `_pendingTextNotify`，切回前台 toast |
+| 切回前台任务进行中 | toast"生图请求进行中" | toast"回复请求进行中" |
+| App 内切页面再切回 | renderImageStream 恢复加载占位（原有）| state.loading 持久 + toggleSendStop 恢复停止按钮（原有）|
+
+**任务不被打断保障**（用户核心要求）：
+- 生图：`state._imageGenerating` + `state._imageAbortController` 全局持久，仅停止按钮可 abort
+- 文字：`state.loading` + `state.abortController` 全局持久，仅停止按钮可 abort
+- 切后台：Android WebView 暂停 JS，Fetch 挂起不报错，切回前台继续等待响应
+- 切页面：状态在全局 state 对象，DOM 重渲染不影响进行中的 fetch promise
+
+**回滚**：删除 notifyImageComplete 函数 + 3处文字通知 + appStateChange 扩展 + state 两字段 + AndroidManifest 权限行即可。插件可保留不影响功能。
+
+
+### 19. v1.3.0 批次 5 扩展：后台生图请求稳定性修复（cache-bust v70，仅原生代码改动）
+
+**背景**：用户报告"生图请求切后台被中断，切回前台报 Software caused connection abort"。
+
+**根因**：Capacitor 默认在 Activity onPause 时调用 `webView.onPause()`，暂停 JS 定时器和网络请求。生图请求使用 `fetch()` + `AbortController.signal` + `FormData`，CapacitorHttp 的 fetch patch 不支持 signal/FormData 回退到原始 fetch，受 WebView 暂停影响。Android 系统在 App 进入后台后回收网络资源，导致 socket 被强制关闭（ECONNABORTED）。
+
+**改动**：
+| 位置 | 改动 |
+|---|---|
+| AndroidManifest.xml | 新增 `<uses-permission android:name="android.permission.WAKE_LOCK"/>` |
+| MainActivity.java | 从空类改为覆盖 `onPause`/`onResume`/`onDestroy`/`onCreate`<br>1. onCreate 创建 `PowerManager.WakeLock`（PARTIAL_WAKE_LOCK）<br>2. onPause 调用 `getBridge().getWebView().onResume()` 恢复 WebView + 获取 10 分钟 WakeLock<br>3. onResume 释放 WakeLock<br>4. onDestroy 释放 WakeLock |
+
+**机制说明**：
+- `super.onPause()` 仍会调用 `bridge.onPause()` 暂停 WebView，但紧接着 `webView.onResume()` 恢复 JS 执行和网络栈
+- `PARTIAL_WAKE_LOCK` 保持 CPU 活跃，防止系统休眠后回收网络资源
+- 10 分钟自动释放，避免长时间占用资源（生图超时上限 10 分钟）
+- 只用 WakeLock 不用 WifiLock（WifiLock 在某些设备上需要额外权限且兼容性差）
+
+**限制**：
+- 每次切后台都会获取 WakeLock（即使没有进行中的任务），但 10 分钟后自动释放
+- 不阻止 Android 系统在极端低内存时杀死 App（需要 Foreground Service 才能完全避免）
+- 对于长时间任务（如 nano_banana 600s 超时），建议用户保持 App 在前台
+
+**回滚**：将 MainActivity.java 改回 `public class MainActivity extends BridgeActivity {}` + 删除 AndroidManifest.xml 中 WAKE_LOCK 权限行即可。
+
+
+### 20. v1.3.0 批次 5 遗留问题：后台生图请求被中断（cache-bust v70，未解决）
+
+**现象**：
+- 第 1 次切后台再切回：生图请求能保持
+- 第 2 次切后台再切回：请求被打断
+- 重新发起请求后切后台：立即被打断
+- 报错：`Software caused connection abort`
+- App 内通知正常，系统通知未生效
+
+**已尝试方案**（v71，未彻底解决）：
+1. MainActivity.onPause 调用 `webView.onResume()` 恢复 WebView
+2. 获取 `PARTIAL_WAKE_LOCK` 防止 CPU 休眠
+3. AndroidManifest 添加 `WAKE_LOCK` 权限
+
+**根因分析**：
+- Capacitor 默认在 Activity onPause 时调用 `webView.onPause()` 暂停 JS 执行
+- 生图请求使用 `fetch()` + `AbortController.signal` + `FormData`，CapacitorHttp 的 fetch patch 不支持这些参数，回退到原始 fetch
+- Android WebView 在 onPause 后会暂停所有 JS 定时器和网络请求
+- 多次切后台后，Android 系统可能更激进地回收网络资源（socket 被强制关闭，ECONNABORTED）
+- WebView 的 `onResume()` 恢复不能完全模拟前台网络栈状态
+
+**未尝试方案**（供后续攻关）：
+
+#### 方案 A：Foreground Service（推荐）
+- 创建一个 Foreground Service，在生图任务进行期间显示持续通知
+- Foreground Service 不会被系统杀死，可保持网络连接
+- 实现复杂度：高（需修改 Android 原生代码、通知渠道、服务生命周期管理）
+- 关键文件：
+  - `android/app/src/main/java/com/avelec/chatlite/NetworkService.java`（新建）
+  - `android/app/src/main/AndroidManifest.xml` 添加 `<service>` 声明
+  - `www/app.js` 通过 Capacitor plugin 或 App API 触发服务启停
+
+#### 方案 B：原生层代理请求
+- 在 Android 原生层用 OkHttp 发起生图请求，绕过 WebView 限制
+- 通过 Capacitor plugin 暴露给 JS 层调用
+- 优点：不受 WebView onPause 影响
+- 缺点：需要重新实现所有生图 provider 的请求逻辑（gpt_image/nano_banana/openai_compat 等）
+
+#### 方案 C：JobScheduler + 数据持久化
+- 切后台时把请求参数持久化到 IndexedDB
+- 用 JobScheduler 在后台周期性重试
+- 缺点：不适合长连接、用户体验差
+
+#### 方案 D：保持屏幕常亮
+- 生图期间用 `KeepAwake` 插件保持屏幕常亮，阻止 App 进入后台
+- 缺点：耗电、强制改变用户行为
+
+**临时缓解措施**：
+- 长时间生图任务（gpt-image-2/nano_banana）建议用户保持 App 在前台
+- App 内通知已生效，切回前台时有 toast 提示
+- UI 上显示"建议保持 App 在前台"提示（待实现）
+
+**参考链接**：
+- https://developer.android.com/guide/components/foreground-services
+- https://capacitorjs.com/docs/apis/foreground-service
+- Android WebView onPause 行为：https://developer.android.com/reference/android/webkit/WebView#onPause()
+
+**状态**：遗留问题，等待后续攻关。当前 v71 的 WakeLock + WebView.onResume 方案作为部分缓解保留，不回滚（第一次切后台仍能保持，比完全无缓解好）。

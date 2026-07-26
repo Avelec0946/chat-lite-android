@@ -295,9 +295,12 @@ html,body{height:100%;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Ro
 .cursor-blink::after{content:'▍';animation:blink .8s step-end infinite;color:var(--primary)}
 
 /* ===== Toast ===== */
-.toast{position:fixed;bottom:80px;left:50%;transform:translateX(-50%);background:var(--danger);color:var(--on-primary);padding:10px 20px;border-radius:8px;font-size:14px;z-index:9999;box-shadow:0 4px 12px rgba(0,0,0,.3);opacity:0;transition:opacity .3s;pointer-events:none}
+.toast{position:fixed;bottom:80px;left:50%;transform:translateX(-50%);background:var(--bg3);color:var(--text);padding:10px 20px;border-radius:8px;font-size:14px;z-index:9999;box-shadow:0 4px 12px rgba(0,0,0,.3);opacity:0;transition:opacity .3s;pointer-events:none;border:1px solid var(--border)}
 .toast.show{opacity:1}
-.toast.warn{background:var(--warning)}
+.toast.warn{background:var(--warning);color:var(--on-primary);border-color:var(--warning)}
+.toast.success{background:var(--success);color:var(--on-primary);border-color:var(--success)}
+.toast.info{background:var(--primary);color:var(--on-primary);border-color:var(--primary)}
+.toast.danger{background:var(--danger);color:var(--on-primary);border-color:var(--danger)}
 
 /* ===== Chat Background ===== */
 .chat-bg{position:absolute;top:0;left:0;right:0;bottom:0;z-index:0;pointer-events:none;background-size:cover;background-position:center;background-repeat:no-repeat;opacity:0;transition:opacity .3s}
@@ -491,6 +494,10 @@ body:not(.capacitor-mode) .capacitor-only{display:none !important}
 .image-msg .img-bubble p{margin:4px 0;white-space:pre-wrap}
 .image-msg .img-bubble p:first-child{margin-top:0}
 .image-msg .img-bubble p:last-child{margin-bottom:0}
+/* v69: 生图消息流中的参考图缩略图（仅示意，不可点击） */
+.img-ref-thumbs{display:flex;align-items:center;gap:4px;margin-top:6px;flex-wrap:wrap}
+.img-ref-thumb{width:40px;height:40px;object-fit:cover;border-radius:6px;border:1px solid var(--border);background:var(--bg3);pointer-events:none;user-select:none;-webkit-user-drag:none}
+.img-ref-count{font-size:11px;opacity:0.8;align-self:center}
 
 /* 生成的图片卡片 */
 .image-card{display:flex;flex-direction:column;gap:6px;max-width:100%}
@@ -555,3 +562,20 @@ body:not(.capacitor-mode) .capacitor-only{display:none !important}
 
 /* F1: 生图 Provider 编辑器（复用 .provider-editor 结构） */
 .image-provider-editor{background:var(--bg3);border:1px solid var(--border);border-radius:var(--radius);padding:12px;margin-top:8px}
+
+/* v66: 图片预览 overlay 升级（手势 + 工具栏） */
+.image-preview-overlay{position:fixed;top:0;left:0;right:0;bottom:0;background:rgba(0,0,0,.9);z-index:200;display:flex;align-items:center;justify-content:center;padding:24px;animation:fadeIn .15s;overflow:hidden;touch-action:manipulation;user-select:none;-webkit-user-select:none}
+.image-preview-overlay img{max-width:100%;max-height:100%;object-fit:contain;border-radius:4px;will-change:transform;user-select:none;-webkit-user-drag:none;pointer-events:auto}
+.image-preview-overlay img.dragging{cursor:grabbing}
+.image-preview-close{position:absolute;top:16px;right:16px;width:36px;height:36px;border:none;border-radius:50%;background:rgba(255,255,255,.15);color:#fff;cursor:pointer;display:flex;align-items:center;justify-content:center;z-index:201}
+.image-preview-close:hover{background:rgba(255,255,255,.25)}
+.image-preview-toolbar{position:absolute;bottom:24px;left:50%;transform:translateX(-50%);display:flex;gap:8px;background:rgba(0,0,0,.5);padding:8px 12px;border-radius:24px;backdrop-filter:blur(8px);-webkit-backdrop-filter:blur(8px);z-index:201}
+.image-preview-toolbar button{border:none;background:transparent;color:#fff;padding:8px 14px;border-radius:16px;font-size:13px;cursor:pointer;display:flex;align-items:center;gap:6px;transition:background .15s}
+.image-preview-toolbar button:hover{background:rgba(255,255,255,.15)}
+.image-preview-toolbar button:active{background:rgba(255,255,255,.3)}
+.image-preview-hint{position:absolute;top:16px;left:50%;transform:translateX(-50%);color:rgba(255,255,255,.6);font-size:12px;z-index:201;pointer-events:none}
+
+/* v66: 生图停止按钮（生成中 sendBtn 变停止按钮） */
+.image-send-btn.stopping{background:var(--danger);animation:pulseStop 1s ease-in-out infinite}
+@keyframes pulseStop{0%,100%{opacity:1}50%{opacity:.6}}
+.image-stop-hint{position:absolute;top:8px;left:50%;transform:translateX(-50%);background:var(--danger);color:var(--on-primary);padding:4px 12px;border-radius:12px;font-size:11px;z-index:10;animation:fadeIn .2s}
