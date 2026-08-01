@@ -1,19 +1,20 @@
 # sync.ps1
-# 按需双向同步：chat-lite 主仓库 <-> chat-lite-android APK 仓库
+# On-demand bidirectional sync: chat-lite (main repo) <-> chat-lite-android (APK repo)
 #
-# 两个仓库是独立的。本脚本是"按需可选"的同步工具，不是强制机制。
-# 任何一方的改进，另一方不默认跟进。需要同步时手动运行本脚本。
+# The two repos are INDEPENDENT. This script is an OPTIONAL on-demand tool, not a
+# forced mechanism. Changes in one repo are NOT auto-followed by the other.
+# Run it manually only when you actually want to sync.
 #
-# 用法（在 chat-lite-android 仓库根目录执行）：
-#   .\sync.ps1                        # 默认：主仓库 -> APK（同步主仓库改动到 APK）
-#   .\sync.ps1 -Direction apk-to-main # APK -> 主仓库（同步 APK 改动到主仓库）
-#   .\sync.ps1 -Preview               # 只预览差异，不实际拷贝
+# Usage (run from chat-lite-android repo root):
+#   .\sync.ps1                        # default: main repo -> APK
+#   .\sync.ps1 -Direction apk-to-main # APK -> main repo
+#   .\sync.ps1 -Preview               # preview diffs only, no copying
 #   .\sync.ps1 -Direction apk-to-main -Preview
 #
-# 参数：
-#   -Direction  同步方向：main-to-apk（默认）或 apk-to-main
-#   -Preview    只显示两端差异摘要，不拷贝文件
-#   -MainRepo   主仓库路径（默认 ../chat-lite）
+# Params:
+#   -Direction  sync direction: main-to-apk (default) or apk-to-main
+#   -Preview    only show diff summary, do not copy files
+#   -MainRepo   path to main repo (default: ../chat-lite)
 
 param(
     [ValidateSet("main-to-apk", "apk-to-main")]
@@ -24,8 +25,8 @@ param(
 
 $ErrorActionPreference = "Stop"
 
-# ---------- 配置 ----------
-# 共享前端文件（两个仓库都维护、可互相同步的部分）
+# ---------- Config ----------
+# Shared frontend files (maintained in both repos, eligible for sync)
 $sharedFiles = @(
     "app.js", "db.js", "haptics.js", "providers.js",
     "image-gen.js", "conversation.js", "chat.js", "io.js",
@@ -33,7 +34,7 @@ $sharedFiles = @(
     "favicon.png", "icon-192.png", "icon-512.png", "manifest.json"
 )
 
-# 单方特有文件（不参与同步，任何方向都不覆盖）
+# Repo-specific files (never synced, never overwritten by either direction)
 $apkOnlyFiles = @(
     "APK_ONLY_PATCHES.md", "SYNC-MANIFEST.md",
     "UPSTREAM_COMMIT.txt", "capacitor.config.json"
@@ -44,29 +45,29 @@ $mainOnlyFiles = @(
 
 $apkWebDir = Join-Path (Get-Location) "www"
 
-# ---------- 工具函数 ----------
+# ---------- Helpers ----------
 function Get-Sha1([string]$path) {
     if (-not (Test-Path $path)) { return "" }
     $hash = Get-FileHash -Path $path -Algorithm SHA1
     return $hash.Hash
 }
 
-# ---------- 主逻辑 ----------
+# ---------- Main ----------
 if (-not (Test-Path $MainRepo)) {
-    Write-Host "错误：主仓库路径不存在：$MainRepo" -ForegroundColor Red
-    Write-Host "用法：.\sync.ps1 -MainRepo 'C:\path\to\chat-lite'"
+    Write-Host "ERROR: main repo path not found: $MainRepo" -ForegroundColor Red
+    Write-Host "Usage: .\sync.ps1 -MainRepo 'C:\path\to\chat-lite'"
     exit 1
 }
 
 $srcDir  = if ($Direction -eq "main-to-apk") { $MainRepo } else { $apkWebDir }
 $dstDir  = if ($Direction -eq "main-to-apk") { $apkWebDir } else { $MainRepo }
-$dirName = if ($Direction -eq "main-to-apk") { "主仓库 -> APK" } else { "APK -> 主仓库" }
+$dirName = if ($Direction -eq "main-to-apk") { "main -> APK" } else { "APK -> main" }
 
 Write-Host "==========================================" -ForegroundColor Cyan
-Write-Host " 按需同步（$dirName）" -ForegroundColor Cyan
+Write-Host " On-demand sync ($dirName)" -ForegroundColor Cyan
 Write-Host "==========================================" -ForegroundColor Cyan
 if ($Preview) {
-    Write-Host " [预览模式] 只显示差异，不拷贝文件`n" -ForegroundColor Yellow
+    Write-Host " [PREVIEW] showing diffs only, no files copied`n" -ForegroundColor Yellow
 }
 
 $changed = @()
@@ -80,13 +81,13 @@ foreach ($f in $sharedFiles) {
     $dstExists = Test-Path $dst
 
     if (-not $srcExists) {
-        # 源没有该文件（主仓库可能还没建模块），跳过
+        # Source lacks this file (e.g. main repo has no module yet) - skip
         $skipped += $f
         continue
     }
     if (-not $dstExists) {
-        # 目标还没有该文件（例如主仓库还没有 db.js）——新增
-        Write-Host "  [新增] $f（目标仓库还没有此文件）" -ForegroundColor Green
+        # Target lacks this file - it is a NEW file
+        Write-Host "  [NEW] $f (not present in target repo)" -ForegroundColor Green
         $changed += $f
         if (-not $Preview) { Copy-Item $src $dst -Force }
         continue
@@ -95,7 +96,7 @@ foreach ($f in $sharedFiles) {
     $h1 = Get-Sha1 $src
     $h2 = Get-Sha1 $dst
     if ($h1 -ne $h2) {
-        Write-Host "  [差异] $f" -ForegroundColor Yellow
+        Write-Host "  [DIFF] $f" -ForegroundColor Yellow
         $changed += $f
         if (-not $Preview) { Copy-Item $src $dst -Force }
     }
@@ -103,39 +104,39 @@ foreach ($f in $sharedFiles) {
 
 Write-Host ""
 if ($changed.Count -eq 0) {
-    Write-Host "✅ 无差异，两端已一致（$($sharedFiles.Count) 个共享文件）" -ForegroundColor Green
+    Write-Host "OK: no diffs, repos already in sync ($($sharedFiles.Count) shared files)" -ForegroundColor Green
 } elseif ($Preview) {
-    Write-Host "⚠️ 发现 $($changed.Count) 个文件有差异：$($changed -join ', ')" -ForegroundColor Yellow
-    Write-Host "   （预览模式，未拷贝。去掉 -Preview 执行实际同步）"
+    Write-Host "WARN: $($changed.Count) file(s) differ: $($changed -join ', ')" -ForegroundColor Yellow
+    Write-Host "   (preview mode, nothing copied. Run without -Preview to sync)"
 } else {
-    Write-Host "✅ 已同步 $($changed.Count) 个文件：$($changed -join ', ')" -ForegroundColor Green
+    Write-Host "OK: synced $($changed.Count) file(s): $($changed -join ', ')" -ForegroundColor Green
 }
 
 if ($skipped.Count -gt 0) {
-    Write-Host "  （跳过 $($skipped.Count) 个：源不存在）" -ForegroundColor DarkGray
+    Write-Host "  (skipped $($skipped.Count): not present in source)" -ForegroundColor DarkGray
 }
 
-# ---------- 同步后提醒 ----------
+# ---------- Post-sync reminders ----------
 if (-not $Preview -and $changed.Count -gt 0) {
     Write-Host ""
     Write-Host "============================================" -ForegroundColor Cyan
-    Write-Host "同步后注意事项" -ForegroundColor Yellow
+    Write-Host "After sync, please note:" -ForegroundColor Yellow
     Write-Host "============================================" -ForegroundColor Cyan
     Write-Host ""
-    Write-Host "  1. 单方特有文件未被覆盖（本脚本不碰它们）：" -ForegroundColor DarkGray
-    Write-Host "     APK 特有：$($apkOnlyFiles -join ', ')" -ForegroundColor DarkGray
-    Write-Host "     APK 特有：android/ capacitor.config.json" -ForegroundColor DarkGray
-    Write-Host "     主仓库特有：$($mainOnlyFiles -join ', ')" -ForegroundColor DarkGray
-    Write-Host "     主仓库特有：certs/ data/ .github/" -ForegroundColor DarkGray
+    Write-Host "  1. Repo-specific files were NOT touched:" -ForegroundColor DarkGray
+    Write-Host "     APK-only: $($apkOnlyFiles -join ', ')" -ForegroundColor DarkGray
+    Write-Host "     APK-only: android/ capacitor.config.json" -ForegroundColor DarkGray
+    Write-Host "     main-only: $($mainOnlyFiles -join ', ')" -ForegroundColor DarkGray
+    Write-Host "     main-only: certs/ data/ .github/" -ForegroundColor DarkGray
     Write-Host ""
-    Write-Host "  2. 若同步了含 isCapacitor 分支的 JS，检查 APK 特有逻辑是否完整：" -ForegroundColor Yellow
+    Write-Host "  2. If isCapacitor-branched JS was synced, verify APK-only logic:" -ForegroundColor Yellow
     if (Test-Path (Join-Path $apkWebDir "SYNC-MANIFEST.md")) {
-        Write-Host "     见 www/SYNC-MANIFEST.md（双向差异声明）" -ForegroundColor Yellow
+        Write-Host "     see www/SYNC-MANIFEST.md (bidirectional diff manifest)" -ForegroundColor Yellow
     } elseif (Test-Path (Join-Path $apkWebDir "APK_ONLY_PATCHES.md")) {
-        Write-Host "     见 www/APK_ONLY_PATCHES.md（APK 特有改动清单）" -ForegroundColor Yellow
+        Write-Host "     see www/APK_ONLY_PATCHES.md (APK-only changes list)" -ForegroundColor Yellow
     }
     Write-Host ""
-    Write-Host "  3. 同步后建议：node --check 所有 JS + 启动本地验证" -ForegroundColor Cyan
+    Write-Host "  3. Recommended: node --check all JS + local smoke test" -ForegroundColor Cyan
     Write-Host ""
-    Write-Host "  4. 同步后各仓库自行 commit（本脚本不自动提交）" -ForegroundColor Cyan
+    Write-Host "  4. Each repo commits its own changes (this script does NOT commit)" -ForegroundColor Cyan
 }
