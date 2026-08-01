@@ -1,4 +1,4 @@
-﻿// ===== db.js : 存储层模块（v2.0 拆分） =====
+// ===== db.js : 存储层模块（v2.0 拆分） =====
 // 模块名：db.js
 // 版本：v74（cache-bust）
 // 迁移日期：2026-07-26
@@ -172,22 +172,28 @@ function migrateSettings(s) {
 // 异步写入 IndexedDB（替代 localStorage.setItem）
 // 内存中 settings 已同步更新（调用方修改 settings.xxx 后调本函数持久化）
 // 失败时仅提示，不影响内存数据；图片 dataUrl 已通过 Filesystem 分离存储，settings 通常体积可控
+//
+// v85 修复导入旧备份时 OOM：
+//   旧判断 `img.dataUrl && img.fileName` 在导入旧备份（图片无 fileName）时为 false，
+//   导致含大 base64 的 settings 直接走 idbPut，IDB structured clone 序列化时内存峰值翻倍触发 OOM。
+//   修复：只要 images 中存在 dataUrl 就走剥离分支（无论是否有 fileName）。
 function saveSettings() {
   settings.directMode = document.getElementById('direct-mode-check')?.checked || false;
-  // 防御：剥离残留的图片 dataUrl（理论上 APK 模式下 fileName 非空时 dataUrl 已为 null）
+  // 防御：剥离残留的图片 dataUrl（APK 模式下 dataUrl 应为 null，仅 fileName 引用 Filesystem）
+  // v85: 避免 JSON.parse(JSON.stringify(settings)) 全量克隆（导入旧备份时 settings 含 60MB+ base64，全量序列化会 OOM）
+  //      改为浅克隆顶层 + images 数组逐项浅克隆 + 剥离大字段，内存峰值从 2x 降到 1x + 少量浅克隆开销
   var toPersist = settings;
-  var hasInlineImg = (settings.images || []).some(function(img) { return img.dataUrl && img.fileName; });
+  var hasInlineImg = (settings.images || []).some(function(img) { return !!img.dataUrl || !!img.referenceImages || !!img.thumbnailDataUrl; });
   if (hasInlineImg) {
-    try {
-      toPersist = JSON.parse(JSON.stringify(settings));
-      toPersist.images = toPersist.images.map(function(img) {
-        if (img.fileName) img.dataUrl = null;  // 有 fileName 的剥离 dataUrl（图片文件在 Filesystem）
-        return img;
-      });
-    } catch(e) {
-      console.warn('saveSettings: clone for persist failed, use raw settings:', e);
-      toPersist = settings;
-    }
+    toPersist = Object.assign({}, settings);
+    toPersist.images = (settings.images || []).map(function(img) {
+      if (!img || typeof img !== 'object') return img;
+      var lite = Object.assign({}, img);
+      if (lite.dataUrl) lite.dataUrl = null;
+      if (lite.referenceImages) lite.referenceImages = null;
+      if (lite.thumbnailDataUrl) lite.thumbnailDataUrl = null;
+      return lite;
+    });
   }
   // 异步写 IDB，不阻塞 UI；写入失败仅提示
   idbPut(SETTINGS_IDB_KEY, toPersist).then(function() {

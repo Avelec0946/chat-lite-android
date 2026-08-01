@@ -32,3 +32,4 @@ npm-debug.log*
 
 # APK build artifacts (release/debug binaries - tracked separately as release assets)
 *.apk
+*.bak.*

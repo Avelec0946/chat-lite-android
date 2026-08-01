@@ -916,3 +916,58 @@ image: <reference.png Blob>
 **回滚**：`git reset --hard HEAD~1` 即可恢复。providers.js 删除 + index.html 还原 v75 + app.js 恢复 provider 相关代码即可。
 
 > 本次改动**不含 Capacitor 专属 API**（纯 JS 模块拆分），**可推主仓库**。sync 后确认 providers.js 文件存在 + index.html 中 providers.js script 标签未被移除 + app.js 中 const state 包含 providers 字段 + PROVIDER_TEMPLATES 等定义未被恢复即可。
+---
+
+### 21. v79-v82 图片预览手势修复（cache-bust v79→v82，2026-07-26）
+
+> 拆分 0.5.4 image-gen.js 后暴露的预览手势问题，经过多轮调校最终稳定。
+
+#### v79：导出 OOM + 双指放大退出预览
+**问题1 - 导出全部数据卡退（OOM）**
+- 现象：点击导出全部数据后 App 崩溃，logcat 报 `java.lang.OutOfMemoryError: Failed to allocate a 66676936 byte allocation`
+- 根因：`settings.images` 数组中残留的 `dataUrl`/`referenceImages`/`thumbnailDataUrl` 大 base64 字段，JSON 序列化时产生 66MB+ 字符串，Capacitor Bridge 传递时 OOM
+- 修复位置：`www/app.js` 的 `exportAllData` 函数
+- 修复方式：导出前创建 `exportSettings` 浅拷贝，剥离 images 中所有大字段，只保留元数据；图片文件已存 Filesystem，导入后由 `migrateImportedImagesToFilesystem` 重新关联
+
+**问题2 - 双指放大后松开退出预览**
+- 根因：overlay 的 touchend 监听器在双指松开一指时误触发单击关闭逻辑
+- 修复：`www/image-gen.js` 添加 `_pinchActive`/`_pinchEndTime` 状态追踪，pinch 结束后 300ms 内忽略 tap 事件
+
+#### v80：放大后滑动照片松开退出预览
+- 根因：放大状态(scale>1)下单指拖动(pan)松开时，touchend 误触发 handleTapClose 单击关闭
+- 修复：`www/image-gen.js` 添加 `_panActive`/`_panEndTime`/`_panStartX`/`_panStartY`/`_panMoved` 状态追踪：
+  - img touchstart：单指按下且 scale>1 时设 `_panActive=true`，记录起始坐标
+  - img touchend：根据位移区分拖动(>10px)/单击(≤10px)，拖动时更新 `_panEndTime`
+  - overlay touchend：pan 结束后 300ms 内忽略 tap
+
+#### v81：单击反馈慢 + 双击后退出（部分修复）
+- 问题：单击退出反馈慢（250ms 延迟）；双击后图片放大一下然后退出
+- 修复：单击延迟 250ms→200ms，双击窗口 280ms→180ms（180<200 确保双击能取消单击）
+- 双击放大后设置 400ms 保护期（`_lastZoomTime`），期间忽略所有 touchend 关闭
+- **遗留**：双击后退出问题未根治，见 v82
+
+#### v82：双击后放大退出预览（根治）
+- 根因（经多轮 logcat 调试定位）：`www/image-gen.js` 的 img `touchstart` 监听器中有两处 `lastTapTime = 0`：
+  - 双指 touchstart：`lastTapTime = 0`
+  - 单指放大状态 touchstart：`lastTapTime = 0`
+- 时序分析：
+  1. 第一次 touchend → 单击分支，设置 `lastTapTime = now`，200ms 关闭定时器
+  2. 第二次 touchstart（双击的第二次）→ **触发 `lastTapTime = 0`**，重置双击检测
+  3. 第二次 touchend → `dt = Date.now() - 0`（巨大值），无法识别双击，进入单击分支设置关闭定时器
+  4. 200ms 后关闭执行 → "放大一下然后退出"
+- 附带 bug：放大状态判断 `indexOf('scale(1)') < 0` 有误（初始 transform 为空也返回 -1，被误判为已放大）
+- 修复：
+  1. 删除 touchstart 中所有 `lastTapTime = 0`，双击检测完全交给 overlay 的 touchend 统一处理
+  2. 放大状态判断改为正则提取 scale 值：`tr.match(/scale\\(([\\d.]+)/)`，>1.05 才视为放大
+
+#### 关键经验
+- **手势状态机设计**：touchstart 不应干扰 touchend 的双击/单击检测逻辑，否则会造成状态丢失
+- **位移判断阈值**：用 10px 位移区分 tap/pan，比纯时间窗口更可靠
+- **双击窗口 < 单击延迟**：确保双击的第二次 touchend 能在单击定时器执行前进入双击分支并 `clearTimeout`
+- **社区参考**：PhotoSwipe 的 closeOnVerticalDrag 模式、touch-action: manipulation 禁用浏览器双击延迟
+
+#### 涉及文件
+- `www/image-gen.js`：`showImagePreview` 函数内的 img/overlay touchstart/touchend 监听器
+- `www/app.js`：`exportAllData` 函数的 settings 镜像剥离逻辑
+- `www/index.html`：cache-bust v79→v82
+

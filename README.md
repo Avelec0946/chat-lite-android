@@ -2,31 +2,37 @@
 
 chat-lite 的 Android APK 版本，使用 [Capacitor](https://capacitorjs.com/) 打包。
 
-> 主仓库：https://github.com/Avelec0946/chat-lite
-> 基于上游 commit：见 `www/UPSTREAM_COMMIT.txt`
+> 主仓库（网页版）：https://github.com/Avelec0946/chat-lite
 
 ## 与主仓库的关系
 
-- **平行仓库**：本仓库独立于主仓库，主仓库保持纯净（不含 Capacitor 代码）
-- **前端代码同步**：通过 `sync-from-upstream.ps1` 从主仓库拷贝，手动 merge APK 特有改动
-- **运行时分支**：APK 特有逻辑全部用 `isCapacitor()` 检测隔离，主仓库同步时一眼能识别
+**本仓库与主仓库是独立的两个仓库。** 双方各自演进，**不默认同步、不自动跟进**对方改动。
+
+- 需要互通时，手动运行 `sync.ps1`（可选双向、可预览差异）——按需同步，不是强制机制
+- APK 特有逻辑用 `isCapacitor()` 运行时隔离，web 下自动降级
+- 双向差异声明见 `www/SYNC-MANIFEST.md`
 
 ## 项目结构
 
 ```
 chat-lite-android/
-├── www/                        # 前端文件（主仓库拷贝 + APK 改动）
-│   ├── app.js                  # 修改版（isCapacitor 分支、原生 HTTP、全量导出/导入）
-│   ├── index.html              # 修改版（导出/导入按钮、相对路径、web-only class）
-│   ├── style.css               # 修改版（移动端触摸区域、capacitor-mode 隐藏）
-│   ├── favicon.png             # 原样
-│   ├── icon-192.png            # 原样
-│   ├── icon-512.png            # 原样
-│   ├── manifest.json           # 原样（APK 不需要，但保留无害）
-│   └── UPSTREAM_COMMIT.txt     # 基于主仓库哪个 commit
+├── www/                        # 前端文件（模块化结构，v2.0 拆分）
+│   ├── app.js                  # 入口（state/init/事件绑定/通用工具）
+│   ├── db.js                   # 存储层（IndexedDB/Filesystem）
+│   ├── haptics.js              # 振感反馈
+│   ├── providers.js            # 聊天 Provider 系统
+│   ├── image-gen.js            # 生图子系统
+│   ├── conversation.js         # 会话管理（渲染/分支树/长按菜单）
+│   ├── chat.js                 # 聊天核心（消息发送/流式请求）
+│   ├── io.js                   # 导入导出 + 角色卡 + 格式转换
+│   ├── gesture-helpers.js      # 手势辅助
+│   ├── index.html              # 页面结构（9 模块加载）
+│   ├── style.css               # 样式
+│   ├── APK_ONLY_PATCHES.md     # APK 特有改动历史（v49-v85 全记录）
+│   └── SYNC-MANIFEST.md        # 双向同步差异声明
 ├── capacitor.config.json       # Capacitor 配置（webDir: www, CapacitorHttp 启用）
 ├── package.json                # npm 依赖
-├── sync-from-upstream.ps1      # 上游同步脚本
+├── sync.ps1                    # 按需双向同步脚本（可 Preview）
 ├── android/                    # Android 工程（cap add 生成）
 └── README.md                   # 本文件
 ```
@@ -131,28 +137,31 @@ npm run open:android
 npm run sync:web
 ```
 
-## 从主仓库同步更新
+## 按需双向同步（与主仓库互通）
 
-当主仓库 `chat-lite` 有新提交时：
+两个仓库独立演进。需要互通时，在 APK 仓库根目录运行：
 
 ```powershell
-# 1. 先把主仓库更新到最新
-cd C:\Users\86176\chat-lite
-git pull
+# 预览差异（推荐先看再动）
+.\sync.ps1 -Preview
+.\sync.ps1 -Direction apk-to-main -Preview
 
-# 2. 回到 APK 仓库，执行同步脚本
-cd C:\Users\86176\chat-lite-android
-.\sync-from-upstream.ps1
+# 实际同步
+.\sync.ps1                    # 主仓库 → APK
+.\sync.ps1 -Direction apk-to-main   # APK → 主仓库
+```
 
-# 3. 脚本会拷贝前端文件到 www/，并打印需要手动 merge 的 APK 特有改动清单
-#    按清单逐项重新应用修改
+同步前先读 `www/SYNC-MANIFEST.md`——它声明了哪些文件共享、哪些各自特有，同步时特有部分不会被覆盖。
 
-# 4. 测试
+同步后：
+```powershell
 npx cap sync android
 cd android
 .\gradlew assembleDebug
 adb install -r app/build/outputs/apk/debug/app-debug.apk
 ```
+
+> 注意：本仓库的改动**不会**自动推到主仓库；主仓库的改动**不会**自动拉进来。需要时手动同步。
 
 ## 架构说明
 
