@@ -27,11 +27,18 @@ $ErrorActionPreference = "Stop"
 
 # ---------- Config ----------
 # Shared frontend files (maintained in both repos, eligible for sync)
+# Shared files - auto-copied when they differ
 $sharedFiles = @(
     "app.js", "db.js", "haptics.js", "providers.js",
     "image-gen.js", "conversation.js", "chat.js", "io.js",
-    "gesture-helpers.js", "index.html", "style.css",
+    "gesture-helpers.js", "style.css",
     "favicon.png", "icon-192.png", "icon-512.png", "manifest.json"
+)
+
+# Merge-only files - repos intentionally differ (deployment paths, splash, cache-bust).
+# Script reports the diff but does NOT auto-overwrite; merge manually.
+$mergeOnlyFiles = @(
+    "index.html"
 )
 
 # Repo-specific files (never synced, never overwritten by either direction)
@@ -72,6 +79,21 @@ if ($Preview) {
 
 $changed = @()
 $skipped = @()
+$mergeOnly = @()
+
+# Check merge-only files first (report diffs, never overwrite)
+foreach ($f in $mergeOnlyFiles) {
+    $src = Join-Path $srcDir $f
+    $dst = Join-Path $dstDir $f
+    if ((Test-Path $src) -and (Test-Path $dst)) {
+        $h1 = Get-Sha1 $src
+        $h2 = Get-Sha1 $dst
+        if ($h1 -ne $h2) {
+            Write-Host "  [MERGE] $f (intentional repo diff - merge manually, not auto-synced)" -ForegroundColor Magenta
+            $mergeOnly += $f
+        }
+    }
+}
 
 foreach ($f in $sharedFiles) {
     $src = Join-Path $srcDir $f
@@ -110,6 +132,12 @@ if ($changed.Count -eq 0) {
     Write-Host "   (preview mode, nothing copied. Run without -Preview to sync)"
 } else {
     Write-Host "OK: synced $($changed.Count) file(s): $($changed -join ', ')" -ForegroundColor Green
+}
+
+if ($mergeOnly.Count -gt 0) {
+    Write-Host "MERGE-NEEDED: $($mergeOnly.Count) file(s) intentionally differ and were NOT touched:" -ForegroundColor Magenta
+    Write-Host "   $($mergeOnly -join ', ')" -ForegroundColor Magenta
+    Write-Host "   These need manual merge (deployment paths / splash / cache-bust)." -ForegroundColor Magenta
 }
 
 if ($skipped.Count -gt 0) {
