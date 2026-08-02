@@ -24,6 +24,7 @@
 | `gesture-helpers.js` | 手势辅助 |
 | `index.html` | 页面结构 |
 | `style.css` | 样式 |
+| `vendor/sortable.min.js` | 第三方拖拽库 SortableJS 1.15.6（MIT，批次5阶段1 会话分组拖动；同步须一并带过去，否则 app.js 的 initSortables 找不到 Sortable） |
 | `favicon.png` / `icon-192.png` / `icon-512.png` | 图标 |
 | `manifest.json` | PWA 清单（注意：主仓库为 `/chat-lite/` 前缀路径，APK 为相对路径，同步后需各自检查） |
 

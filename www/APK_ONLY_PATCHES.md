@@ -9,6 +9,23 @@
 
 ---
 
+## 批次5阶段1（SortableJS 会话分组，cache-bust v87，分支 feature/batch5-phase1-sortable）
+
+> 本批为**通用功能**（非 APK 特有），但引入了一个新第三方文件 + index.html 脚本引用，
+> 同步主仓库时必须手动确认以下三项，否则主仓库页面会报 `Sortable is not defined`：
+
+| 项 | 位置 | 说明 |
+|---|---|---|
+| 新文件 | `www/vendor/sortable.min.js` | SortableJS 1.15.6（MIT，45KB）。`sync.ps1` 的 `$sharedFiles` 已加 `vendor/sortable.min.js` |
+| index.html | 脚本引用 | `<script src="vendor/sortable.min.js?v=87"></script>`（在 db.js 之前）；index.html 是 merge-only 文件，需手动合并 |
+| 数据结构 | `state.convGroups[]` + `conv.groupId` | 与 conversations 同库存储（save() payload 已带 convGroups）；旧数据无此字段自动按无组处理 |
+
+功能要点：长按 500ms 拖动排序 / 拖到无组会话中心区建组（应用内弹窗输组名，唯一性校验，不用原生 prompt——
+Android WebView 的 prompt 默认值不预填）/ 拖到组块头部入组 / 拖进组体隐式入组 / 组内会话拖出即离组 /
+组内 1 人自动解散 / 收折按钮持久化 collapsed / 长按组块弹菜单（重命名/解散/查看画廊预留）。
+
+---
+
 ## 同步后必须重新打的补丁
 
 ### 1. Capacitor 文件系统 / Share / StreamHttp 相关（已有上游基础）

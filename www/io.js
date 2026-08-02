@@ -55,6 +55,7 @@ const data = {
   version: 1,
   exportedAt: new Date().toISOString(),
   conversations: state.conversations,
+  convGroups: state.convGroups || [],   // 批次5阶段1：分组随备份导出
   providers: state.providers,
   settings: exportSettings,
   currentId: state.currentId
@@ -179,6 +180,7 @@ async function importAllData(jsonText, mode) {
   if (mode === 'overwrite') {
     // 覆盖模式：直接替换
     if (data.conversations) state.conversations = data.conversations;
+    if (data.convGroups) state.convGroups = data.convGroups;   // 批次5阶段1：分组随数据备份/恢复
     if (data.providers) state.providers = data.providers;
     if (data.settings) {
       Object.assign(settings, data.settings);
@@ -196,6 +198,12 @@ async function importAllData(jsonText, mode) {
       const kept = state.conversations.filter(c => !importedIds.has(c.id));
       state.conversations = kept.concat(data.conversations);
     }
+    if (data.convGroups) {
+      // 合并模式：组按 id 去重（导入优先覆盖同 id 组）
+      const importedGIds = new Set(data.convGroups.map(g => g.id));
+      const keptG = (state.convGroups || []).filter(g => !importedGIds.has(g.id));
+      state.convGroups = keptG.concat(data.convGroups);
+    }
     if (data.providers) {
       const importedPIds = new Set(data.providers.map(p => p.id));
       const keptP = (state.providers || []).filter(p => !importedPIds.has(p.id));
@@ -210,6 +218,10 @@ async function importAllData(jsonText, mode) {
       state.currentId = state.conversations.length > 0 ? state.conversations[0].id : null;
     }
   }
+
+  // 批次5阶段1：导入后归一化分组（清理孤儿 groupId + 组员连续 + 空组移除）
+  cleanOrphanGroupIds();
+  normalizeConvGroups();
 
   save();
   renderSidebar();

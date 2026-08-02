@@ -28,6 +28,7 @@ if (isCapacitor()) {
 // ===== State =====
 const state = {
   conversations: [],
+  convGroups: [],  // 批次5阶段1（SortableJS 新线）：会话分组 {id, name, collapsed, createdAt}
   providers: [],  // v76 修复：从 providers.js 迁回此字段初始化（避免 TDZ 报错）
   currentId: null,
   loading: false,
@@ -215,12 +216,16 @@ async function loadData() {
     var data = await idbGet(STORAGE_KEY);
     if (data && data.conversations) {
       state.conversations = data.conversations || [];
+      state.convGroups = data.convGroups || [];  // 批次5阶段1：IDB 读取分组
       state.currentId = data.currentId || null;
       if (!data.version || data.version < 2) {
         for (const conv of state.conversations) {
           if (conv.messages && Array.isArray(conv.messages) && !conv.messageMap) migrateV1toV2(conv);
         }
       }
+      // 批次5阶段1：清理孤儿 groupId（指向不存在组的会话置空，防止被渲染吃掉）+ 归拢组员连续
+      cleanOrphanGroupIds();
+      normalizeConvGroups();
       return;
     }
   } catch(e) { console.warn('IndexedDB read failed:', e); }
@@ -230,15 +235,70 @@ async function loadData() {
     if (raw) {
       var d = JSON.parse(raw);
       state.conversations = d.conversations || [];
+      state.convGroups = d.convGroups || [];  // 批次5阶段1：localStorage 读取分组
       state.currentId = d.currentId || null;
       for (const conv of state.conversations) {
         if (conv.messages && Array.isArray(conv.messages) && !conv.messageMap) migrateV1toV2(conv);
       }
       // Migrate to IndexedDB
-      await idbPut(STORAGE_KEY, { conversations: state.conversations, currentId: state.currentId, version: 2 });
+      await idbPut(STORAGE_KEY, { conversations: state.conversations, convGroups: state.convGroups, currentId: state.currentId, version: 2 });  // 批次5阶段1：迁移含 convGroups
+      cleanOrphanGroupIds();
+      normalizeConvGroups();
       console.log('Migrated localStorage → IndexedDB');
     }
   } catch(e) {}
+}
+
+// ===== 批次5阶段1（SortableJS 新线）：会话分组 =====
+// 数据模型：state.convGroups[]（组定义）+ conv.groupId（会话归属）
+// 核心不变量：组员数组连续（数组顺序=视觉顺序；组块渲染在首员位置，成员紧随其后）
+
+// 清理孤儿 groupId：conv.groupId 指向不存在的组 → 置空（防止会话被"渲染吃掉"）
+function cleanOrphanGroupIds() {
+  var valid = new Set((state.convGroups || []).map(function(g) { return g.id; }));
+  (state.conversations || []).forEach(function(c) {
+    if (c.groupId && !valid.has(c.groupId)) c.groupId = null;
+  });
+}
+
+// 归拢组员数组连续（历史数据可能交错：旧建组只改 groupId 不动位置）
+// 此后 createGroup/joinGroup/DOM 同步均维护该不变量，加载时一次性归拢即可
+function normalizeConvGroups() {
+  if (!Array.isArray(state.convGroups)) state.convGroups = [];
+  if (!Array.isArray(state.conversations)) state.conversations = [];
+  var out = [];
+  var seenGid = {};
+  state.conversations.forEach(function(c) {
+    if (!c.groupId) { out.push(c); return; }
+    if (seenGid[c.groupId]) return;   // 该组的首员已处理过，跳过
+    seenGid[c.groupId] = true;
+    state.conversations.forEach(function(c2) {
+      if (c2.groupId === c.groupId) out.push(c2);
+    });
+  });
+  state.conversations = out;
+  cleanOrphanGroupIds();
+  // 清理空组（无成员的组定义直接移除）
+  state.convGroups = state.convGroups.filter(function(g) {
+    return state.conversations.some(function(c) { return c.groupId === g.id; });
+  });
+}
+
+// 组内会话数 <=1 时自动解散（单个会话无需组——自身即独立角色）
+function dissolveGroupIfOrphaned(groupId) {
+  if (!groupId) return;
+  var members = state.conversations.filter(function(c) { return c.groupId === groupId; });
+  if (members.length <= 1) {
+    state.convGroups = state.convGroups.filter(function(g) { return g.id !== groupId; });
+    members.forEach(function(c) { c.groupId = null; });
+  }
+}
+
+// 统一设置会话的 groupId（离开旧组时触发旧组自动解散）
+function setConvGroup(conv, newGid) {
+  var oldGid = conv.groupId;
+  conv.groupId = newGid;
+  if (oldGid && oldGid !== newGid) dissolveGroupIfOrphaned(oldGid);
 }
 
 async function loadFromServer() {
@@ -671,119 +731,10 @@ async function init() {
   // F1: 初始化生图界面事件监听
   initImageView();
 
-  // Long press + drag to reorder conversations
-  let longPressTimer = null;
-  let dragCtx = null;
-
-  function beginHold(el, clientY) {
-    clearTimeout(longPressTimer);
-    isLongPress = false;
-    const rect = el.getBoundingClientRect();
-    dragCtx = { el, id: el.dataset.id, startY: clientY, startTop: rect.top, height: rect.height, mode: 'wait' };
-    longPressTimer = setTimeout(() => {
-      if (!dragCtx || dragCtx.el !== el) return;
-      isLongPress = true;
-      dragCtx.mode = 'ready';
-      convList.querySelectorAll('.conv-item.long-press').forEach(e => e.classList.remove('long-press'));
-      el.classList.add('long-press');
-    }, 500);
-  }
-
-  function continueHold(clientY) {
-    if (!dragCtx) return;
-    if (dragCtx.mode === 'wait') {
-      if (Math.abs(clientY - dragCtx.startY) > 10) { clearTimeout(longPressTimer); dragCtx = null; }
-    } else if (dragCtx.mode === 'ready') {
-      if (Math.abs(clientY - dragCtx.startY) > 10) {
-        dragCtx.mode = 'drag';
-        dragCtx.dragStartY = clientY;
-        dragCtx.el.classList.remove('long-press');
-        dragCtx.el.classList.add('dragging');
-        // Lock list, lift item to fixed position
-        var rect = dragCtx.el.getBoundingClientRect();
-        convList.style.overflow = 'hidden';
-        dragCtx.el.style.position = 'fixed';
-        dragCtx.el.style.left = rect.left + 'px';
-        dragCtx.el.style.top = rect.top + 'px';
-        dragCtx.el.style.width = rect.width + 'px';
-        dragCtx.el.style.zIndex = '10';
-        dragCtx.el.style.transition = 'none';
-        dragCtx.fixedStartTop = rect.top;
-        isLongPress = false;
-      }
-    } else if (dragCtx.mode === 'drag') {
-      dragCtx.el.style.top = (dragCtx.fixedStartTop + (clientY - dragCtx.dragStartY)) + 'px';
-      // Show drop position
-      var items = [...convList.querySelectorAll('.conv-item:not(.dragging)')];
-      convList.querySelectorAll('.drag-target').forEach(e => e.classList.remove('drag-target'));
-      for (var i = 0; i < items.length; i++) {
-        var r = items[i].getBoundingClientRect();
-        if (clientY < r.top + r.height / 2) { items[i].classList.add('drag-target'); break; }
-      }
-      // Auto-scroll near edges (speed proportional to proximity)
-      var convRect = convList.getBoundingClientRect();
-      var edgeZone = 60;
-      var dist = 0, speed = 0;
-      if (clientY < convRect.top + edgeZone) {
-        dist = clientY - convRect.top;
-        speed = -Math.round(20 * (1 - dist / edgeZone));
-      } else if (clientY > convRect.bottom - edgeZone) {
-        dist = convRect.bottom - clientY;
-        speed = Math.round(20 * (1 - dist / edgeZone));
-      }
-      if (speed) convList.scrollTop += speed;
-    }
-  }
-
-  function endHold() {
-    clearTimeout(longPressTimer);
-    if (dragCtx && dragCtx.mode === 'drag') {
-      // Calculate drop index from visual positions
-      var items = [...convList.querySelectorAll('.conv-item:not(.dragging)')];
-      var dropIdx = items.length;
-      var draggedRect = dragCtx.el.getBoundingClientRect();
-      var draggedMid = draggedRect.top + draggedRect.height / 2;
-      for (var i = 0; i < items.length; i++) {
-        var r = items[i].getBoundingClientRect();
-        if (draggedMid < r.top + r.height / 2) { dropIdx = i; break; }
-      }
-      // Reset element
-      dragCtx.el.classList.remove('dragging');
-      dragCtx.el.style.position = ''; dragCtx.el.style.left = '';
-      dragCtx.el.style.top = ''; dragCtx.el.style.width = '';
-      dragCtx.el.style.zIndex = ''; dragCtx.el.style.transition = '';
-      convList.style.overflow = '';
-      convList.querySelectorAll('.drag-target').forEach(e => e.classList.remove('drag-target'));
-      // Reorder array
-      var conv = state.conversations.find(c => c.id === dragCtx.id);
-      var fromIdx = state.conversations.indexOf(conv);
-      if (fromIdx >= 0) { state.conversations.splice(fromIdx, 1); state.conversations.splice(dropIdx, 0, conv); save(); }
-      dragCtx = null; isLongPress = false; renderSidebar();
-    } else {
-      dragCtx = null;
-    }
-  }
-
-  convList.addEventListener('mousedown', (e) => {
-    const item = e.target.closest('.conv-item');
-    if (!item || e.target.classList.contains('del-btn') || e.target.tagName === 'INPUT') return;
-    beginHold(item, e.clientY);
-  });
-  document.addEventListener('mousemove', (e) => { if (dragCtx) continueHold(e.clientY); });
-  document.addEventListener('mouseup', () => endHold());
-
-  convList.addEventListener('touchstart', (e) => {
-    const item = e.target.closest('.conv-item');
-    if (!item || e.target.classList.contains('del-btn') || e.target.tagName === 'INPUT') return;
-    beginHold(item, e.touches[0].clientY);
-  }, { passive: true });
-  document.addEventListener('touchmove', (e) => {
-    if (dragCtx) {
-      if (dragCtx.mode === 'drag') e.preventDefault();
-      continueHold(e.touches[0].clientY);
-    }
-  }, { passive: false });
-  document.addEventListener('touchend', () => endHold());
+  // 批次5阶段1（SortableJS 新线）：长按拖动改由 SortableJS 实现
+  // （模块级 initSortables 定义在 init() 之后；renderSidebar 末尾通过 window.initSortables 钩子重建实例）
+  // 长按 500ms → 拖动：排序 / 建组（拖到无组会话中心区）/ 入组（拖到组块中心区或组内）
+  initSortables();
 
   // Click elsewhere to dismiss long-press / message selection
   document.addEventListener('click', (e) => {
@@ -814,6 +765,331 @@ async function init() {
 
   // Enable send button on init
   updateSendButton();
+}
+
+// ===== 批次5阶段1（SortableJS 新线）：会话分组拖动 =====
+// 方案：引入成熟公开方案 SortableJS（MIT，零依赖，原生触摸支持），DOM 即数据——
+//   - 外层列表（#conv-list）：独立会话 + 组块，混排
+//   - 内层列表（.conv-group-body）：组成员
+//   - 松手后 syncFromDOM() 按 DOM 顺序重建 state.conversations + groupId，从架构上根除"视觉↔数组"双源
+// 语义映射：
+//   - 拖到间隙 → SortableJS 默认排序（蓝条=SortableJS 占位符）
+//   - 拖独立会话到无组会话中心区（30%-70%）→ 高亮 → 建组（弹窗输入组名，唯一性校验）
+//   - 拖独立会话到组块中心区 → 高亮 → 入组（追加组末 + 展开）
+//   - 拖进展开组体/拖出组体 → 隐式入组/离组（SortableJS 嵌套移动 + syncFromDOM 归位）
+//   - 组级拖动 → 只排序（组块不可作为合并目标，拖动组块也不触发合并）
+//   - 组内会话 → 永不合并（仅排序；拖出即离组）
+let _sortableInstances = [];
+let mergeTarget = null;            // 当前高亮的合并目标元素（onMove 实时更新）
+
+function removeGroupMenu() {
+  var m = document.getElementById('conv-group-menu');
+  if (m) m.remove();
+}
+
+function clearMergeTarget() {
+  if (mergeTarget && mergeTarget.classList) mergeTarget.classList.remove('merge-target');
+  mergeTarget = null;
+}
+
+function destroySortables() {
+  _sortableInstances.forEach(function(s) { try { s.destroy(); } catch(e) {} });
+  _sortableInstances = [];
+}
+
+// 元素是否为"独立会话"（未在组内，可作合并主体/目标）
+function isSoloConv(el) {
+  return el && el.classList && el.classList.contains('conv-item') && !el.classList.contains('in-group');
+}
+
+// 建组/入组资格（onEnd 落点终判）
+function isMergeEligible(draggedEl, target) {
+  if (!draggedEl || !target || !target.isConnected) return false;
+  if (!isSoloConv(draggedEl)) return false;                       // 拖组/拖组内会话 → 只排序
+  if (target.classList.contains('conv-group')) return true;       // 目标=组块 → 入组
+  return isSoloConv(target);                                      // 目标=无组会话 → 建组
+}
+
+function initSortables() {
+  destroySortables();
+  if (typeof Sortable === 'undefined') return;
+  // 搜索过滤视图下禁用拖动（避免在过滤视图重排全量数组造成错乱）
+  var searchInput = document.getElementById('conv-search-input');
+  var query = (searchInput && searchInput.value || '').trim();
+  if (query) return;
+
+  var common = {
+    group: { name: 'chatlite-convs', pull: true, put: true },
+    animation: 150,
+    delay: 500,               // 长按 500ms 后进入拖动（与旧行为一致；未拖动时 onChoose 提供长按菜单/重命名）
+    delayOnTouchOnly: false,
+    touchStartThreshold: 4,   // 轻微抖动不误触
+    swapThreshold: 0.65,      // 官方嵌套推荐
+    invertSwap: true,         // 官方嵌套推荐
+    fallbackOnBody: true,     // 官方嵌套推荐（嵌套 + 动画时 ghost 挂 body，避免被 overflow 裁剪）
+    ghostClass: 'conv-ghost',
+    chosenClass: 'sortable-chosen',
+    dragClass: 'sortable-drag',
+    fallbackClass: 'sortable-fallback',
+    scroll: true,
+    scrollSensitivity: 40,
+    scrollSpeed: 15,
+    filter: '.del-btn, .conv-rename-input, .group-collapse-btn, input, textarea, select, button',
+    preventOnFilter: false,   // filter 元素的点击事件正常触发（删除按钮/收折按钮）
+    onChoose: handleDragChoose,
+    onStart: handleDragStart,
+    onMove: handleDragMove,
+    onEnd: handleDragEnd,
+    onUnchoose: handleDragUnchoose
+  };
+  // 外层：独立会话 + 组块混排
+  _sortableInstances.push(Sortable.create(convList, Object.assign({}, common, {
+    draggable: '.conv-item, .conv-group'
+  })));
+  // 内层：各组展开的成员列表（收折组跳过——不可交互）
+  convList.querySelectorAll('.conv-group-body').forEach(function(body) {
+    if (body.offsetParent === null) return;
+    _sortableInstances.push(Sortable.create(body, Object.assign({}, common, {
+      draggable: '.conv-item'
+    })));
+  });
+}
+window.initSortables = initSortables;
+
+function handleDragChoose(evt) {
+  // 长按选中：会话 → .long-press（重命名/删除就绪）；组块 → 组菜单（定位在组块下方，避开手指/光标）
+  removeGroupMenu();
+  convList.querySelectorAll('.conv-item.long-press').forEach(function(el) { el.classList.remove('long-press'); });
+  var item = evt.item;
+  if (!item) return;
+  if (item.classList.contains('conv-group')) {
+    var r = item.getBoundingClientRect();
+    isLongPress = true;
+    showConvGroupMenuAt(r.left, r.bottom + 4, item.dataset.groupId);
+  } else if (item.classList.contains('conv-item')) {
+    isLongPress = true;
+    item.classList.add('long-press');
+  }
+}
+
+function handleDragStart(evt) {
+  // 真正开始拖动：收起长按状态（菜单/重命名标记）
+  isLongPress = false;
+  removeGroupMenu();
+  convList.querySelectorAll('.conv-item.long-press').forEach(function(el) { el.classList.remove('long-press'); });
+}
+
+function handleDragUnchoose(evt) {
+  // 长按后未拖动直接松手：保留 .long-press / 组菜单，供后续点击操作
+}
+
+function handleDragMove(evt) {
+  // 合并预览：被拖元素中心落入目标中心区 → 高亮目标（merge-target）
+  // 返回 false = 阻止 SortableJS 把被拖项移动到该位置（组块头部场景：防止被吸进组体，保证"入组组末"语义）
+  clearMergeTarget();
+  var dragged = evt.dragged;
+  var related = evt.related;
+  if (!dragged || !related) return true;
+  if (!isSoloConv(dragged)) return true;                          // 拖组/拖组内会话 → 纯排序
+  var relatedIsGroup = related.classList.contains('conv-group');
+  var relatedIsSolo = isSoloConv(related);
+  if (!relatedIsGroup && !relatedIsSolo) return true;             // 组内会话 → 永不合并
+  var dr = evt.draggedRect, rr = evt.relatedRect;
+  if (!dr || !rr) return true;
+  var draggedMidY = dr.top + dr.height / 2;
+  var hOverlap = !(dr.right < rr.left || dr.left > rr.right);
+  if (!hOverlap) return true;
+  if (relatedIsSolo) {
+    // 目标=无组会话：中心区（30%-70%）命中 → 建组预览
+    var zoneTop = rr.top + rr.height * 0.3;
+    var zoneBottom = rr.top + rr.height * 0.7;
+    if (draggedMidY < zoneTop || draggedMidY > zoneBottom) return true;   // 间隙区 → 纯排序
+    mergeTarget = related;
+    related.classList.add('merge-target');
+    return true;   // 允许落到其旁；松手后 onEnd 终判建组
+  }
+  // 目标=组块：仅头部中心区命中 → 入组预览（阻止吸进组体）
+  var headerEl = related.querySelector('.conv-group-header');
+  if (!headerEl) return true;
+  var hr = headerEl.getBoundingClientRect();
+  if (!hr || !hr.height) return true;
+  var hZoneTop = hr.top + hr.height * 0.3;
+  var hZoneBottom = hr.top + hr.height * 0.7;
+  if (draggedMidY < hZoneTop || draggedMidY > hZoneBottom) return true;   // 组体区域 → 隐式并入
+  mergeTarget = related;
+  related.classList.add('merge-target');
+  return false;   // 阻止进入组体；松手后 onEnd 终判入组（追加组末）
+}
+
+async function handleDragEnd(evt) {
+  var draggedEl = evt.item;
+  var target = mergeTarget;
+  clearMergeTarget();
+  isLongPress = false;
+  removeGroupMenu();
+  convList.querySelectorAll('.conv-item.long-press').forEach(function(el) { el.classList.remove('long-press'); });
+  if (!draggedEl) return;
+  // 1) 先同步 DOM → 数据（数组顺序=视觉顺序，groupId 由 DOM 归属决定）
+  syncFromDOM();
+  // 2) 合并终判
+  var merged = false;
+  if (target && isMergeEligible(draggedEl, target)) {
+    if (target.classList.contains('conv-group')) {
+      var convIn = findConvById(draggedEl.dataset.id);
+      if (convIn) { joinGroup(convIn, target.dataset.groupId); merged = true; }
+    } else {
+      var convA = findConvById(draggedEl.dataset.id);
+      var convB = findConvById(target.dataset.id);
+      if (convA && convB && convA !== convB) { merged = await createGroupFromMerge(convA, convB); }
+    }
+  }
+  // 3) 纯排序 / 隐式入组 / 离组：自动解散空组 + 保存
+  if (!merged) {
+    autoDissolve();
+    save();
+    renderSidebar();
+  }
+  triggerHapticFeedback('.');
+}
+
+// 按 DOM 顺序重建 state.conversations（外层直接子元素顺序遍历：独立会话就地入列，组块就地展开成员）
+// 组员连续不变量由 DOM 结构天然保证（成员只存在于组体内部）
+function syncFromDOM() {
+  var idToConv = {};
+  state.conversations.forEach(function(c) { idToConv[c.id] = c; });
+  var seen = {};
+  var order = [];
+  var gidOf = {};
+  var children = convList.children;   // 直接子元素（DOM 顺序 = 视觉顺序）
+  for (var i = 0; i < children.length; i++) {
+    var el = children[i];
+    if (el.classList.contains('conv-group')) {
+      var gid = el.dataset.groupId;
+      var body = el.querySelector('.conv-group-body');
+      if (body) {
+        var items = body.querySelectorAll(':scope > .conv-item');
+        for (var j = 0; j < items.length; j++) {
+          var id = items[j].dataset.id;
+          if (!id || seen[id]) continue;
+          seen[id] = true;
+          order.push(id);
+          gidOf[id] = gid;
+        }
+      }
+    } else if (el.classList.contains('conv-item')) {
+      var soloId = el.dataset.id;
+      if (!soloId || seen[soloId]) continue;
+      seen[soloId] = true;
+      order.push(soloId);
+      gidOf[soloId] = null;
+    }
+  }
+  // 兜底：DOM 未出现的会话追加末尾（防数据丢失）
+  state.conversations.forEach(function(c) {
+    if (!seen[c.id]) { seen[c.id] = true; order.push(c.id); gidOf[c.id] = c.groupId || null; }
+  });
+  state.conversations = order.map(function(id) { return idToConv[id]; }).filter(Boolean);
+  state.conversations.forEach(function(c) { c.groupId = gidOf[c.id] || null; });
+}
+
+function findConvById(id) {
+  return id ? state.conversations.find(function(c) { return c.id === id; }) : null;
+}
+
+// 自动解散：所有成员数 <=1 的组（含 0 成员的空组）
+function autoDissolve() {
+  state.convGroups.map(function(g) { return g.id; }).forEach(function(gid) { dissolveGroupIfOrphaned(gid); });
+}
+
+// 建组（拖无组会话到无组会话中心区）：弹窗输入组名 → 唯一性校验 → 两会话入新组
+async function createGroupFromMerge(convA, convB) {
+  var idxA = state.conversations.indexOf(convA);
+  var idxB = state.conversations.indexOf(convB);
+  var nameSource = (idxA >= 0 && idxB >= 0 && idxA <= idxB) ? convA : convB;   // 默认组名=靠上的会话标题
+  var baseName = ((nameSource && nameSource.title) || '').trim() || '新组';
+  var name = await showGroupNameDialog('新建组', baseName, null);
+  if (name === null) return false;   // 取消：仅保留排序结果（两会话相邻但不成组）
+  var group = { id: uid(), name: name, collapsed: false, createdAt: Date.now() };
+  state.convGroups.push(group);
+  setConvGroup(convA, group.id);
+  setConvGroup(convB, group.id);
+  // 不变量：组员数组连续（合并落点后两会话应已相邻，防御性校正）
+  var ia = state.conversations.indexOf(convA);
+  var ib = state.conversations.indexOf(convB);
+  if (ib !== ia + 1) {
+    state.conversations.splice(ib, 1);
+    var na = state.conversations.indexOf(convA);
+    state.conversations.splice(na + 1, 0, convB);
+  }
+  save();
+  renderSidebar();
+  return true;
+}
+
+// 入组（拖独立会话到组块中心区）：追加组末 + 展开该组
+function joinGroup(conv, gid) {
+  var group = state.convGroups.find(function(g) { return g.id === gid; });
+  if (!group || !conv) return false;
+  setConvGroup(conv, gid);
+  // 移动会话到组内最后一位（保持组员连续）
+  var fromIdx = state.conversations.indexOf(conv);
+  if (fromIdx >= 0) state.conversations.splice(fromIdx, 1);
+  var lastIdx = -1;
+  state.conversations.forEach(function(c, i) { if (c.groupId === gid) lastIdx = i; });
+  state.conversations.splice(lastIdx + 1, 0, conv);
+  group.collapsed = false;   // 入组后展开，让用户看到结果
+  save();
+  renderSidebar();
+  return true;
+}
+
+// 组名输入弹窗（复用 .conflict-overlay/.conflict-dialog 样式；Android WebView 不支持 window.prompt，必须用应用内弹窗）
+// resolve: 输入的非空唯一组名；取消返回 null
+function showGroupNameDialog(title, initial, excludeGid) {
+  return new Promise(function(resolve) {
+    var overlay = document.createElement('div');
+    overlay.className = 'conflict-overlay';
+    overlay.style.zIndex = '1000';
+    overlay.innerHTML =
+      '<div class="conflict-dialog">' +
+        '<h3>' + escapeHtml(title) + '</h3>' +
+        '<input class="group-name-input" maxlength="30" placeholder="输入组名（唯一）" autocomplete="off" autocapitalize="off">' +
+        '<div class="conflict-actions">' +
+          '<button class="btn btn-primary" data-act="ok">确定</button>' +
+          '<button class="btn" data-act="cancel">取消</button>' +
+        '</div>' +
+      '</div>';
+    document.body.appendChild(overlay);
+    var input = overlay.querySelector('.group-name-input');
+    input.value = initial || '';
+    input.focus();
+    input.select();
+    var done = false;
+    function close(val) {
+      if (done) return;
+      done = true;
+      overlay.remove();
+      resolve(val);
+    }
+    function tryConfirm() {
+      var v = input.value.trim();
+      if (!v) { showToast('组名不能为空', 'warn'); input.focus(); return; }
+      if (state.convGroups.some(function(g) { return g.id !== excludeGid && g.name === v; })) {
+        showToast('组名「' + v + '」已存在，请换一个', 'warn');
+        input.focus();
+        return;
+      }
+      close(v);
+    }
+    overlay.querySelector('[data-act="ok"]').addEventListener('click', tryConfirm);
+    overlay.querySelector('[data-act="cancel"]').addEventListener('click', function() { close(null); });
+    input.addEventListener('keydown', function(e) {
+      if (e.key === 'Enter') tryConfirm();
+      else if (e.key === 'Escape') close(null);
+    });
+    overlay.addEventListener('mousedown', function(e) { if (e.target === overlay) close(null); });
+    overlay.addEventListener('touchstart', function(e) { if (e.target === overlay) close(null); }, { passive: true });
+  });
 }
 
 function currentConv() {

@@ -72,7 +72,8 @@ function save() {
   const conv = state.conversations.find(c => c.id === state.currentId);
   if (conv) conv.updatedAt = Date.now();
   // IndexedDB (async, fire-and-forget)
-  var payload = { conversations: state.conversations, currentId: state.currentId, version: 2 };
+  // 批次5阶段1（SortableJS 新线）：payload 新增 convGroups（与 conversations 同库存储，数组顺序=视觉顺序）
+  var payload = { conversations: state.conversations, convGroups: state.convGroups || [], currentId: state.currentId, version: 2 };
   idbPut(STORAGE_KEY, payload).catch(function(e) {
     console.warn('IndexedDB save failed:', e);
     showToast('本地存储保存失败', 'warn');
@@ -85,6 +86,7 @@ function save() {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           conversations: state.conversations,
+          convGroups: state.convGroups || [],
           currentId: state.currentId,
           deletedIds: state.deletedIds || []
         })
@@ -101,6 +103,7 @@ function save() {
               headers: { 'Content-Type': 'application/json' },
               body: JSON.stringify({
                 conversations: state.conversations,
+                convGroups: state.convGroups || [],
                 currentId: state.currentId,
                 deletedIds: state.deletedIds || []
               })
