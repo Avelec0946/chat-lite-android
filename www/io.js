@@ -55,23 +55,20 @@ const data = {
   version: 1,
   exportedAt: new Date().toISOString(),
   conversations: state.conversations,
+  convGroups: state.convGroups || [],   // 预留：批次5分组（main 无分组时为空数组，格式向前兼容）
   providers: state.providers,
   settings: exportSettings,
   currentId: state.currentId
 };
-  // 紧凑格式（无缩进），相比 null,2 节省约 30% 体积，备份格式不需要人工阅读
-  const jsonText = JSON.stringify(data);
   const fileName = 'chat-lite-backup-' + new Date().toISOString().slice(0, 10) + '.json';
 
   if (isCapacitor() && CapFilesystem && CapShare) {
+    // v1.4 重构（根治大备份 OOM）：108MB 级数据 JSON.stringify 全量峰值 ~3x 超 WebView 堆（192MB）卡退。
+    // 改为分块流式写：头部 writeFile + 分批 appendFile，峰值内存 = 单批大小（默认 30 条/200KB 刷盘）。
+    // 注意：此处绝不能在内存中构造完整 jsonText（那就是 OOM 点）。
     try {
-      const result = await CapFilesystem.writeFile({
-        path: fileName,
-        data: jsonText,           // 直接传 UTF-8 字符串，无需 base64 转换
-        directory: 'CACHE',
-        encoding: 'utf8',         // 关键：Filesystem 6.x 原生支持 UTF-8 写入
-        recursive: true
-      });
+      await exportAllDataStreamed(fileName, exportSettings);
+      const result = await CapFilesystem.getUri({ path: fileName, directory: 'CACHE' });
       await CapShare.share({
         title: 'chat-lite 数据备份',
         text: fileName,
@@ -84,7 +81,8 @@ const data = {
       showToast('导出失败：' + (err.message || err), 'danger');
     }
   } else {
-    // Web 模式
+    // Web 模式（数据量小，保持 Blob 全量构造）
+    const jsonText = JSON.stringify(data);
     const blob = new Blob([jsonText], { type: 'application/json' });
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a');
@@ -94,6 +92,50 @@ const data = {
     URL.revokeObjectURL(url);
     showToast('已导出全部数据', 'success');
   }
+}
+
+// 分块流式导出（APK 专用，根治大备份 OOM）：
+// 头部一次 writeFile，conversations 逐批 appendFile（每 30 条 或累计 200KB 刷盘一次），尾部一次 appendFile。
+// 峰值内存 = 单批字符串 + 进度计数，与数据总量无关。
+async function exportAllDataStreamed(fileName, exportSettings) {
+  const DIR = 'CACHE';
+  const convs = state.conversations || [];
+  const total = convs.length;
+  const head = '{"version":1,"exportedAt":"' + new Date().toISOString() + '","convGroups":' +
+    JSON.stringify(state.convGroups || []) + ',"conversations":[';
+  await CapFilesystem.writeFile({ path: fileName, data: head, directory: DIR, encoding: 'utf8', recursive: true });
+  let first = true;          // 是否文件内第一条 conversation（控制逗号）
+  let buf = [];
+  let bufChars = 0;
+  const FLUSH_COUNT = 30;    // 每批条数
+  const FLUSH_CHARS = 200000; // 每批字符上限（保守，防单条超大会话撑爆）
+
+  async function flush() {
+    if (!buf.length) return;
+    const chunk = (first ? '' : ',') + buf.join(',');
+    first = false;
+    buf = [];
+    bufChars = 0;
+    await CapFilesystem.appendFile({ path: fileName, data: chunk, directory: DIR, encoding: 'utf8' });
+  }
+
+  for (let i = 0; i < total; i++) {
+    const piece = JSON.stringify(convs[i]);
+    buf.push(piece);
+    bufChars += piece.length;
+    if (buf.length >= FLUSH_COUNT || bufChars >= FLUSH_CHARS) {
+      await flush();
+      await new Promise(r => setTimeout(r, 0));   // yield：让 UI 线程喘息，避免"卡死"观感
+      if (i % Math.max(1, Math.floor(total / 10)) === 0) {
+        showToast('导出中 ' + Math.min(100, Math.round(i / total * 100)) + '%…', 'info');
+      }
+    }
+  }
+  await flush();
+  const tail = '],"providers":' + JSON.stringify(state.providers || []) +
+    ',"settings":' + JSON.stringify(exportSettings) +
+    ',"currentId":' + JSON.stringify(state.currentId) + '}';
+  await CapFilesystem.appendFile({ path: fileName, data: tail, directory: DIR, encoding: 'utf8' });
 }
 
 async function importAllData(jsonText, mode) {
