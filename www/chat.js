@@ -696,6 +696,10 @@ async function executeStreamHttp(req, assistantMsg, opts) {
       chunkListener = await CapStreamHttp.addListener('chunk', (data) => {
         if (data.id !== streamId) return;
 
+        // idle timeout：收到任一有效 chunk 即重置计时器
+        // 长程思考时模型持续返回 reasoning_content，不会被绝对总时长截断
+        resetIdleTimeout();
+
         chunkBuffer += data.chunk;
         const lines = chunkBuffer.split('\n');
         chunkBuffer = lines.pop() || '';
@@ -749,16 +753,21 @@ async function executeStreamHttp(req, assistantMsg, opts) {
         reject(new Error(data.error || '流式请求错误'));
       });
 
-      // 超时
-      timeoutId = setTimeout(() => {
-        if (streamId) {
-          try { CapStreamHttp.cancelStream({ id: streamId }); } catch(e) {}
-        }
-        if (resolved) return;
-        resolved = true;
-        cleanup();
-        reject(new Error('请求超时（' + (timeoutMs / 1000) + ' 秒）'));
-      }, timeoutMs);
+      // 超时（idle 语义：流式数据持续流动时不触发，仅无数据流动超过 timeoutMs 时触发）
+      // 长程思考时模型持续返回 reasoning_content，每次收到 chunk 重置计时器，避免被绝对总时长截断
+      function resetIdleTimeout() {
+        clearTimeout(timeoutId);
+        timeoutId = setTimeout(() => {
+          if (streamId) {
+            try { CapStreamHttp.cancelStream({ id: streamId }); } catch(e) {}
+          }
+          if (resolved) return;
+          resolved = true;
+          cleanup();
+          reject(new Error('请求超时（' + (timeoutMs / 1000) + ' 秒无数据流动）'));
+        }, timeoutMs);
+      }
+      resetIdleTimeout();
 
       // 启动流式请求（stream 必须为 true）
       const payload = Object.assign({}, req.payload, { stream: true });

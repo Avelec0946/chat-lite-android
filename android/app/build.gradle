@@ -1,18 +1,43 @@
 apply plugin: 'com.android.application'
 
+// === 分支隔离配置（v2.0+）：main 保持原值，其他分支自动加后缀实现 APK 共存 ===
+// 详见任务看板 §3.4d
+def gitBranch = {
+    try {
+        def proc = "git rev-parse --abbrev-ref HEAD".execute([], rootProject.rootDir)
+        proc.waitFor()
+        return proc.text.trim()
+    } catch (Exception e) {
+        return "detached"
+    }
+}()
+def branchLast = gitBranch.split('/').last()
+def isMain = gitBranch.equals("main")
+// variantSuffix：applicationId 段必须以字母开头，只能含 [a-zA-Z0-9_]，连字符不合法需转为下划线
+def variantSuffix = isMain ? "" : branchLast.replaceAll("-", "_").replaceAll("[^a-zA-Z0-9_]", "").toLowerCase()
+// branchTag：原始分支最后一段，保留连字符，用于桌面名/versionName 等人类可读处
+def branchTag = isMain ? "" : branchLast
+def appIdBase = "com.avelec.chatlite"
+def appIdFull = isMain ? appIdBase : appIdBase + "." + variantSuffix
+def appNameFull = isMain ? "chat-lite" : "chat-lite [" + branchTag + "]"
+def versionNameFull = isMain ? "2.0" : "2.0-" + branchTag
+
 android {
     namespace "com.avelec.chatlite"
     compileSdk rootProject.ext.compileSdkVersion
     defaultConfig {
-        applicationId "com.avelec.chatlite"
+        applicationId appIdFull
         minSdkVersion rootProject.ext.minSdkVersion
         targetSdkVersion rootProject.ext.targetSdkVersion
-        versionCode 1
-        versionName "1.0"
+        versionCode 2
+        versionName versionNameFull
         testInstrumentationRunner "androidx.test.runner.AndroidJUnitRunner"
+        // resValue 注入：app_name 和 custom_url_scheme 跟随分支变化（strings.xml 中已移除同名项避免冲突）
+        resValue "string", "app_name", appNameFull
+        resValue "string", "custom_url_scheme", appIdFull
         aaptOptions {
              // Files and dirs to omit from the packaged assets dir, modified to accommodate modern web apps.
-             // Default: https://android.googlesource.com/platform/frameworks/base/+/282e181b58cf72b6ca770dc7ca5f91f135444502/tools/aapt/AaptAssets.cpp#61
+             // Default: https://android.googlesource.com/platform/frameworks/base/+/282e181b58cf72b6ca770dc7ca5f91f135444502/tools/aapt/AaptAssets.cpp#L61
             ignoreAssetsPattern '!.svn:!.git:!.ds_store:!*.scc:.*:!CVS:!thumbs.db:!picasa.ini:!*~'
         }
     }
@@ -22,7 +47,35 @@ android {
             proguardFiles getDefaultProguardFile('proguard-android.txt'), 'proguard-rules.pro'
         }
     }
+    // APK 输出文件名加分支标识，便于归档区分
+    applicationVariants.all { variant ->
+        variant.outputs.all { output ->
+            outputFileName = "chat-lite-${versionNameFull}-${variant.buildType.name}.apk"
+        }
+    }
 }
+
+// === 同步 assets/capacitor.config.json 的 appId ===
+// capacitor.config.json 是 npx cap copy 生成产物（在 .gitignore 中），preBuild 阶段 patch 不污染 git 工作区
+// main 分支无后缀，patch 后仍是 com.avelec.chatlite；其他分支会替换为带后缀的值
+tasks.register('patchCapacitorConfig') {
+    doLast {
+        def cfgFile = file("src/main/assets/capacitor.config.json")
+        if (cfgFile.exists()) {
+            def text = cfgFile.text
+            def patched = text.replaceAll(/"appId"\s*:\s*"[^"]*"/, "\"appId\": \"${appIdFull}\"")
+            if (text == patched) {
+                println "[patchCapacitorConfig] WARN: appId 未匹配替换（可能已是目标值或格式异常），原样保留"
+            } else {
+                cfgFile.text = patched
+                println "[patchCapacitorConfig] appId 已替换为 -> ${appIdFull}"
+            }
+        } else {
+            println "[patchCapacitorConfig] WARN: src/main/assets/capacitor.config.json 不存在（需先 npx cap copy android），跳过"
+        }
+    }
+}
+preBuild.dependsOn patchCapacitorConfig
 
 repositories {
     flatDir{
