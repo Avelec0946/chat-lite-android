@@ -9,23 +9,6 @@
 
 ---
 
-## 批次5阶段1（SortableJS 会话分组，cache-bust v87，分支 feature/batch5-phase1-sortable）
-
-> 本批为**通用功能**（非 APK 特有），但引入了一个新第三方文件 + index.html 脚本引用，
-> 同步主仓库时必须手动确认以下三项，否则主仓库页面会报 `Sortable is not defined`：
-
-| 项 | 位置 | 说明 |
-|---|---|---|
-| 新文件 | `www/vendor/sortable.min.js` | SortableJS 1.15.6（MIT，45KB）。`sync.ps1` 的 `$sharedFiles` 已加 `vendor/sortable.min.js` |
-| index.html | 脚本引用 | `<script src="vendor/sortable.min.js?v=87"></script>`（在 db.js 之前）；index.html 是 merge-only 文件，需手动合并 |
-| 数据结构 | `state.convGroups[]` + `conv.groupId` | 与 conversations 同库存储（save() payload 已带 convGroups）；旧数据无此字段自动按无组处理 |
-
-功能要点：长按 500ms 拖动排序 / 拖到无组会话中心区建组（应用内弹窗输组名，唯一性校验，不用原生 prompt——
-Android WebView 的 prompt 默认值不预填）/ 拖到组块头部入组 / 拖进组体隐式入组 / 组内会话拖出即离组 /
-组内 1 人自动解散 / 收折按钮持久化 collapsed / 长按组块弹菜单（重命名/解散/查看画廊预留）。
-
----
-
 ## 同步后必须重新打的补丁
 
 ### 1. Capacitor 文件系统 / Share / StreamHttp 相关（已有上游基础）
@@ -988,3 +971,36 @@ image: <reference.png Blob>
 - `www/app.js`：`exportAllData` 函数的 settings 镜像剥离逻辑
 - `www/index.html`：cache-bust v79→v82
 
+
+### N. 批次5 拖动重构（v108-v121，2026-08-02，APK 独有）
+> 主仓库无此改动（批次5 分组拖动为 APK 侧独有开发线），sync 主仓库后**必须手动重新应用**。
+
+#### 涉及文件
+- `www/app.js`：拖动段整段重写（约 693-1100 行）——12+ 新函数：`getLabels`/`findGroupAt`/`firstConvOfGroup`/`lastConvOfGroup`/`isGroupOpen`/`makeGapDrop`/`computeMerge`/`computeDrop`/`applyDropVisual`/`joinGroupAppend`/`executeDrop`/`executeGroupDrop`/`clearDropVisual`/`normalizeConvGroups`；事件绑定 `mousedown/touchstart → beginHold` 体系
+- `www/style.css`：`.conv-list` 加 `position:relative`；废弃 `.drag-target`/`.group-target`/`.group-drop-target`；新增 `.drop-indicator`（蓝条绝对定位）、`.conv-item.merge-target`、`.conv-group>summary.merge-target`
+- `www/index.html`：cache-bust v86→v121（含批次5 分组地基 v87-v107 的版本号）
+- `www/conversation.js`：`showConvGroupMenuAt`（v104-107 新增，菜单位置精确弹出）
+
+#### 关键设计（重构要点，勿回退）
+1. **数据不变量**：组内会话在 `state.conversations` 中连续存放（`normalizeConvGroups` 加载时归拢历史交错数据；`createGroup`/`joinGroupAppend`/gap 入组均维护）——数组顺序=视觉顺序
+2. **判定层**：`judgeY`=指针/元素中心（二者恒等）；中心区 30-70% merge / 两侧 gap；组内会话永不 merge（只蓝条）；组级拖动只排序
+3. **intoGid 由目标标签类型推导**：组内会话→其组；summary 组块前/收折组后→null；展开组 summary→组内首员前并入
+4. **滚动同步**：被拖元素中心钉在手指下（跟手 + 中心对齐）；auto-scroll 后立即重判 + 松手终判（蓝条与插入同源）
+5. **CSS 类**：`merge-target`（高亮）/ `drop-indicator`（蓝条），JS 添加的类全部有 CSS 定义
+
+#### v121 修复：判定点偏移 + summary 并入一致性（2026-08-02）
+**根因（接手文档 §五 悬案定案）**：
+- **判定点偏移（主根因，现象 A/C）**：元素 `top` 跟手指位移时保留"初始按压偏移"（`fixedStartTop + (clientY - dragStartY)`），长按标签标题（元素上部）时元素中心比手指低 5-20px，中心带（30-70%）边缘化 → merge 被拒降级 gap → "拖到标签1/2 不可加入（只有蓝条）"、"排序飘一个标签"。v115 只改判定点不改视觉跟手故"无效"；v116 改回元素中心因按压正中时无偏移故"改善"。**正解：元素中心钉在手指下（`top = clientY - height/2`），判定点=元素中心=指针，所见即所得**
+- **summary 上部不入组（现象 B 组外重排）**：`makeGapDrop` 原逻辑展开组 summary 上部（insertBefore=true）走"组块前不入组"，违反 §1.4"蓝条落展开组 rect 内即并入" → 拖到展开组 summary 上部松手后被重排至组上方（组外）。改为展开组 summary 上/下部统一并入（插组内首员前）
+- **拖动者孤儿 gid**：`computeMerge` 的 `dragGid` 未做组存在校验（与 `getLabels` 的 gidMap 不一致），带孤儿 gid 的会话拖动时永远降级 gap。已加校验
+
+**改动**：
+| 位置 | 改动 |
+|---|---|
+| `enterDragging` | `el.style.top` 从 `rect.top` 改为 `clientY - height/2`（元素中心钉手指下）；删除 `fixedStartTop`/`dragStartY` 记录 |
+| `updateDragging` | `el.style.top = clientY - height/2`；判定 `computeDrop(clientY, ...)`（删除 `getBoundingClientRect` 重取） |
+| `endHold` | 终判 `computeDrop(dragCtx.pointerY, ...)`（删除 rect 重取） |
+| `makeGapDrop` summary 分支 | `isGroupOpen(gid) && !insertBefore` → `isGroupOpen(gid)`（展开组 summary 上/下部统一并入组内首员前） |
+| `computeMerge` | `dragGid` 加孤儿校验（组存在才视为有组） |
+
+**模拟验证**（`chat-lite-debug/drop-sim.js`）：修复前拖到标签1/2/3 全部 pct=0.88→gap（复现现象A）；修复后全部正确 merge。

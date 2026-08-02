@@ -72,7 +72,7 @@ function save() {
   const conv = state.conversations.find(c => c.id === state.currentId);
   if (conv) conv.updatedAt = Date.now();
   // IndexedDB (async, fire-and-forget)
-  // 批次5阶段1（SortableJS 新线）：payload 新增 convGroups（与 conversations 同库存储，数组顺序=视觉顺序）
+  // 批次5阶段1：payload 新增 convGroups（与 conversations 同库存储）
   var payload = { conversations: state.conversations, convGroups: state.convGroups || [], currentId: state.currentId, version: 2 };
   idbPut(STORAGE_KEY, payload).catch(function(e) {
     console.warn('IndexedDB save failed:', e);

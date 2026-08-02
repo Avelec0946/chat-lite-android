@@ -200,7 +200,7 @@ function showConflictDialog(conflicts) {
 }
 
 function renderConvItem(c, inGroup) {
-  // 批次5阶段1（SortableJS 新线）：inGroup=组内成员（缩进样式 + 组内不合并语义）
+  // inGroup: 是否在组内（影响缩进样式）
   return `<div class="conv-item${c.id === state.currentId ? ' active' : ''}${inGroup ? ' in-group' : ''}" data-id="${c.id}">
     <span class="conv-title">${escapeHtml(c.title)}</span>
     <button class="del-btn" data-id="${c.id}" title="删除"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/><line x1="10" y1="11" x2="10" y2="17"/><line x1="14" y1="11" x2="14" y2="17"/></svg></button>
@@ -208,52 +208,49 @@ function renderConvItem(c, inGroup) {
 }
 
 function renderConvGroup(group, members) {
-  // 组块：header（组名/成员数/收折按钮）+ body（组成员，内层 Sortable）
-  const collapsed = !!group.collapsed;
+  const openAttr = group.collapsed ? '' : 'open';
   const items = members.map(c => renderConvItem(c, true)).join('');
-  return `<div class="conv-group${collapsed ? ' collapsed' : ''}" data-group-id="${group.id}">
-    <div class="conv-group-header">
-      <span class="group-name">${escapeHtml(group.name)}</span>
-      <span class="group-count">${members.length}</span>
-      <button class="group-collapse-btn" title="${collapsed ? '展开组' : '收折组'}">${collapsed ? '▸' : '▾'}</button>
-    </div>
-    <div class="conv-group-body"${collapsed ? ' style="display:none"' : ''}>${items}</div>
-  </div>`;
+  return `<details class="conv-group" data-group-id="${group.id}" ${openAttr}>
+    <summary class="conv-group-summary"><span class="group-name">${escapeHtml(group.name)}</span><span class="group-count">${members.length}</span></summary>
+    ${items}
+  </details>`;
 }
 
 function renderSidebar() {
   const query = (document.getElementById('conv-search-input')?.value || '').trim().toLowerCase();
-  const filtered = query 
+  const filtered = query
     ? state.conversations.filter(c => c.title.toLowerCase().includes(query))
     : state.conversations;
-  // 批次5阶段1：构造顶层渲染序列——无组会话独立渲染；有组且首次出现渲染组块（组员连续不变量）
+  // 批次5阶段1：构造顶层渲染序列——无组会话直接渲染，有组且首次出现则渲染 details（含组内所有会话）
   const renderedGroups = new Set();
-  const seen = new Set();
+  const seenConv = new Set();   // 数据容错：同 id 会话只渲染一次（防历史数据重复）
   const html = [];
   for (const c of filtered) {
-    if (seen.has(c.id)) continue;   // 数据容错：同 id 只渲染一次
+    if (seenConv.has(c.id)) continue;   // 同 id 已渲染 → 跳过
     if (!c.groupId) {
-      seen.add(c.id);
+      seenConv.add(c.id);
       html.push(renderConvItem(c));
     } else if (!renderedGroups.has(c.groupId)) {
       const group = state.convGroups.find(g => g.id === c.groupId);
       if (!group) {
-        // 组不存在（数据异常，正常流程不会发生）→ 按独立会话渲染
-        seen.add(c.id);
+        // 组不存在（数据异常），按无组渲染（不标记 renderedGroups，让每个同组会话独立渲染）
+        seenConv.add(c.id);
         html.push(renderConvItem(c));
         continue;
       }
       renderedGroups.add(c.groupId);
       const members = filtered.filter(x => x.groupId === c.groupId);
-      members.forEach(m => seen.add(m.id));
-      html.push(renderConvGroup(group, members));
+      // 数据容错：组内成员去重（同 id 取首个）
+      const seenM = new Set();
+      const uniqMembers = members.filter(m => (seenM.has(m.id) ? false : (seenM.add(m.id), true)));
+      html.push(renderConvGroup(group, uniqMembers));
     }
   }
+  // 诊断日志：渲染会话数 vs 总会话数（排查"会话被吃掉"bug）
+  console.log('[batch5-stage1] renderSidebar:', { filtered: filtered.length, rendered: html.length, totalConvs: state.conversations.length, groups: state.convGroups.length });
   convList.innerHTML = html.join('');
-  bindConvItemEvents();
-  bindConvGroupEvents();
-  // 重建 SortableJS 实例（定义在 app.js；搜索过滤视图下内部自动跳过）
-  if (typeof window.initSortables === 'function') window.initSortables();
+  bindConvItemEvents();      // conv-item 的 click/rename/delete
+  bindConvGroupEvents();     // details toggle + summary 长按菜单
 }
 
 function bindConvItemEvents() {
@@ -307,7 +304,7 @@ function bindConvItemEvents() {
       // 批次5阶段1：删除前记录 groupId，删除后检查自动解散
       const deletedConv = state.conversations.find(c => c.id === id);
       const _gid = deletedConv && deletedConv.groupId;
-      if (state.conversations.length <= 1) { if (_gid) dissolveGroupIfOrphaned(_gid); newChat(); return; }
+      if (state.conversations.length <= 1) { newChat(); return; }
       state.conversations = state.conversations.filter(c => c.id !== id);
       if (_gid) dissolveGroupIfOrphaned(_gid);
       if (state.currentId === id) {
@@ -324,33 +321,40 @@ function bindConvItemEvents() {
 }
 
 function bindConvGroupEvents() {
-  // 收折按钮：切换组收折状态并持久化（拖动/菜单由 SortableJS onChoose 处理）
-  convList.querySelectorAll('.group-collapse-btn').forEach(btn => {
-    btn.addEventListener('click', (e) => {
-      e.stopPropagation();
-      const gid = btn.closest('.conv-group').dataset.groupId;
+  // details toggle 持久化 + summary 长按出菜单
+  convList.querySelectorAll('.conv-group').forEach(details => {
+    details.addEventListener('toggle', () => {
+      const gid = details.dataset.groupId;
       const group = state.convGroups.find(g => g.id === gid);
-      if (!group) return;
-      group.collapsed = !group.collapsed;
-      save();
-      renderSidebar();
+      if (group) {
+        group.collapsed = !details.open;
+        save();
+      }
     });
+    // summary 长按菜单改由 convList touchstart + beginHold(subject='group') 处理
   });
 }
 
-// 长按组块 → 组菜单（重命名/解散/查看画廊预留）
+function showConvGroupMenu(event, groupId) {
+  var x, y;
+  if (event.touches && event.touches.length) { x = event.touches[0].clientX; y = event.touches[0].clientY; }
+  else if (event.changedTouches && event.changedTouches.length) { x = event.changedTouches[0].clientX; y = event.changedTouches[0].clientY; }
+  else { x = event.clientX; y = event.clientY; }
+  return showConvGroupMenuAt(x, y, groupId);
+}
+
 function showConvGroupMenuAt(x, y, groupId) {
-  removeGroupMenu();
-  const group = state.convGroups.find(g => g.id === groupId);
-  if (!group) return;
-  const menu = document.createElement('div');
+  var old = document.getElementById('conv-group-menu');
+  if (old) old.remove();
+  var group = state.convGroups.find(function(g) { return g.id === groupId; });
+  if (!group) return null;
+
+  var menu = document.createElement('div');
   menu.id = 'conv-group-menu';
   menu.className = 'tree-node-menu';
-  menu.style.left = Math.max(8, Math.min(x, window.innerWidth - 170)) + 'px';
-  menu.style.top = Math.max(8, Math.min(y, window.innerHeight - 170)) + 'px';
 
   function addItem(label, onClick, isDanger) {
-    const item = document.createElement('div');
+    var item = document.createElement('div');
     item.className = 'tree-menu-item' + (isDanger ? ' tree-menu-danger' : '');
     item.textContent = label;
     item.addEventListener('click', function(e) {
@@ -361,30 +365,70 @@ function showConvGroupMenuAt(x, y, groupId) {
     menu.appendChild(item);
   }
 
-  addItem('重命名组', async function() {
-    const name = await showGroupNameDialog('重命名组', group.name, group.id);
-    if (name === null) return;
-    group.name = name;
-    save();
-    renderSidebar();
-    showToast('已重命名', 'success');
+  addItem('重命名组', function() {
+    var oldName = group.name;
+    var input = prompt('请输入新组名（唯一）：', oldName);
+    while (input !== null) {
+      input = input.trim();
+      if (!input) { showToast('组名不能为空', 'warn'); input = prompt('请输入新组名（唯一）：', oldName); continue; }
+      if (input === oldName) return;
+      if (state.convGroups.some(function(g) { return g.id !== groupId && g.name === input; })) {
+        showToast('组名"' + input + '"已存在', 'warn');
+        input = prompt('请输入新组名（唯一）：', oldName);
+        continue;
+      }
+      group.name = input;
+      save();
+      renderSidebar();
+      showToast('已重命名', 'success');
+      return;
+    }
   });
 
   addItem('解散组', function() {
-    if (!confirm('解散组「' + group.name + '」？组内会话将变为独立角色。')) return;
-    const gid = group.id;
-    state.convGroups = state.convGroups.filter(g => g.id !== gid);
-    state.conversations.forEach(c => { if (c.groupId === gid) c.groupId = null; });
+    if (!confirm('解散组"' + group.name + '"？组内会话将变为独立角色。')) return;
+    state.conversations.forEach(function(c) { if (c.groupId === groupId) c.groupId = null; });
+    state.convGroups = state.convGroups.filter(function(g) { return g.id !== groupId; });
     save();
     renderSidebar();
     showToast('组已解散', 'success');
-  });
+  }, true);
 
   addItem('查看画廊', function() {
     showToast('画廊功能将在阶段2实现', 'info');
   });
 
+  // 定位
+  menu.style.left = x + 'px';
+  menu.style.top = y + 'px';
   document.body.appendChild(menu);
+
+  requestAnimationFrame(function() {
+    var r = menu.getBoundingClientRect();
+    if (r.right > window.innerWidth - 8) menu.style.left = (window.innerWidth - r.width - 8) + 'px';
+    if (r.bottom > window.innerHeight - 8) menu.style.top = (window.innerHeight - r.height - 8) + 'px';
+  });
+
+  bindAutoDismiss(menu);
+  return menu;
+}
+
+// 菜单自动消失：touchstart/scroll 立即注册，mousedown/click 延迟 400ms 避开 synthetic 事件
+function bindAutoDismiss(menu) {
+  function _dismissMenu(e) {
+    if (menu.contains(e.target)) return;
+    menu.remove();
+    document.removeEventListener('touchstart', _dismissMenu, true);
+    document.removeEventListener('mousedown', _dismissMenu, true);
+    document.removeEventListener('click', _dismissMenu, true);
+    document.removeEventListener('scroll', _dismissMenu, true);
+  }
+  document.addEventListener('touchstart', _dismissMenu, { capture: true, passive: true });
+  document.addEventListener('scroll', _dismissMenu, { capture: true, passive: true });
+  setTimeout(function() {
+    document.addEventListener('mousedown', _dismissMenu, { capture: true });
+    document.addEventListener('click', _dismissMenu, { capture: true });
+  }, 400);
 }
 
 function switchConversation(id) {
