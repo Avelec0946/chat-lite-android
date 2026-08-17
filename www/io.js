@@ -221,7 +221,7 @@ async function importAllData(jsonText, mode) {
   if (mode === 'overwrite') {
     // 覆盖模式：直接替换
     if (data.conversations) state.conversations = data.conversations;
-    if (data.providers) state.providers = data.providers;
+    if (data.providers) { state.providers = data.providers; saveProviders(); }
     if (data.settings) {
       Object.assign(settings, data.settings);
       saveSettings();  // 走 IDB 持久化（不再用 localStorage）
@@ -242,6 +242,7 @@ async function importAllData(jsonText, mode) {
       const importedPIds = new Set(data.providers.map(p => p.id));
       const keptP = (state.providers || []).filter(p => !importedPIds.has(p.id));
       state.providers = keptP.concat(data.providers);
+      saveProviders();
     }
     if (data.settings) {
       Object.assign(settings, data.settings);
@@ -436,7 +437,7 @@ async function importAllDataStreamed(file) {
 
   // 覆盖模式应用（先整体替换，峰值 = 解析缓冲 + 对象数组 ~1x；main 数据源在备份文件中，失败可重导）
   state.conversations = newConvs;
-  if (Array.isArray(tailObj.providers)) state.providers = tailObj.providers;
+  if (Array.isArray(tailObj.providers)) { state.providers = tailObj.providers; saveProviders(); }
   if (tailObj.settings && typeof tailObj.settings === 'object') Object.assign(settings, tailObj.settings);
   if (headObj.convGroups && Array.isArray(headObj.convGroups)) state.convGroups = headObj.convGroups;
   if (tailObj.currentId) state.currentId = tailObj.currentId;
