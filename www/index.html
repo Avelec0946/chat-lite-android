@@ -5,7 +5,7 @@
   <link rel="icon" href="favicon.png" type="image/png">
 <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0">
 <title>chat-lite</title>
-<link rel="stylesheet" href="style.css?v=86">
+<link rel="stylesheet" href="style.css?v=88">
 <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github-dark.min.css">
   <meta name="theme-color" content="#7c3aed">
   <link rel="manifest" href="manifest.json">
@@ -255,14 +255,14 @@
           </label>
           <span class="setting-hint">模型回复末尾自动附加结构化状态信息（&lt;status&gt; 标签）</span>
           <label class="setting-row setting-row-col" id="statusbar-template-row" style="display:none">
-            <span>提示规则（templateRule）</span>
-            <textarea id="statusbar-template-rule" class="setting-textarea" rows="3" placeholder="告诉模型状态栏应输出哪些内容，如：当前地点、当前行动、当前穿搭、内心独白"></textarea>
+            <span>格式约定（templateRule）</span>
+            <textarea id="statusbar-template-rule" class="setting-textarea" rows="3" placeholder="定义状态栏的字段与格式形式，如：好感度(数值)、疲劳值。留空则仅要求输出 &lt;status&gt; 标签，不指定字段"></textarea>
           </label>
           <label class="setting-row setting-row-col" id="statusbar-display-fields-row" style="display:none">
-            <span>展示字段（displayFields，可选）</span>
-            <textarea id="statusbar-display-fields" class="setting-textarea" rows="2" placeholder="UI 上仅展示的字段名，逗号分隔，如：地点, 行动。留空则展示全部"></textarea>
+            <span>规则约定（displayFields，可选）</span>
+            <textarea id="statusbar-display-fields" class="setting-textarea" rows="2" placeholder="字段的特殊规则或约定，如：好感度单位为%、疲劳状态分为高/中/低。可留空"></textarea>
           </label>
-          <span class="setting-hint" id="statusbar-template-hint" style="display:none">提示规则注入系统提示；展示字段用于 UI 过滤（可留空）</span>
+          <span class="setting-hint" id="statusbar-template-hint" style="display:none">格式约定注入指令与示例；规则约定为附加说明，留空则不注入</span>
           <label class="setting-row" id="statusbar-position-row" style="display:none">
             <span>显示位置</span>
             <select id="statusbar-position" class="setting-select">
@@ -527,14 +527,14 @@
 
 <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/marked/12.0.1/marked.min.js"></script>
-<script src="db.js?v=86"></script>
-<script src="haptics.js?v=86"></script>
-<script src="providers.js?v=86"></script>
-<script src="image-gen.js?v=86"></script>
-<script src="conversation.js?v=86"></script>
-<script src="chat.js?v=86"></script>
-<script src="io.js?v=86"></script>
-<script src="gesture-helpers.js?v=86"></script>
-<script src="app.js?v=86"></script>
+<script src="db.js?v=88"></script>
+<script src="haptics.js?v=88"></script>
+<script src="providers.js?v=88"></script>
+<script src="image-gen.js?v=88"></script>
+<script src="conversation.js?v=88"></script>
+<script src="chat.js?v=88"></script>
+<script src="io.js?v=88"></script>
+<script src="gesture-helpers.js?v=88"></script>
+<script src="app.js?v=88"></script>
 </body>
 </html>
