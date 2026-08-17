@@ -987,3 +987,17 @@ image: <reference.png Blob>
 - 格式空+规则空：仅一条 `【状态栏指令】…用 <status>...</status> 标签输出角色当前状态信息，内容请根据上下文合理填写…`
 - 格式"好感度 疲劳值"+规则"好感度单位为%形式…"：指令含字段 + 示例两行（`好感度：xxx / 疲劳值：xxx`）+ `【规则约定】…` 附加段
 
+
+### 28. 导入备份补 saveProviders() 持久化（commit `2bfa52f`，cache-bust v88→v89）
+**背景**：用户实测 maintenance 应用——导入完整备份后接口管理 key 正常，但**重装/重启后 API key 全部消失**。CDP 直读 IndexedDB 定位：`conversations`（81 会话）与 `settings_v2`（含 imageProviders key）都在，唯独 `chatlite_providers` 键不存在。
+**根因**：`io.js` 三个导入路径（overwrite/merge/streamed）把备份 `data.providers` 写入内存 `state.providers` 后，**从未调用 `saveProviders()` 持久化**——conversations 有 `save()`、settings 有 `saveSettings()`，唯独 providers 漏持久化 → 任何重启/重装后 `loadProviders()` 从 IDB 读不到键 → 接口管理清空（导入后当时内存有值，表现正常，重启暴露）。
+**改动**（通用改动，主仓库同步需重打）：
+| 位置 | 改动 |
+|---|---|
+| `io.js` overwrite 模式（原 224 行） | `if (data.providers) { state.providers = data.providers; saveProviders(); }` |
+| `io.js` merge 模式（原 244 行后） | 合并后补 `saveProviders();` |
+| `io.js` streamed 模式（原 439 行） | 赋值后补 `saveProviders();` |
+| `index.html` | cache-bust v88→v89 |
+
+**验证**：node --check 通过；CDP 确认 v89 运行时 `importAllData`/`importAllDataStreamed` 函数体均含 `saveProviders()` 调用。APK 已装机，待用户重新导入备份验证 key 持久化。
+
