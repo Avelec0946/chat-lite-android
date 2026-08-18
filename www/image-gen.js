@@ -1348,16 +1348,10 @@ function initImageView() {
     });
   }
 
-  // 提示词输入：Enter 生成，Shift+Enter 换行
+  // v90: 提示词输入回车仅换行（contenteditable 默认），生成走生成按钮
   var promptInput = document.getElementById('image-prompt-input');
   var sendBtn = document.getElementById('btn-image-send');
   if (promptInput) {
-    promptInput.addEventListener('keydown', function(e) {
-      if (e.key === 'Enter' && !e.shiftKey) {
-        e.preventDefault();
-        generateImage();
-      }
-    });
     promptInput.addEventListener('input', function() {
       var hasText = promptInput.innerText.trim().length > 0;
       if (sendBtn) sendBtn.disabled = !hasText;

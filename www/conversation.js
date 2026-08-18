@@ -410,7 +410,7 @@ function renderMessages() {
       if (textarea) {
         textarea.focus();
         textarea.addEventListener('keydown', (e) => {
-          if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); saveEdit(msg.id, textarea.value); }
+          // v90: 回车仅换行（textarea 默认），保存走保存按钮
           if (e.key === 'Escape') cancelEdit(msg.id);
         });
       }
