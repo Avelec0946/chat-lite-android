@@ -544,12 +544,7 @@ async function init() {
       state.abortController = null;
     }
   });
-  chatInput.addEventListener('keydown', e => {
-    if (e.key === 'Enter' && !e.shiftKey) {
-      e.preventDefault();
-      sendMessage();
-    }
-  });
+  // v90: 回车仅换行（contenteditable 默认行为），发送走独立发送键 btn-send
   btnNew.addEventListener('click', newChat);
   $('conv-search-input').addEventListener('input', renderSidebar);
   $('btn-settings').addEventListener('click', () => toggleSettings(true));
