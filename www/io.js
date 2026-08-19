@@ -898,6 +898,82 @@ function generateCharacterCard(fields, avatarBuffer) {
     reader.readAsArrayBuffer(avatarBuffer);
   });
 }
+// 角色卡字段 → 带标签大文本（完整呈现解析内容，空字段跳过，可编辑后反解析）
+// 定位：角色卡栏目作为 PNG 角色卡内容解析工具——大文本框完整呈现卡内全部内容，用户按需复制
+function formatCardFields(data) {
+  const labelMap = [
+    ['name', '名称'],
+    ['description', '简介'],
+    ['personality', '性格'],
+    ['scenario', '场景'],
+    ['first_mes', '开场白'],
+    ['mes_example', '示例对话'],
+    ['system_prompt', '系统提示词'],
+    ['creator', '作者'],
+    ['character_version', '版本'],
+    ['creator_notes', '备注']
+  ];
+  const lines = [];
+  for (const [key, label] of labelMap) {
+    const v = data[key];
+    if (v === undefined || v === null) continue;
+    const s = String(v).trim();
+    if (!s) continue;
+    lines.push('【' + label + '】' + s);
+  }
+  // 替代开场白（多条）
+  if (Array.isArray(data.alternate_greetings) && data.alternate_greetings.length) {
+    lines.push('【替代开场白】');
+    data.alternate_greetings.forEach(function(g, i) {
+      const gs = String(g || '').trim();
+      if (gs) lines.push((i + 1) + '. ' + gs);
+    });
+  }
+  // 标签
+  if (Array.isArray(data.tags) && data.tags.length) {
+    lines.push('【标签】' + data.tags.join(', '));
+  }
+  // 扩展数据（完整呈现不丢字段）
+  if (data.extensions && typeof data.extensions === 'object' && Object.keys(data.extensions).length) {
+    lines.push('【扩展数据】' + JSON.stringify(data.extensions));
+  }
+  return lines.join('\n');
+}
+
+// 带标签大文本 → 字段对象（导出用；缺字段填空值，容错解析）
+function parseCardText(text) {
+  const labelMap = {
+    '名称': 'name', '简介': 'description', '性格': 'personality', '场景': 'scenario',
+    '开场白': 'first_mes', '示例对话': 'mes_example', '系统提示词': 'system_prompt',
+    '作者': 'creator', '版本': 'character_version', '备注': 'creator_notes'
+  };
+  const fields = { name:'', description:'', personality:'', scenario:'', first_mes:'', mes_example:'', system_prompt:'', creator:'', creator_notes:'', character_version:'1.0' };
+  const lines = String(text || '').split('\n');
+  let current = null;
+  for (const line of lines) {
+    const m = line.match(/^【(.+?)】(.*)$/);
+    if (m && labelMap[m[1]]) {
+      current = labelMap[m[1]];
+      fields[current] = m[2].trim();
+      continue;
+    }
+    if (m && (m[1] === '标签' || m[1] === '扩展数据')) { current = null; continue; }
+    if (m && m[1] === '替代开场白') { current = 'alternate_greetings'; continue; }
+    if (current === 'alternate_greetings') {
+      const nm = line.match(/^\d+\.\s*(.*)$/);
+      if (nm) {
+        if (!Array.isArray(fields.alternate_greetings)) fields.alternate_greetings = [];
+        fields.alternate_greetings.push(nm[1].trim());
+      }
+      continue;
+    }
+    if (current && current !== 'alternate_greetings') {
+      fields[current] = fields[current] ? fields[current] + '\n' + line : line;
+    }
+  }
+  return fields;
+}
+
 function buildCardPrompt(fields) {
   const parts = [];
   if (fields.name) parts.push(fields.name);

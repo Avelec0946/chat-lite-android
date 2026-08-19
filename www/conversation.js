@@ -13,7 +13,7 @@
 //   会话模型：migrateV1toV2, newConversation, getMsg, getActiveChain, getLastActiveMsg,
 //             computeBranchWords, getBranchPath, getBranchPathFromMap, restoreConversationState
 //   会话渲染：renderSidebar, switchConversation, renderBreadcrumb, renderMessages,
-//             updateCardPreview, showConflictDialog
+//             showConflictDialog
 //   交互：addLongPress, showBubbleContextMenu
 //   分支树：renderTreeSVG, escapeSvg, svgNodeClick, svgNodeMenu, applyBranchZoom,
 //           applyBranchCenter, showTreeNodeMenu, closeTreeNodeMenu, bindTreeNodeLongPress
@@ -133,21 +133,6 @@ function restoreConversationState() {
     state.currentId = conv.id;
     save();
   }
-}
-
-function updateCardPreview() {
-  var f = {
-    name: document.getElementById('card-name').value,
-    description: document.getElementById('card-desc').value,
-    personality: document.getElementById('card-personality').value,
-    scenario: document.getElementById('card-scenario').value,
-    first_mes: document.getElementById('card-firstmes').value,
-    mes_example: document.getElementById('card-example').value,
-    system_prompt: document.getElementById('card-sysprompt').value
-  };
-  var p = buildCardPrompt(f);
-  document.getElementById('card-preview').textContent = p || '(预览系统提示词)';
-  return p;
 }
 
 function showConflictDialog(conflicts) {

@@ -8,7 +8,7 @@
 //       ICON / uid / $ / messagesEl / currentConv / isCapacitor / CapStreamHttp / CapFilesystem /
 //       getProvider / normalizeProvider / buildUpstreamPayload / modelToUpstreamId /
 //       getActiveChain / getLastActiveMsg / getMsg / getBranchPath / renderMessages /
-//       renderBreadcrumb / updateCardPreview / addLongPress / escapeSvg / renderTreeSVG /
+//       renderBreadcrumb / addLongPress / escapeSvg / renderTreeSVG /
 //       parseImageActualSize / parseJsonField / showToast
 // 加载顺序：在 conversation.js 之后、gesture-helpers.js 之前加载
 //

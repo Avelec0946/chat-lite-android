@@ -816,7 +816,7 @@ function currentConv() {
 }
 
 
-  // Character card: import PNG
+  // Character card: import PNG → 大文本框完整呈现解析内容（角色卡栏目定位为解析工具，不自动填入提示词）
   $('btn-import-card').addEventListener('click', () => { document.getElementById('card-import-file').click(); });
   document.getElementById('card-import-file').addEventListener('change', async (e) => {
     const file = e.target.files[0];
@@ -826,57 +826,25 @@ function currentConv() {
       const card = parseCharacterCard(buf);
       if (!card) { alert('未找到角色卡数据'); return; }
       const data = card.data || card;
+      const text = formatCardFields(data);
+      if (!text) { alert('角色卡解析成功但内容为空'); return; }
       document.getElementById('card-editor').style.display = 'block';
-      document.getElementById('card-name').value = data.name || '';
-      document.getElementById('card-desc').value = data.description || '';
-      document.getElementById('card-personality').value = data.personality || '';
-      document.getElementById('card-scenario').value = data.scenario || '';
-      var fmes = (data.first_mes || '');
-      // Strip HTML-like content tags
-      fmes = fmes.replace(/<content>/gi, '').replace(/<\/content>/gi, '');
-      fmes = fmes.replace(/<StatusBlock>[\s\S]*?<\/StatusBlock>/gi, '');
-      fmes = fmes.replace(/<status>[\s\S]*?<\/status>/gi, '');
-      document.getElementById('card-firstmes').value = fmes.trim();
-      document.getElementById('card-example').value = data.mes_example || '';
-      document.getElementById('card-sysprompt').value = data.system_prompt || '';
-      updateCardPreview();
-      // Auto-fill system prompt
-      var prompt = buildCardPrompt({
-        name: document.getElementById('card-name').value,
-        description: document.getElementById('card-desc').value,
-        personality: document.getElementById('card-personality').value,
-        scenario: document.getElementById('card-scenario').value,
-        first_mes: document.getElementById('card-firstmes').value,
-        mes_example: document.getElementById('card-example').value,
-        system_prompt: document.getElementById('card-sysprompt').value
-      });
-      document.getElementById('system-prompt').value = prompt;
+      document.getElementById('card-content').value = text;
     } catch(err) { alert('导入失败: ' + err.message); }
     e.target.value = '';
   });
 
+  // 快捷填入：暂不自动填入提示词，仅展开编辑器并提示手动复制
   $('btn-card-fill').addEventListener('click', () => {
     document.getElementById('card-editor').style.display = 'block';
-    const p = updateCardPreview();
-    document.getElementById('system-prompt').value = p;
+    showToast('角色卡内容已在上方文本框完整呈现，请按需复制到系统提示词', 'info');
   });
 
   $('btn-export-card').addEventListener('click', async () => {
     const avatarFile = document.getElementById('card-avatar').files[0];
     if (!avatarFile) { alert('请先选择头像 PNG 文件'); return; }
     try {
-      const fields = {
-        name: document.getElementById('card-name').value,
-        description: document.getElementById('card-desc').value,
-        personality: document.getElementById('card-personality').value,
-        scenario: document.getElementById('card-scenario').value,
-        first_mes: document.getElementById('card-firstmes').value,
-        mes_example: document.getElementById('card-example').value,
-        system_prompt: document.getElementById('card-sysprompt').value,
-        creator: '',
-        creator_notes: '',
-        character_version: '1.0'
-      };
+      const fields = parseCardText(document.getElementById('card-content').value);
       const blob = await generateCharacterCard(fields, avatarFile);
       const url = URL.createObjectURL(blob);
       const a = document.createElement('a');
@@ -893,10 +861,6 @@ function currentConv() {
       document.getElementById('card-avatar-preview').src = URL.createObjectURL(file);
       document.getElementById('card-avatar-preview').style.display = 'block';
     }
-  });
-
-  ['card-name','card-desc','card-personality','card-scenario','card-firstmes','card-example','card-sysprompt'].forEach(function(id) {
-    document.getElementById(id).addEventListener('input', updateCardPreview);
   });
 
 
