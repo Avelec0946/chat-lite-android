@@ -21,9 +21,9 @@
 //
 // 保留在 app.js：
 //   state.providers = []  // 初始化在 app.js 中保留（与 state 全局对象绑定）
-//   生图相关：IMAGE_PROVIDER_TEMPLATES / getImageProviderTemplate / normalizeImageProvider /
-//            getImageProvider / getCurrentImageProvider / saveImageProviders / renderImageProviderList
-//            （留给 0.5.4 image-gen.js 拆分）
+//   生图相关：IMAGE_FORMATS 格式注册表 / IMAGE_PROVIDER_PRESETS 提供方预设 / migrateImageTemplate /
+//            normalizeImageProvider / getImageProvider / getCurrentImageProvider / saveImageProviders / renderImageProviderList
+//            （已迁移至 image-gen.js，v95 起格式与预设解耦）
 //   compressImageForUpload（视觉上传，与 provider 无关）
 
 function parseJsonField(str, fallback) {

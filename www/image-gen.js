@@ -10,9 +10,9 @@
 // 加载顺序：在 db.js + haptics.js + providers.js 之后、gesture-helpers.js 之前加载
 //
 // 迁移清单：
-//   常量：IMAGE_PROVIDER_TEMPLATES, _IMAGE_SIZE_MAP, _GPT_IMAGE_SIZE_MAP,
+//   常量：IMAGE_FORMATS（格式注册表）, IMAGE_PROVIDER_PRESETS（提供方预设）, _IMAGE_SIZE_MAP, _GPT_IMAGE_SIZE_MAP,
 //         IMAGE_STORE_DIR, _previewGestureDestroy
-//   函数：getImageProviderTemplate, normalizeImageProvider, getImageProvider,
+//   函数：getImageFormat, migrateImageTemplate, normalizeImageProvider, getImageProvider,
 //         getCurrentImageProvider, saveImageProviders,
 //         renderImageProviderList, openImageProviderEditor, closeImageProviderEditor,
 //         saveImageProviderFromEditor, deleteImageProvider, renderImageProviderSelect,
@@ -29,87 +29,179 @@
 //   compressImage / applyBackgroundImage / setBackgroundImage / removeBackgroundImage（会话背景图）
 //   parseCharacterCard / generateCharacterCard（角色卡 PNG 导入/导出）
 
-// ===== F1: 生图 Provider 模板（独立于聊天 PROVIDER_TEMPLATES）=====
-const IMAGE_PROVIDER_TEMPLATES = {
-  // Google Nano Banana / Gemini Image（gemini-2.5-flash-image / gemini-3-pro-image-preview）— generateContent 格式
-  nano_banana: {
-    endpointPath: '/v1beta/models/{model}:generateContent',
-    authType: 'api-key',           // 默认 x-goog-api-key（中转平台可在 provider 配置改回 Bearer）
-    authHeader: 'x-goog-api-key',
-    authPrefix: '',
-    requestFormat: 'gemini_image', // contents[].parts[].text + generationConfig.imageConfig
-    responseFormat: 'gemini',      // candidates[0].content.parts[].inlineData.data
-    features: { supportsReferenceImage: true, supportsNegativePrompt: false, supportsCustomSize: false, supportsBatch: false, maxBatch: 1, supportsResolution: true, supportsAspectRatio: true }
-  },
-  // OpenAI 新一代 GPT Image 模型（gpt-image-2 / gpt-image-1.5 / gpt-image-1）— flat 格式 + quality/output_format
-  // 文生图走 /v1/images/generations；图生图走 /v1/images/edits（multipart/form-data）
-  gpt_image: {
+// ===== F1: 生图格式注册表（独立于聊天 PROVIDER_TEMPLATES）=====
+// v95 重构（2026-08-21）：模板→格式注册表 + 提供方预设，声明与消费解耦
+// 格式族覆盖 2026-08 主流格局：
+//   flat          OpenAI 标准（DALL-E / xAI Grok Imagine / 智谱 CogView / 豆包 Seedream / 硅基流动 / 各中转）
+//   gpt_image     OpenAI GPT Image（gpt-image-2/1.5/1）
+//   gemini_image  Google Gemini generateContent（gemini-3-pro-image-preview / gemini-2.5-flash-image）
+//   wanxiang      通义万相 nested（DashScope multimodal-generation，wan2.6-t2i / wan2.6-image / wan2.7-image）
+const IMAGE_FORMATS = {
+  flat: {
+    label: 'OpenAI 标准（flat JSON）',
     endpointPath: '/v1/images/generations',
-    editsPath: '/v1/images/edits',     // 图生图专用端点
-    authType: 'bearer',
-    authHeader: 'Authorization',
-    authPrefix: 'Bearer ',
-    requestFormat: 'gpt_image',    // flat 格式 + quality/output_format/moderation 参数
-    responseFormat: 'b64_only',    // gpt-image 系列只返回 b64_json（无 url）
-    features: { supportsReferenceImage: true, supportsNegativePrompt: false, supportsCustomSize: true, supportsBatch: false, maxBatch: 1, supportsQuality: true, supportsResolution: true, supportsAspectRatio: true }
-  },
-  // OpenAI DALL-E 兼容格式（kkaiapi 等三方平台，支持图生图/负面提示词/批量）
-  openai_compat: {
-    endpointPath: '/v1/images/generations',
-    authType: 'bearer',
-    authHeader: 'Authorization',
-    authPrefix: 'Bearer ',
-    requestFormat: 'nested',       // 'nested' = input.messages[].content[].text; 'flat' = prompt
-    responseFormat: 'url_or_b64',  // data[0].url 或 data[0].b64_json
-    features: { supportsReferenceImage: true, supportsNegativePrompt: true, supportsCustomSize: true, supportsBatch: true, maxBatch: 4, supportsResolution: true, supportsAspectRatio: true }
-  },
-  // 标准 OpenAI DALL-E 格式（无图生图/无负面提示词，单张生成）
-  openai_standard: {
-    endpointPath: '/v1/images/generations',
+    editsPath: '/v1/images/edits',   // xAI / 部分兼容方支持图生图
     authType: 'bearer',
     authHeader: 'Authorization',
     authPrefix: 'Bearer ',
     requestFormat: 'flat',
     responseFormat: 'url_or_b64',
-    features: { supportsReferenceImage: false, supportsNegativePrompt: false, supportsCustomSize: true, supportsBatch: true, maxBatch: 1, supportsResolution: true, supportsAspectRatio: true }
+    features: { supportsReferenceImage: true, supportsNegativePrompt: false, supportsCustomSize: true, supportsBatch: true, maxBatch: 4, supportsResolution: true, supportsAspectRatio: true },
+    // 请求体：{model, prompt, n, size}；带参考图时走 edits 端点（multipart，由 buildImageRequestPayload 转 FormData）
+    buildBody: function(provider, ctx) {
+      var body = { model: ctx.model, prompt: ctx.prompt, n: ctx.n, size: ctx.sizeConfig.size || '1024x1024' };
+      if (ctx.refDataUrls.length > 0) {
+        body._useEdits = true;
+        body._refDataUrls = ctx.refDataUrls;
+        body.n = 1;  // edits 端点通常仅单张
+      }
+      return body;
+    },
+    parseResponse: function(data) { return (data && data.data) || []; }
   },
-  custom: {
+  gpt_image: {
+    label: 'GPT Image（gpt-image-2/1.5/1）',
     endpointPath: '/v1/images/generations',
+    editsPath: '/v1/images/edits',
     authType: 'bearer',
     authHeader: 'Authorization',
     authPrefix: 'Bearer ',
-    requestFormat: 'nested',
+    requestFormat: 'gpt_image',
+    responseFormat: 'b64_only',
+    features: { supportsReferenceImage: true, supportsNegativePrompt: false, supportsCustomSize: true, supportsBatch: false, maxBatch: 1, supportsQuality: true, supportsResolution: true, supportsAspectRatio: true },
+    // 文生图 flat + quality/output_format/moderation；图生图走 edits 端点（multipart）
+    buildBody: function(provider, ctx) {
+      var body = { model: ctx.model, prompt: ctx.prompt, n: ctx.n, size: ctx.sizeConfig.size || 'auto', quality: ctx.quality || 'auto', output_format: 'png', moderation: 'auto' };
+      if (ctx.refDataUrls.length > 0) {
+        body._useEdits = true;
+        body._refDataUrls = ctx.refDataUrls;
+        body.n = 1;  // edits 端点只支持 n=1
+      }
+      return body;
+    },
+    parseResponse: function(data) { return (data && data.data) || []; }
+  },
+  gemini_image: {
+    label: 'Gemini 原生（generateContent）',
+    endpointPath: '/v1beta/models/{model}:generateContent',
+    authType: 'bearer',           // 官方 AI Studio key 用 Bearer；需 x-goog-api-key 时在鉴权下拉切换
+    authHeader: 'Authorization',
+    authPrefix: 'Bearer ',
+    requestFormat: 'gemini_image',
+    responseFormat: 'gemini',
+    features: { supportsReferenceImage: true, supportsNegativePrompt: false, supportsCustomSize: false, supportsBatch: false, maxBatch: 1, supportsResolution: true, supportsAspectRatio: true },
+    // contents[].parts[].text + generationConfig.imageConfig{aspectRatio, imageSize}；参考图作为 inline_data parts
+    buildBody: function(provider, ctx) {
+      var parts = [{ text: ctx.prompt }];
+      for (var i = 0; i < ctx.refDataUrls.length; i++) {
+        var refP = ctx.refDataUrls[i].split(',');
+        var mime = (refP[0].match(/data:(.*?);base64/) || [])[1] || 'image/png';
+        parts.push({ inline_data: { mime_type: mime, data: refP[1] || '' } });
+      }
+      var genConfig = { responseModalities: ['IMAGE'] };
+      if (ctx.sizeConfig.imageConfig) genConfig.imageConfig = ctx.sizeConfig.imageConfig;
+      return { contents: [{ parts: parts }], generationConfig: genConfig };
+    },
+    // candidates[0].content.parts[].inlineData.data
+    parseResponse: function(data) {
+      var results = [];
+      var candidates = (data && data.candidates) || [];
+      for (var ci = 0; ci < candidates.length; ci++) {
+        var parts = (candidates[ci].content || {}).parts || [];
+        for (var pi = 0; pi < parts.length; pi++) {
+          var inlineData = parts[pi].inlineData || parts[pi].inline_data;
+          if (inlineData && inlineData.data) {
+            var mime = inlineData.mimeType || inlineData.mime_type || 'image/png';
+            results.push({ b64_json: inlineData.data, mime: mime });
+          }
+        }
+      }
+      return results;
+    }
+  },
+  wanxiang: {
+    label: '通义万相（nested）',
+    endpointPath: '/api/v1/services/aigc/multimodal-generation/generation',
+    authType: 'bearer',
+    authHeader: 'Authorization',
+    authPrefix: 'Bearer ',
+    requestFormat: 'wanxiang',
     responseFormat: 'url_or_b64',
-    features: { supportsReferenceImage: true, supportsNegativePrompt: true, supportsCustomSize: true, supportsBatch: true, maxBatch: 4, supportsResolution: true, supportsAspectRatio: true }
+    features: { supportsReferenceImage: true, supportsNegativePrompt: true, supportsCustomSize: true, supportsBatch: true, maxBatch: 4, supportsResolution: true, supportsAspectRatio: true },
+    // input.messages[].content[].text/image + parameters{prompt_extend, watermark, n, negative_prompt, size}
+    buildBody: function(provider, ctx) {
+      var contentParts = [{ type: 'text', text: ctx.prompt }];
+      for (var i = 0; i < ctx.refDataUrls.length; i++) {
+        contentParts.push({ type: 'image', image: ctx.refDataUrls[i].split(',')[1] });
+      }
+      var params = {
+        prompt_extend: ctx.promptExtend,
+        watermark: ctx.watermark,
+        n: ctx.n,
+        size: ctx.sizeConfig.size || '1024x1024'
+      };
+      if (ctx.negativePrompt) params.negative_prompt = ctx.negativePrompt;
+      return { input: { messages: [{ role: 'user', content: contentParts }] }, parameters: params };
+    },
+    parseResponse: function(data) { return (data && data.data) || []; }
   }
 };
 
-function getImageProviderTemplate(template) {
-  return IMAGE_PROVIDER_TEMPLATES[template] || IMAGE_PROVIDER_TEMPLATES.openai_compat;
+// 提供方预设：选预设自动填充地址/端点/格式/默认模型，保存后仍是独立记录可改
+const IMAGE_PROVIDER_PRESETS = {
+  openai_gpt_image: { label: 'OpenAI GPT Image', format: 'gpt_image', baseUrl: 'https://api.openai.com', defaultModel: 'gpt-image-2' },
+  xai_grok: { label: 'xAI Grok Imagine', format: 'flat', baseUrl: 'https://api.x.ai', defaultModel: 'grok-imagine-image-2.0' },
+  gemini: { label: 'Google Gemini', format: 'gemini_image', baseUrl: 'https://generativelanguage.googleapis.com', defaultModel: 'gemini-3-pro-image-preview' },
+  wanxiang: { label: '阿里通义万相', format: 'wanxiang', baseUrl: 'https://dashscope.aliyuncs.com', defaultModel: 'wan2.6-t2i' },
+  zhipu_cogview: { label: '智谱 CogView', format: 'flat', baseUrl: 'https://open.bigmodel.cn', defaultModel: 'cogview-4' },
+  doubao_seedream: { label: '豆包 Seedream', format: 'flat', baseUrl: 'https://ark.cn-beijing.volces.com', defaultModel: 'doubao-seedream-3-0-t2i-250415' },
+  siliconflow: { label: '硅基流动', format: 'flat', baseUrl: 'https://api.siliconflow.cn', defaultModel: 'black-forest-labs/FLUX.1-schnell' },
+  custom: { label: '自定义', format: null, baseUrl: '', defaultModel: '' }
+};
+
+// 旧模板名 → 格式名迁移（v95，老用户已保存的 provider 无感升级）
+var _IMAGE_TEMPLATE_MIGRATE = {
+  'gpt_image': 'gpt_image',
+  'nano_banana': 'gemini_image',
+  'openai_compat': 'wanxiang',
+  'openai_standard': 'flat',
+  'custom': 'flat'
+};
+
+function migrateImageTemplate(tpl) {
+  if (IMAGE_FORMATS[tpl]) return tpl;            // 已是格式名
+  return _IMAGE_TEMPLATE_MIGRATE[tpl] || 'flat'; // 旧模板名迁移，未知回退 flat
+}
+
+function getImageFormat(name) {
+  return IMAGE_FORMATS[name] || IMAGE_FORMATS.flat;
 }
 
 function normalizeImageProvider(p) {
   if (!p || typeof p !== 'object') p = {};
-  var template = getImageProviderTemplate(p.template);
+  var formatName = migrateImageTemplate(p.template);
+  var format = getImageFormat(formatName);
   var baseUrl = normalizeBaseUrl(p.baseUrl);
-  var endpointPath = p.endpointPath || template.endpointPath;
+  var endpointPath = p.endpointPath || format.endpointPath;
   var result = {
     id: p.id || uid(),
     name: p.name || '未命名生图接口',
-    template: p.template || 'openai_compat',
+    template: formatName,          // 统一存格式名
     baseUrl: baseUrl,
     endpointPath: endpointPath,
     apiKey: p.apiKey || '',
-    authType: p.authType || template.authType,
-    authHeader: p.authHeader || template.authHeader,
-    authPrefix: p.authPrefix !== undefined ? p.authPrefix : template.authPrefix,
-    defaultModel: p.defaultModel || 'dall-e-3',
-    features: Object.assign({}, template.features, p.features || {}),
+    authType: p.authType || format.authType,
+    authHeader: p.authHeader || format.authHeader,
+    authPrefix: p.authPrefix !== undefined ? p.authPrefix : format.authPrefix,
+    defaultModel: p.defaultModel || 'gpt-image-2',
+    requestFormat: format.requestFormat,
+    responseFormat: format.responseFormat,
+    features: Object.assign({}, format.features, p.features || {}),
     createdAt: p.createdAt || Date.now()
   };
-  // 保留 editsPath（gpt_image 图生图专用端点）
-  if (p.editsPath || template.editsPath) {
-    result.editsPath = p.editsPath || template.editsPath;
+  // 保留 editsPath（图生图专用端点）
+  if (p.editsPath || format.editsPath) {
+    result.editsPath = p.editsPath || format.editsPath;
   }
   return result;
 }
@@ -142,7 +234,9 @@ function renderImageProviderList() {
     return;
   }
   container.innerHTML = list.map(function(p, i) {
-    var templateLabel = p.template ? '[' + p.template.toUpperCase() + '] ' : '';
+    var fmtName = migrateImageTemplate(p.template);
+    var fmt = getImageFormat(fmtName);
+    var templateLabel = fmt ? '[' + fmt.label + '] ' : '';
     return '<details class="provider-group" data-idx="' + i + '">' +
       '<summary class="provider-summary">' +
         '<span class="provider-name">' + escapeHtml(templateLabel + p.name) + '</span>' +
@@ -172,19 +266,33 @@ function openImageProviderEditor(idx) {
   var p = (idx !== undefined && idx >= 0) ? normalizeImageProvider((settings.imageProviders || [])[idx]) : null;
   editor.style.display = 'block';
   editor.dataset.editIdx = idx !== undefined ? idx : '';
-  document.getElementById('img-provider-template-select').value = p ? p.template : 'openai_compat';
+  var fmtName = p ? (p.requestFormat || p.template) : 'flat';
+  // 提供方预设回填：按格式名+地址匹配预设，未匹配则自定义
+  var presetSel = document.getElementById('img-provider-preset-select');
+  if (presetSel) {
+    var presetId = 'custom';
+    if (p) {
+      for (var pk in IMAGE_PROVIDER_PRESETS) {
+        var pre = IMAGE_PROVIDER_PRESETS[pk];
+        if (pre.format === fmtName && (!pre.baseUrl || pre.baseUrl === p.baseUrl)) { presetId = pk; break; }
+      }
+    }
+    presetSel.value = presetId;
+  }
+  var formatSel = document.getElementById('img-provider-format-select');
+  if (formatSel) formatSel.value = fmtName;
   document.getElementById('img-provider-name-input').value = p ? p.name : '';
   document.getElementById('img-provider-url-input').value = p ? p.baseUrl : '';
   document.getElementById('img-provider-endpoint-input').value = p ? (p.endpointPath || '') : '';
   document.getElementById('img-provider-key-input').value = p ? p.apiKey : '';
   document.getElementById('img-provider-default-model-input').value = p ? (p.defaultModel || '') : '';
-  // 鉴权方式回填：与模板默认一致或未设则「跟随模板」
+  // 鉴权方式回填：与格式默认一致或未设则「跟随格式」
   var authSel = document.getElementById('img-provider-auth-select');
   if (authSel) {
     var authVal = '';
     if (p && p.authType) {
-      var tmpl = getImageProviderTemplate(p.template);
-      if (p.authType !== tmpl.authType || (p.authHeader && p.authHeader !== tmpl.authHeader)) {
+      var fmt = getImageFormat(fmtName);
+      if (p.authType !== fmt.authType || (p.authHeader && p.authHeader !== fmt.authHeader)) {
         authVal = p.authType;
       }
     }
@@ -216,7 +324,8 @@ function closeImageProviderEditor() {
 function saveImageProviderFromEditor() {
   var editor = document.getElementById('image-provider-editor');
   if (!editor) return;
-  var template = document.getElementById('img-provider-template-select').value;
+  var format = document.getElementById('img-provider-format-select');
+  var template = format ? format.value : 'flat';
   var name = document.getElementById('img-provider-name-input').value.trim();
   var baseUrl = normalizeBaseUrl(document.getElementById('img-provider-url-input').value);
   var endpointPath = document.getElementById('img-provider-endpoint-input').value.trim();
@@ -236,7 +345,7 @@ function saveImageProviderFromEditor() {
     baseUrl: baseUrl,
     endpointPath: endpointPath,
     apiKey: apiKey,
-    defaultModel: defaultModel || 'dall-e-3'
+    defaultModel: defaultModel || 'gpt-image-2'
   };
   if (authOverride === 'bearer') {
     providerData.authType = 'bearer';
@@ -248,9 +357,15 @@ function saveImageProviderFromEditor() {
     providerData.authPrefix = '';
   } else if (authOverride === 'header') {
     providerData.authType = 'header';
-    // authHeader/authPrefix 跟随模板
+    // authHeader/authPrefix 跟随格式
+  } else if (authOverride === 'query') {
+    providerData.authType = 'query';
+    providerData.authHeader = 'api_key';
+    providerData.authPrefix = '';
+  } else if (authOverride === 'none') {
+    providerData.authType = 'none';
   }
-  // authOverride === '' 时不设 authType，normalizeImageProvider 用模板默认
+  // authOverride === '' 时不设 authType，normalizeImageProvider 用格式默认
   var editIdx = editor.dataset.editIdx;
   if (editIdx !== '' && editIdx !== undefined && parseInt(editIdx) >= 0) {
     providerData.id = settings.imageProviders[parseInt(editIdx)].id;
@@ -280,6 +395,24 @@ function deleteImageProvider(idx) {
   renderImageProviderList();
   renderImageProviderSelect();
   closeImageProviderEditor();
+}
+
+// F1: 提供方预设联动填充（选预设→自动填格式/地址/端点占位/默认模型；仅空值填充，不覆盖已有）
+function onImageProviderPresetChange() {
+  var presetSel = document.getElementById('img-provider-preset-select');
+  var preset = IMAGE_PROVIDER_PRESETS[presetSel ? presetSel.value : 'custom'];
+  if (!preset) return;
+  if (preset.format) {
+    var fmt = getImageFormat(preset.format);
+    var formatSel = document.getElementById('img-provider-format-select');
+    if (formatSel) formatSel.value = preset.format;
+    var urlInput = document.getElementById('img-provider-url-input');
+    if (urlInput && !urlInput.value && preset.baseUrl) urlInput.value = preset.baseUrl;
+    var modelInput = document.getElementById('img-provider-default-model-input');
+    if (modelInput && !modelInput.value && preset.defaultModel) modelInput.value = preset.defaultModel;
+    var endpointInput = document.getElementById('img-provider-endpoint-input');
+    if (endpointInput && fmt.endpointPath) endpointInput.placeholder = fmt.endpointPath;
+  }
 }
 
 // F1: 生图界面顶部接口选择下拉框
@@ -326,32 +459,32 @@ function toggleImageView(open) {
   }
 }
 
-// F1: 根据当前生图接口模板，显示/隐藏高级参数中的 quality / 负面提示词 / 参考图等字段
+// F1: 根据当前生图接口格式与能力，显示/隐藏高级参数中的 quality / 负面提示词 / 参考图等字段
 function updateImageAdvancedVisibility() {
   var provider = getCurrentImageProvider();
-  var template = provider ? provider.template : 'openai_compat';
+  var fmt = provider ? (provider.requestFormat || provider.template) : 'flat';
   var features = provider ? provider.features : null;
-  // quality 行：仅 gpt_image 模板显示
+  // quality 行：仅 gpt_image 格式显示
   var qualityRow = document.getElementById('image-quality-row');
-  if (qualityRow) qualityRow.style.display = (template === 'gpt_image') ? '' : 'none';
-  // 分辨率选择：gpt_image 模板隐藏（gpt-image-2 只支持 1024 基础，分辨率无意义）
+  if (qualityRow) qualityRow.style.display = (fmt === 'gpt_image') ? '' : 'none';
+  // 分辨率选择：gpt_image 格式隐藏（gpt-image-2 只支持 1024 基础，分辨率无意义）
   var resSelect = document.getElementById('image-resolution-select');
-  if (resSelect) resSelect.style.display = (template === 'gpt_image') ? 'none' : '';
-  // 负面提示词：模板不支持时隐藏
+  if (resSelect) resSelect.style.display = (fmt === 'gpt_image') ? 'none' : '';
+  // 负面提示词：格式不支持时隐藏
   var negRow = document.getElementById('image-negative-prompt-row');
   if (negRow) negRow.style.display = (features && features.supportsNegativePrompt) ? '' : 'none';
-  // 提示词扩展/水印：仅 openai_compat/custom 显示
+  // 提示词扩展/水印：仅通义万相（nested）显示
   var promptExtendLabel = document.getElementById('image-prompt-extend-label');
-  if (promptExtendLabel) promptExtendLabel.style.display = (template === 'openai_compat' || template === 'custom') ? '' : 'none';
+  if (promptExtendLabel) promptExtendLabel.style.display = (fmt === 'wanxiang') ? '' : 'none';
   var watermarkLabel = document.getElementById('image-watermark-label');
-  if (watermarkLabel) watermarkLabel.style.display = (template === 'openai_compat' || template === 'custom') ? '' : 'none';
-  // 参考图按钮：始终显示，模板不支持时点击会提示（不再隐藏，避免用户找不到入口）
+  if (watermarkLabel) watermarkLabel.style.display = (fmt === 'wanxiang') ? '' : 'none';
+  // 参考图按钮：始终显示，格式不支持时点击会提示（不再隐藏，避免用户找不到入口）
   var btnRef = document.getElementById('btn-image-ref');
   if (btnRef) btnRef.style.display = '';
-  // gpt_image 模板：动态改「自由」option 文本提示用户（gpt-image-2 的 auto 默认返回 1:1，不读提示词宽高）
+  // gpt_image 格式：动态改「自由」option 文本提示用户（gpt-image-2 的 auto 默认返回 1:1，不读提示词宽高）
   var aspectSel = document.getElementById('image-aspect-select');
   if (aspectSel && aspectSel.options[0]) {
-    aspectSel.options[0].text = (template === 'gpt_image') ? '自由（默认1:1）' : '自由';
+    aspectSel.options[0].text = (fmt === 'gpt_image') ? '自由（默认1:1）' : '自由';
   }
 }
 
@@ -827,11 +960,11 @@ var _GPT_IMAGE_SIZE_MAP = {
   '9:16': '1024x1536'
 };
 function buildImageSizeConfig(provider, resolution, aspect, customSize) {
-  var template = provider ? provider.template : 'gpt_image';
+  var fmt = provider ? (provider.requestFormat || provider.template) : 'gpt_image';
   var result = { size: 'auto', imageConfig: null };
   // 自定义：直接用用户输入（支持 WxH 或 W:H）
   if (aspect === 'custom' && customSize) {
-    if (template === 'nano_banana') {
+    if (fmt === 'gemini_image') {
       // Gemini 接受 aspectRatio "W:H"，也接受 size "WxH"（lumenfall 兼容层）
       if (/^\d+:\d+$/.test(customSize)) {
         result.imageConfig = { aspectRatio: customSize };
@@ -843,9 +976,9 @@ function buildImageSizeConfig(provider, resolution, aspect, customSize) {
     }
     return result;
   }
-  // gpt_image 模板：只用 gpt-image-2 支持的 3 个固定 size + auto
+  // gpt_image 格式：只用 gpt-image-2 支持的 3 个固定 size + auto
   // 重要：gpt-image-2 的 size='auto' 是「模型默认比例」（通常 1:1），不会读提示词里的宽高描述
-  if (template === 'gpt_image') {
+  if (fmt === 'gpt_image') {
     if (aspect === 'auto') {
       result.size = 'auto';  // 模型默认（不读提示词宽高）
     } else {
@@ -857,7 +990,7 @@ function buildImageSizeConfig(provider, resolution, aspect, customSize) {
   if (resolution === 'auto' && aspect === 'auto') {
     return result;  // size='auto', imageConfig=null
   }
-  if (template === 'nano_banana') {
+  if (fmt === 'gemini_image') {
     // Gemini：imageConfig = {aspectRatio, imageSize}
     var cfg = {};
     if (resolution !== 'auto') cfg.imageSize = resolution;  // "1K"/"2K"/"4K"
@@ -865,7 +998,7 @@ function buildImageSizeConfig(provider, resolution, aspect, customSize) {
     result.imageConfig = Object.keys(cfg).length > 0 ? cfg : null;
     return result;
   }
-  // OpenAI 系（dall-e 等）：size = "WxH" 或 "auto"
+  // OpenAI 系（dall-e/gpt-image/xAI 等）：size = "WxH" 或 "auto"
   if (resolution === 'auto' || aspect === 'auto') {
     // 一边 auto 一边具体：交给模型决定，返回 auto
     return result;
@@ -962,6 +1095,7 @@ async function generateImage() {
   var batchNEl = document.getElementById('image-batch-n');
   var promptExtendEl = document.getElementById('image-prompt-extend');
   var watermarkEl = document.getElementById('image-watermark');
+  var qualitySel = document.getElementById('image-quality-select');
   var negativePrompt = negPromptEl ? negPromptEl.value.trim() : '';
   var n = Math.max(1, Math.min(4, parseInt(batchNEl ? batchNEl.value : '1') || 1));
   if (provider.features && provider.features.maxBatch) {
@@ -969,6 +1103,7 @@ async function generateImage() {
   }
   var promptExtend = promptExtendEl ? promptExtendEl.checked : true;
   var watermark = watermarkEl ? watermarkEl.checked : false;
+  var quality = qualitySel ? qualitySel.value : 'auto';
 
   // 参考图（图生图）：多张数组，兼容旧字段 _imageRefDataUrl
   var refDataUrls = [];
@@ -978,76 +1113,23 @@ async function generateImage() {
     refDataUrls = [state._imageRefDataUrl];  // 兼容旧字段
   }
   if (refDataUrls.length > 0 && provider.features && !provider.features.supportsReferenceImage) {
-    showToast('当前接口模板不支持参考图，已忽略', 'warn');
+    showToast('当前接口格式不支持参考图，已忽略', 'warn');
     refDataUrls = [];
   }
 
-  // 构建请求体
-  var reqBody = { model: model };
-  if (provider.template === 'nano_banana') {
-    // Nano Banana / Gemini Image：generateContent 格式（Gemini 支持多图 parts）
-    var parts = [{ text: prompt }];
-    if (refDataUrls.length > 0) {
-      // 多张参考图作为 inline_data（Gemini 原生支持多图 parts）
-      for (var ri = 0; ri < refDataUrls.length; ri++) {
-        var refParts = refDataUrls[ri].split(',');
-        var refMime = (refParts[0].match(/data:(.*?);base64/) || [])[1] || 'image/png';
-        parts.push({ inline_data: { mime_type: refMime, data: refParts[1] || '' } });
-      }
-    }
-    reqBody.contents = [{ parts: parts }];
-    var genConfig = { responseModalities: ['IMAGE'] };
-    if (sizeConfig.imageConfig) genConfig.imageConfig = sizeConfig.imageConfig;
-    reqBody.generationConfig = genConfig;
-  } else if (provider.template === 'openai_compat' || provider.template === 'custom') {
-    // nested 格式：input.messages[].content[].text/image
-    var contentParts = [{ type: 'text', text: prompt }];
-    if (refDataUrls.length > 0) {
-      // 多张参考图作为 base64（去掉 data URL 前缀），通义万相 nested 支持多 image
-      for (var ri2 = 0; ri2 < refDataUrls.length; ri2++) {
-        var base64 = refDataUrls[ri2].split(',')[1];
-        contentParts.push({ type: 'image', image: base64 });
-      }
-    }
-    reqBody.input = { messages: [{ role: 'user', content: contentParts }] };
-    reqBody.parameters = {
-      prompt_extend: promptExtend,
-      watermark: watermark,
-      n: n,
-      size: sizeConfig.size || '1024x1024'
-    };
-    if (negativePrompt && provider.features && provider.features.supportsNegativePrompt) {
-      reqBody.parameters.negative_prompt = negativePrompt;
-    }
-  } else if (provider.template === 'gpt_image') {
-    if (refDataUrls.length > 0) {
-      // GPT Image 图生图：走 /v1/images/edits 端点，multipart/form-data，支持多图
-      reqBody._useEdits = true;
-      reqBody.prompt = prompt;
-      reqBody.size = sizeConfig.size || 'auto';
-      var qualitySel2 = document.getElementById('image-quality-select');
-      reqBody.quality = qualitySel2 ? qualitySel2.value : 'auto';
-      reqBody.output_format = 'png';
-      reqBody.n = 1;  // edits 端点只支持 n=1
-      // 多张参考图通过 FormData 重复 append image 字段传入（在主调用逻辑中处理）
-      reqBody._refDataUrls = refDataUrls;
-    } else {
-      // GPT Image 文生图：走 /v1/images/generations 端点，flat JSON
-      reqBody.prompt = prompt;
-      reqBody.n = n;
-      reqBody.size = sizeConfig.size || 'auto';
-      var qualitySel = document.getElementById('image-quality-select');
-      var quality = qualitySel ? qualitySel.value : 'auto';
-      reqBody.quality = quality;
-      reqBody.output_format = 'png';
-      reqBody.moderation = 'auto';
-    }
-  } else {
-    // openai_standard：flat 格式
-    reqBody.prompt = prompt;
-    reqBody.n = n;
-    reqBody.size = sizeConfig.size || '1024x1024';
-  }
+  // 构建请求体：按格式注册表分发（requestFormat → buildBody），主流程无模板名硬编码
+  var fmt = getImageFormat(provider.requestFormat || provider.template);
+  var reqBody = fmt.buildBody(provider, {
+    model: model,
+    prompt: prompt,
+    refDataUrls: refDataUrls,
+    sizeConfig: sizeConfig,
+    n: n,
+    negativePrompt: negativePrompt,
+    promptExtend: promptExtend,
+    watermark: watermark,
+    quality: quality
+  });
 
   var req = buildImageRequestPayload(provider, reqBody);
 
@@ -1088,7 +1170,7 @@ async function generateImage() {
   // 调用 API（gpt_image 图生图/nano_banana 生图较慢，超时 600s；其他 120s）
   // 注：app 切后台时 Android WebView 会暂停 JS，fetch 挂起但不会报错，切回前台后继续等待
   var timeoutMs = settings.nativeTimeoutMs || 120000;
-  if ((provider.template === 'nano_banana' || reqBody._useEdits) && timeoutMs < 600000) timeoutMs = 600000;
+  if (((provider.requestFormat || provider.template) === 'gemini_image' || reqBody._useEdits) && timeoutMs < 600000) timeoutMs = 600000;
   state._imageGenerating = true;  // 标记请求进行中，供 appStateChange 监听用
   try {
     var controller = new AbortController();
@@ -1114,25 +1196,9 @@ async function generateImage() {
     // 移除加载占位
     var loadingEl = document.getElementById('image-loading-msg');
     if (loadingEl) loadingEl.remove();
-    // 解析响应：统一归一化为 results = [{b64_json|url|revised_prompt}]
-    var results = [];
-    if (provider.template === 'nano_banana') {
-      // Gemini 格式：candidates[0].content.parts[].inlineData.data
-      var candidates = data.candidates || [];
-      for (var ci = 0; ci < candidates.length; ci++) {
-        var parts = (candidates[ci].content || {}).parts || [];
-        for (var pi = 0; pi < parts.length; pi++) {
-          var inlineData = parts[pi].inlineData || parts[pi].inline_data;
-          if (inlineData && inlineData.data) {
-            var mime = inlineData.mimeType || inlineData.mime_type || 'image/png';
-            results.push({ b64_json: inlineData.data, mime: mime });
-          }
-        }
-      }
-    } else {
-      // OpenAI 格式：data[].b64_json 或 data[].url
-      results = (data.data || []) || [];
-    }
+    // 解析响应：按格式注册表分发（responseFormat → parseResponse），统一归一化为 results = [{b64_json|url|revised_prompt}]
+    var fmtResp = getImageFormat(provider.requestFormat || provider.template);
+    var results = fmtResp.parseResponse(data) || [];
     if (results.length === 0) throw new Error('响应中无图片数据');
     for (var i = 0; i < results.length; i++) {
       var item = results[i];
@@ -1380,23 +1446,9 @@ function initImageView() {
   // 设置面板 - 生图 API 分组按钮
   var btnAddImgProv = document.getElementById('btn-add-image-provider');
   if (btnAddImgProv) btnAddImgProv.addEventListener('click', function() { openImageProviderEditor(-1); });
-  // 模板切换：自动填充推荐默认模型（仅新建时，编辑已有时不覆盖）
-  var imgProvTmplSel = document.getElementById('img-provider-template-select');
-  if (imgProvTmplSel) {
-    imgProvTmplSel.addEventListener('change', function() {
-      var editor = document.getElementById('image-provider-editor');
-      var isnew = !editor || editor.dataset.editIdx === '';
-      if (!isnew) return;  // 编辑已有时不覆盖
-      var tmpl = imgProvTmplSel.value;
-      var recommendedModel = '';
-      if (tmpl === 'gpt_image') recommendedModel = 'gpt-image-2';
-      else if (tmpl === 'nano_banana') recommendedModel = 'gemini-2.5-flash-image';
-      else if (tmpl === 'openai_compat') recommendedModel = 'wanx2.1-t2i-turbo';
-      else if (tmpl === 'openai_standard') recommendedModel = 'dall-e-3';
-      var modelInput = document.getElementById('img-provider-default-model-input');
-      if (modelInput && recommendedModel) modelInput.value = recommendedModel;
-    });
-  }
+  // 提供方预设切换：自动填充格式/地址/默认模型（仅空值填充，编辑已有时不覆盖）
+  var imgProvPresetSel = document.getElementById('img-provider-preset-select');
+  if (imgProvPresetSel) imgProvPresetSel.addEventListener('change', onImageProviderPresetChange);
   var btnSaveImgProv = document.getElementById('btn-save-image-provider');
   if (btnSaveImgProv) btnSaveImgProv.addEventListener('click', saveImageProviderFromEditor);
   var btnCloseImgProv = document.getElementById('btn-close-image-provider-editor');
