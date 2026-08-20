@@ -182,7 +182,20 @@ function normalizeImageProvider(p) {
   var formatName = migrateImageTemplate(p.template);
   var format = getImageFormat(formatName);
   var baseUrl = normalizeBaseUrl(p.baseUrl);
-  var endpointPath = p.endpointPath || format.endpointPath;
+  var endpointPath = p.endpointPath;
+  if (!endpointPath) {
+    // v96: baseUrl 已带版本路径时（如 OpenRouter 的 /api/v1、硅基流动的 /v1、火山方舟的 /api/v3），
+    // 剥离版本段到 baseUrl，并把格式默认 endpoint 的 /vN 前缀替换为实际版本段，避免 new URL 的
+    // root-relative 语义丢掉 /api 段（openrouter.ai/api/v1 + /v1/... 会错拼成 openrouter.ai/v1/...）
+    var verMatch = baseUrl.match(/^(.*?)(\/api\/v\d+|\/v\d+)$/i);
+    if (verMatch) {
+      baseUrl = verMatch[1];
+      var verPrefix = verMatch[2];  // 如 /api/v1 或 /v1
+      endpointPath = verPrefix + format.endpointPath.replace(/^\/v\d+/, '');
+    } else {
+      endpointPath = format.endpointPath;
+    }
+  }
   var result = {
     id: p.id || uid(),
     name: p.name || '未命名生图接口',
@@ -199,9 +212,9 @@ function normalizeImageProvider(p) {
     features: Object.assign({}, format.features, p.features || {}),
     createdAt: p.createdAt || Date.now()
   };
-  // 保留 editsPath（图生图专用端点）
+  // 保留 editsPath（图生图专用端点）；baseUrl 剥离版本段时同步替换 /vN 前缀
   if (p.editsPath || format.editsPath) {
-    result.editsPath = p.editsPath || format.editsPath;
+    result.editsPath = p.editsPath || (verMatch ? verPrefix + format.editsPath.replace(/^\/v\d+/, '') : format.editsPath);
   }
   return result;
 }
@@ -1191,6 +1204,16 @@ async function generateImage() {
       var errText = '';
       try { errText = await resp.text(); } catch(e) {}
       throw new Error('HTTP ' + resp.status + (errText ? ': ' + errText.slice(0, 200) : ''));
+    }
+    // v96: 解析前先验证 Content-Type——接口返回 HTML（404 页/网关拦截页）时给可读报错，
+    // 而非 JSON 解析的 "Unexpected token '<'"。常见根因：baseUrl 带版本路径（如 /api/v1）导致 URL 拼错
+    var ct = (resp.headers.get('content-type') || '').toLowerCase();
+    if (ct.indexOf('application/json') === -1 && ct.indexOf('text/json') === -1 && ct.indexOf('+json') === -1) {
+      var htmlHint = '';
+      try { htmlHint = (await resp.text()).slice(0, 120); } catch(e) {}
+      throw new Error('接口返回了非 JSON 内容（' + (ct.split(';')[0] || '未知') + '）——通常是地址/端点拼错或服务拦截页。' +
+        '检查 baseUrl 是否带版本路径（如 https://xxx/api/v1 应整体填入 API 地址栏，无需再手动拼 /v1）。' +
+        (htmlHint ? '响应开头：' + htmlHint.replace(/\s+/g, ' ').slice(0, 100) : ''));
     }
     var data = await resp.json();
     // 移除加载占位
