@@ -1028,6 +1028,27 @@ function explainExtensions(ext) {
     lines.push('● 正则替换规则（' + regexes.length + ' 条）：');
     regexes.forEach(function(r) { lines.push('  - ' + explainRegexScript(r)); });
   }
+  // 未识别扩展字段：简单值（人话字符串/数字/布尔）直接展示，机器数据仅提示数量
+  const knownKeys = ['talkativeness', 'fav', 'world', 'depth_prompt', 'tavern_helper', 'regex_scripts'];
+  const unknownSimple = [];
+  const unknownComplex = [];
+  for (const k of Object.keys(ext)) {
+    if (knownKeys.indexOf(k) >= 0) continue;
+    const v = ext[k];
+    if (v === undefined || v === null) continue;
+    if (typeof v === 'number' || typeof v === 'boolean') {
+      unknownSimple.push(k + '：' + String(v));
+    } else if (typeof v === 'string') {
+      const s = String(v).trim();
+      const looksMachine = /[<>{}\[\]\\/]/.test(s) || /\b(function|const|let|import|export|script|html|json|prompt)\b/i.test(s);
+      if (s && s.length <= 80 && !looksMachine && s.indexOf('\n') < 0) unknownSimple.push(k + '：' + s);
+      else unknownComplex.push(k);
+    } else {
+      unknownComplex.push(k);
+    }
+  }
+  if (unknownSimple.length) lines.push('● 其他扩展字段：' + unknownSimple.join('；') + '。');
+  if (unknownComplex.length) lines.push('● 另有未识别扩展字段 ' + unknownComplex.length + ' 个（' + unknownComplex.join('、') + '），机器数据已省略。');
   return lines.join('\n');
 }
 
@@ -1075,13 +1096,31 @@ function formatCardFields(data) {
       lines.push('【扩展数据】' + JSON.stringify(data.extensions));
     }
   }
-  // 世界书（lorebook，自然语言设定）
+  // 世界书（lorebook，自然语言设定 + 触发规则元信息）
   if (data.character_book && Array.isArray(data.character_book.entries) && data.character_book.entries.length) {
-    lines.push('【世界书（知识库）】');
+    const cb = data.character_book;
+    const headerParts = [];
+    if (cb.name && String(cb.name).trim()) headerParts.push('「' + String(cb.name).trim() + '」');
+    if (cb.description && String(cb.description).trim()) headerParts.push(String(cb.description).trim());
+    let head = '【世界书（知识库）】' + (headerParts.length ? ' ' + headerParts.join(' ') : '');
+    const cfg = [];
+    if (cb.scan_depth !== undefined && cb.scan_depth !== null) cfg.push('扫描深度 ' + cb.scan_depth + ' 层');
+    if (cb.token_budget !== undefined && cb.token_budget !== null) cfg.push('令牌预算 ' + cb.token_budget);
+    if (cb.recursive_scanning !== undefined && cb.recursive_scanning !== null) cfg.push('递归扫描 ' + (cb.recursive_scanning ? '开' : '关'));
+    if (cfg.length) head += '（' + cfg.join('；') + '）';
+    lines.push(head);
     data.character_book.entries.forEach(function(e, i) {
       const title = (e.comment || '').trim() || (Array.isArray(e.keys) && e.keys.length ? e.keys.join('、') : ('条目 ' + (i + 1)));
+      let item = (i + 1) + '. 「' + title + '」';
+      const meta = [];
+      if (Array.isArray(e.keys) && e.keys.length) meta.push('关键词：' + e.keys.join('、'));
+      if (Array.isArray(e.secondary_keys) && e.secondary_keys.length) meta.push('副关键词：' + e.secondary_keys.join('、'));
+      if (e.enabled === false) meta.push('停用');
+      if (e.position === 'before_char') meta.push('注入角色前');
+      else if (e.position === 'after_char') meta.push('注入角色后');
+      if (meta.length) item += '【' + meta.join('；') + '】';
+      lines.push(item);
       const content = String(e.content || '').trim();
-      lines.push((i + 1) + '. 「' + title + '」');
       if (content) lines.push(content);
     });
   }
