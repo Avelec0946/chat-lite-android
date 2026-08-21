@@ -5,7 +5,7 @@
   <link rel="icon" href="favicon.png" type="image/png">
 <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0">
 <title>chat-lite</title>
-<link rel="stylesheet" href="style.css?v=101">
+<link rel="stylesheet" href="style.css?v=102">
 <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github-dark.min.css">
   <meta name="theme-color" content="#7c3aed">
   <link rel="manifest" href="manifest.json">
@@ -472,10 +472,12 @@
             </label>
             <label class="card-field"><span>格式族（高级）</span>
               <select id="img-provider-format-select" class="card-input" title="自定义时手动选择请求/响应格式；选预设自动匹配">
-                <option value="flat">OpenAI 标准（flat JSON，DALL-E/xAI/智谱/豆包/硅基流动/中转）</option>
+                <option value="flat">OpenAI 标准（flat JSON，DALL-E/xAI/豆包/硅基流动/中转）</option>
                 <option value="gpt_image">GPT Image（gpt-image-2/1.5/1）</option>
                 <option value="gemini_image">Gemini 原生（generateContent）</option>
                 <option value="wanxiang">通义万相（nested，DashScope）</option>
+                <option value="openrouter_image">OpenRouter 新版（input_references）</option>
+                <option value="zhipu">智谱 CogView（paas v4）</option>
               </select>
             </label>
             <label class="card-field"><span>接口名称</span><input id="img-provider-name-input" class="card-input" placeholder="如：我的生图接口"></label>
@@ -542,14 +544,14 @@
 
 <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/marked/12.0.1/marked.min.js"></script>
-<script src="db.js?v=101"></script>
-<script src="haptics.js?v=101"></script>
-<script src="providers.js?v=101"></script>
-<script src="image-gen.js?v=101"></script>
-<script src="conversation.js?v=101"></script>
-<script src="chat.js?v=101"></script>
-<script src="io.js?v=101"></script>
-<script src="gesture-helpers.js?v=101"></script>
-<script src="app.js?v=101"></script>
+<script src="db.js?v=102"></script>
+<script src="haptics.js?v=102"></script>
+<script src="providers.js?v=102"></script>
+<script src="image-gen.js?v=102"></script>
+<script src="conversation.js?v=102"></script>
+<script src="chat.js?v=102"></script>
+<script src="io.js?v=102"></script>
+<script src="gesture-helpers.js?v=102"></script>
+<script src="app.js?v=102"></script>
 </body>
 </html>

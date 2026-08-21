@@ -1,6 +1,6 @@
 ﻿// ===== image-gen.js : 生图功能模块（v2.0 拆分）=====
 // 模块名：image-gen.js
-// 版本：v101（cache-bust，2026-08-22：生图体验优化——prompt 前缀体系（全局前缀/负面前缀/消息模板 {prompt}）+ 模型特定适配（dall-e-2/3、gpt-image 提示词截断与尺寸上限）+ 模型下拉建议 datalist；思路取经 SillyTavern stable-diffusion 扩展，代码自行实现（MIT 不受 AGPL 污染））
+// 版本：v102（cache-bust，2026-08-22：新增 zhipu 格式族——智谱 CogView paas v4 官方端点 /api/paas/v4/images/generations（原 flat 走 /v1 致 405 实锤修复），请求体不含 n、size 枚举/自定义、quality 条件传，响应 url 临时链接 30 天下载转存）
 // 迁移日期：2026-07-26
 // 来源：从 app.js 拆分
 // 职责：生图接口管理、生图界面、图库、图片预览、图片存储、核心生图、完成通知
@@ -167,6 +167,26 @@ const IMAGE_FORMATS = {
       return body;
     },
     parseResponse: function(data) { return (data && data.data) || []; }
+  },
+  // v102: 智谱 CogView（paas v4 官方端点）——OpenAI 兼容但端点是 /api/paas/v4 而非 /v1，
+  // 且请求体不含 n（智谱不支持）、size 支持枚举/自定义（512-2048 被 16 整除，最大 2^21 像素）、
+  // quality 仅 cogview-4-250304 支持；响应 data[].url 临时链接 30 天（chat-lite 会下载转存）
+  zhipu: {
+    label: '智谱 CogView（paas v4）',
+    endpointPath: '/api/paas/v4/images/generations',
+    authType: 'bearer',
+    authHeader: 'Authorization',
+    authPrefix: 'Bearer ',
+    requestFormat: 'zhipu',
+    responseFormat: 'url_or_b64',
+    features: { supportsReferenceImage: false, supportsNegativePrompt: false, supportsCustomSize: true, supportsBatch: false, maxBatch: 1, supportsResolution: false, supportsAspectRatio: false, supportsQuality: true },
+    buildBody: function(provider, ctx) {
+      var body = { model: ctx.model, prompt: ctx.prompt };
+      if (ctx.sizeConfig.size && ctx.sizeConfig.size !== 'auto') body.size = ctx.sizeConfig.size;
+      if (ctx.quality && ctx.quality !== 'auto') body.quality = ctx.quality;
+      return body;
+    },
+    parseResponse: function(data) { return (data && data.data) || []; }
   }
 };
 
@@ -176,7 +196,7 @@ const IMAGE_PROVIDER_PRESETS = {
   xai_grok: { label: 'xAI Grok Imagine', format: 'flat', baseUrl: 'https://api.x.ai', defaultModel: 'grok-imagine-image-2.0' },
   gemini: { label: 'Google Gemini', format: 'gemini_image', baseUrl: 'https://generativelanguage.googleapis.com', defaultModel: 'gemini-3-pro-image-preview' },
   wanxiang: { label: '阿里通义万相', format: 'wanxiang', baseUrl: 'https://dashscope.aliyuncs.com', defaultModel: 'wan2.6-t2i' },
-  zhipu_cogview: { label: '智谱 CogView', format: 'flat', baseUrl: 'https://open.bigmodel.cn', defaultModel: 'cogview-4' },
+  zhipu_cogview: { label: '智谱 CogView', format: 'zhipu', baseUrl: 'https://open.bigmodel.cn', defaultModel: 'cogview-4' },  // v102: 修正官方端点 /api/paas/v4（原 flat /v1 导致 405）
   openrouter: { label: 'OpenRouter 新版图片 API', format: 'openrouter_image', baseUrl: 'https://openrouter.ai', defaultModel: 'openai/gpt-image-2' },  // v100: 对齐官方 /api/v1/images + input_references（参考图走 JSON 不走 edits）
   doubao_seedream: { label: '豆包 Seedream', format: 'flat', baseUrl: 'https://ark.cn-beijing.volces.com', defaultModel: 'doubao-seedream-3-0-t2i-250415' },
   siliconflow: { label: '硅基流动', format: 'flat', baseUrl: 'https://api.siliconflow.cn', defaultModel: 'black-forest-labs/FLUX.1-schnell' },
