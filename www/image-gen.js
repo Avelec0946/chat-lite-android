@@ -1,6 +1,6 @@
 ﻿// ===== image-gen.js : 生图功能模块（v2.0 拆分）=====
 // 模块名：image-gen.js
-// 版本：v99（cache-bust，2026-08-21 连接可信度加固：错误分类/自动重试/限流感知/超时拆分/测试连接/进度反馈/熔断）
+// 版本：v100（cache-bust，2026-08-21：URL 版本段剥离重写修复 OpenRouter 丢 /api 段 + 新增 openrouter_image 格式族（input_references 参考图，官方验证流程）+ 重试总时长预算 15min 防无限循环 + 参考图 JPEG 压缩）
 // 迁移日期：2026-07-26
 // 来源：从 app.js 拆分
 // 职责：生图接口管理、生图界面、图库、图片预览、图片存储、核心生图、完成通知
@@ -144,6 +144,29 @@ const IMAGE_FORMATS = {
       return { input: { messages: [{ role: 'user', content: contentParts }] }, parameters: params };
     },
     parseResponse: function(data) { return (data && data.data) || []; }
+  },
+  // v100: OpenRouter 新版图片 API（官方验证流程，非手搓）——
+  // POST /api/v1/images，参考图走 JSON input_references 而非 multipart edits
+  //（绕开中转站薄弱的 multipart edits；一个端点同时管文生图+图生图）
+  openrouter_image: {
+    label: 'OpenRouter 新版（input_references）',
+    endpointPath: '/api/v1/images',
+    authType: 'bearer',
+    authHeader: 'Authorization',
+    authPrefix: 'Bearer ',
+    requestFormat: 'openrouter_image',
+    responseFormat: 'url_or_b64',
+    features: { supportsReferenceImage: true, supportsNegativePrompt: false, supportsCustomSize: false, supportsBatch: false, maxBatch: 1, supportsResolution: false, supportsAspectRatio: false },
+    buildBody: function(provider, ctx) {
+      var body = { model: ctx.model, prompt: ctx.prompt, n: 1 };
+      if (ctx.refDataUrls && ctx.refDataUrls.length > 0) {
+        body.input_references = ctx.refDataUrls.map(function(d) {
+          return { type: 'image_url', image_url: { url: d } };
+        });
+      }
+      return body;
+    },
+    parseResponse: function(data) { return (data && data.data) || []; }
   }
 };
 
@@ -154,6 +177,7 @@ const IMAGE_PROVIDER_PRESETS = {
   gemini: { label: 'Google Gemini', format: 'gemini_image', baseUrl: 'https://generativelanguage.googleapis.com', defaultModel: 'gemini-3-pro-image-preview' },
   wanxiang: { label: '阿里通义万相', format: 'wanxiang', baseUrl: 'https://dashscope.aliyuncs.com', defaultModel: 'wan2.6-t2i' },
   zhipu_cogview: { label: '智谱 CogView', format: 'flat', baseUrl: 'https://open.bigmodel.cn', defaultModel: 'cogview-4' },
+  openrouter: { label: 'OpenRouter 新版图片 API', format: 'openrouter_image', baseUrl: 'https://openrouter.ai', defaultModel: 'openai/gpt-image-2' },  // v100: 对齐官方 /api/v1/images + input_references（参考图走 JSON 不走 edits）
   doubao_seedream: { label: '豆包 Seedream', format: 'flat', baseUrl: 'https://ark.cn-beijing.volces.com', defaultModel: 'doubao-seedream-3-0-t2i-250415' },
   siliconflow: { label: '硅基流动', format: 'flat', baseUrl: 'https://api.siliconflow.cn', defaultModel: 'black-forest-labs/FLUX.1-schnell' },
   custom: { label: '自定义', format: null, baseUrl: '', defaultModel: '' }
@@ -183,19 +207,20 @@ function normalizeImageProvider(p) {
   var format = getImageFormat(formatName);
   var baseUrl = normalizeBaseUrl(p.baseUrl);
   var endpointPath = p.endpointPath;
-  if (!endpointPath) {
-    // v96: baseUrl 已带版本路径时（如 OpenRouter 的 /api/v1、硅基流动的 /v1、火山方舟的 /api/v3），
-    // 剥离版本段到 baseUrl，并把格式默认 endpoint 的 /vN 前缀替换为实际版本段，避免 new URL 的
-    // root-relative 语义丢掉 /api 段（openrouter.ai/api/v1 + /v1/... 会错拼成 openrouter.ai/v1/...）
-    var verMatch = baseUrl.match(/^(.*?)(\/api\/v\d+|\/v\d+)$/i);
-    if (verMatch) {
-      baseUrl = verMatch[1];
-      var verPrefix = verMatch[2];  // 如 /api/v1 或 /v1
-      endpointPath = verPrefix + format.endpointPath.replace(/^\/v\d+/, '');
-    } else {
-      endpointPath = format.endpointPath;
-    }
+  // v100: 版本段剥离重写——baseUrl 以 /api、/api/vN、/vN 结尾都剥离（v96 正则漏 /api 结尾），
+  // 且显式 endpointPath 也参与（v96 只处理默认端点，OpenRouter 显式 endpointPath 丢 /api 段的漏网实锤）
+  var verMatch = baseUrl.match(/^(.*?)(\/api(\/v\d+)?|\/v\d+)$/i);
+  var verPrefix = verMatch ? verMatch[2] : null;
+  if (verMatch) baseUrl = verMatch[1];
+  var path = endpointPath || format.endpointPath;
+  if (verPrefix && path.indexOf('://') < 0 && path.indexOf(verPrefix) !== 0) {
+    // 区分「纯 API 前缀（/api，OpenRouter 型）」与「版本段（/vN 或 /api/vN，硅基/火山型）」：
+    // 纯前缀 → endpointPath 的 /vN 版本段保留；版本段 → endpointPath 的默认 /vN 剥掉（防重复）
+    var baseIsPureApi = verPrefix === '/api';
+    var stripped = baseIsPureApi ? path : path.replace(/^\/v\d+\//, '');
+    path = verPrefix + (stripped.indexOf('/') === 0 ? stripped : '/' + stripped);
   }
+  endpointPath = path;
   var result = {
     id: p.id || uid(),
     name: p.name || '未命名生图接口',
@@ -212,9 +237,15 @@ function normalizeImageProvider(p) {
     features: Object.assign({}, format.features, p.features || {}),
     createdAt: p.createdAt || Date.now()
   };
-  // 保留 editsPath（图生图专用端点）；baseUrl 剥离版本段时同步替换 /vN 前缀
-  if (p.editsPath || format.editsPath) {
-    result.editsPath = p.editsPath || (verMatch ? verPrefix + format.editsPath.replace(/^\/v\d+/, '') : format.editsPath);
+  // 保留 editsPath（图生图专用端点）；带版本前缀时同步修正
+  var baseEdits = p.editsPath || format.editsPath;
+  if (baseEdits) {
+    if (verPrefix && baseEdits.indexOf('://') < 0 && baseEdits.indexOf(verPrefix) !== 0) {
+      var baseIsPureApiE = verPrefix === '/api';
+      var strippedE = baseIsPureApiE ? baseEdits : baseEdits.replace(/^\/v\d+\//, '');
+      baseEdits = verPrefix + (strippedE.indexOf('/') === 0 ? strippedE : '/' + strippedE);
+    }
+    result.editsPath = baseEdits;
   }
   return result;
 }
@@ -825,8 +856,8 @@ function compressImageForGeneration(file) {
         canvas.width = w;
         canvas.height = h;
         canvas.getContext('2d').drawImage(img, 0, 0, w, h);
-        // 返回 data URL（base64），生图 API 通常接受 data URL 或纯 base64
-        resolve(canvas.toDataURL('image/png', 0.85));
+        // v100: 改 JPEG 输出——PNG 对照片体积大 3-5 倍，JPEG 上传更稳（透明通道在参考图场景无意义）
+        resolve(canvas.toDataURL('image/jpeg', 0.85));
       };
       img.onerror = function() { reject(new Error('图片加载失败')); };
       img.src = e.target.result;
@@ -1196,6 +1227,7 @@ async function generateImage() {
       headers: req.headers,
       payload: req.payload,
       timeoutMs: timeoutMs,
+      maxTotalMs: 900000,  // v100: 总时长预算 15 分钟（含重试），防慢接口无限循环
       signal: controller.signal,
       onRetry: function(info) {
         state._imageProgress.phase = 'retry';
@@ -1420,6 +1452,9 @@ function fetchWithImageRetry(opts) {
   var maxTotalWaitMs = 60000;
   var totalWaitMs = 0;
   var lastErr = null;
+  // v100: 总时长预算（整个生成流程含重试；默认 15 分钟，超过强制停止防无限重试循环）
+  var maxTotalMs = opts.maxTotalMs || 900000;
+  var startTime = Date.now();
 
   async function attemptOnce(attempt) {
     var timeoutFired = false;
@@ -1486,6 +1521,13 @@ function fetchWithImageRetry(opts) {
 
   async function run() {
     for (var attempt = 0; attempt <= maxRetries; attempt++) {
+      // v100: 总时长预算——整个生成流程（含所有重试与请求耗时）超过预算即强制停止，
+      // 修复「慢接口连接中断 → 重试 → 新请求重新计时」导致的无限循环（kkaiapi 图生图 20 分钟无果实锤）
+      if (Date.now() - startTime > maxTotalMs) {
+        var be = new Error('生成总耗时超过预算（' + Math.round(maxTotalMs / 60000) + ' 分钟）');
+        be.imageError = { type: 'timeout', retryable: false, hint: '生成总耗时超过预算（' + Math.round(maxTotalMs / 60000) + ' 分钟）——服务端响应过慢或接口不稳定，请检查接口或稍后重试', status: null, attempts: attempt + 1 };
+        throw be;
+      }
       try {
         return await attemptOnce(attempt);
       } catch(e) {
@@ -1495,6 +1537,12 @@ function fetchWithImageRetry(opts) {
         if (!cls.retryable || attempt >= maxRetries) throw e;
         var waitMs = cls.retryAfterMs || (Math.min(2000 * Math.pow(2, attempt), 10000) + Math.floor(Math.random() * 500));
         if (totalWaitMs + waitMs > maxTotalWaitMs) throw e;
+        // v100: 剩余预算不足时不再等待（提前截停，避免重试等待拉长总耗时）
+        if (waitMs > (maxTotalMs - (Date.now() - startTime))) {
+          var be2 = new Error('生成总耗时超过预算（' + Math.round(maxTotalMs / 60000) + ' 分钟）');
+          be2.imageError = { type: 'timeout', retryable: false, hint: '生成总耗时超过预算（' + Math.round(maxTotalMs / 60000) + ' 分钟）——服务端响应过慢或接口不稳定，请检查接口或稍后重试', status: null, attempts: attempt + 1 };
+          throw be2;
+        }
         totalWaitMs += waitMs;
         if (onRetry) onRetry({ type: cls.type, attempt: attempt + 1, max: maxRetries, waitMs: waitMs, status: cls.status });
         await sleepWithAbort(waitMs, signal);
