@@ -97,9 +97,8 @@ const data = {
 // 分块流式导出（APK 专用，根治大备份 OOM）：
 // 头部一次 writeFile，conversations 逐批 appendFile（每 30 条 或累计 200KB 刷盘一次），尾部一次 appendFile。
 // 峰值内存 = 单批字符串 + 进度计数，与数据总量无关。
-// v97: directory 参数化——手动导出走 CACHE（配合分享）；自动备份走 DATA（持久目录，系统清理不动）
-async function exportAllDataStreamed(fileName, exportSettings, directory) {
-  const DIR = directory || 'CACHE';
+async function exportAllDataStreamed(fileName, exportSettings) {
+  const DIR = 'CACHE';
   const convs = state.conversations || [];
   const total = convs.length;
   const head = '{"version":1,"exportedAt":"' + new Date().toISOString() + '","convGroups":' +
@@ -137,41 +136,6 @@ async function exportAllDataStreamed(fileName, exportSettings, directory) {
     ',"settings":' + JSON.stringify(exportSettings) +
     ',"currentId":' + JSON.stringify(state.currentId) + '}';
   await CapFilesystem.appendFile({ path: fileName, data: tail, directory: DIR, encoding: 'utf8' });
-}
-
-// v97: 每日自动备份（APK 专用）——启动时距上次备份超 24h 则自动导出一份全量备份到 Filesystem DATA 目录
-// 动机：2026-08-21 实测 WebView 更新/损坏导致 IndexedDB 目录丢失（对话/配置全丢），
-//       Filesystem DATA 目录不受系统清理影响，可作兜底。备份文件名按日期，同日不重复。
-const BACKUP_DIR = 'chatlite_backups';
-async function autoBackupDaily() {
-  if (!isCapacitor() || !CapFilesystem) return;
-  // 数据未加载完成或空数据时不备份（避免空库覆盖备份）
-  if (!state._dataLoaded) return;
-  if ((state.conversations || []).length === 0 && (state.providers || []).length === 0) return;
-  var lastKey = 'chatlite_last_auto_backup';
-  var last = 0;
-  try { last = parseInt(localStorage.getItem(lastKey) || '0', 10) || 0; } catch(e) {}
-  if (Date.now() - last < 24 * 3600 * 1000) return;  // 24h 内已备份
-  try {
-    // 与手动导出相同的剥离逻辑（images 只留元数据，避免大 base64）
-    var exportSettings = Object.assign({}, settings);
-    if (Array.isArray(exportSettings.images)) {
-      exportSettings.images = exportSettings.images.map(function(img) {
-        if (!img || typeof img !== 'object') return img;
-        var lite = Object.assign({}, img);
-        if (lite.dataUrl) lite.dataUrl = null;
-        if (lite.referenceImages) lite.referenceImages = null;
-        if (lite.thumbnailDataUrl) lite.thumbnailDataUrl = null;
-        return lite;
-      });
-    }
-    var fileName = 'auto-backup-' + new Date().toISOString().slice(0, 10) + '.json';
-    await exportAllDataStreamed(BACKUP_DIR + '/' + fileName, exportSettings, 'DATA');
-    localStorage.setItem(lastKey, String(Date.now()));
-    console.log('[chat-lite] 每日自动备份完成：' + fileName);
-  } catch(e) {
-    console.warn('[chat-lite] 每日自动备份失败：', e);
-  }
 }
 
 async function importAllData(jsonText, mode) {

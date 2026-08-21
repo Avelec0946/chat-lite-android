@@ -210,7 +210,6 @@ async function saveImageToDevice(id) {
 // save / _saveQueue 已迁移到 db.js
 
 async function loadData() {
-  var idbFailed = false;
   // Try IndexedDB first
   try {
     var data = await idbGet(STORAGE_KEY);
@@ -224,30 +223,8 @@ async function loadData() {
       }
       return;
     }
-    // data 为 null/undefined：键不存在——首次启动或库被清，不视为异常
-  } catch(e) {
-    console.warn('IndexedDB read failed:', e);
-    idbFailed = true;  // v97: 打开/读取失败（损坏）——标记，禁止空初始化覆盖
-  }
-  if (idbFailed) {
-    state._idbError = true;
-    // v97: IDB 异常时尝试 localStorage 镜像兜底（conversations 一般无镜像，防御性尝试）
-    try {
-      var rawLs = localStorage.getItem(STORAGE_KEY);
-      if (rawLs) {
-        var dLs = JSON.parse(rawLs);
-        if (dLs && dLs.conversations) {
-          state.conversations = dLs.conversations || [];
-          state.currentId = dLs.currentId || null;
-          for (const conv of state.conversations) {
-            if (conv.messages && Array.isArray(conv.messages) && !conv.messageMap) migrateV1toV2(conv);
-          }
-          return;
-        }
-      }
-    } catch(e2) { console.warn('loadData: localStorage 兜底读取失败:', e2); }
-  }
-  // Fallback: migrate from localStorage（首次启动或旧数据）
+  } catch(e) { console.warn('IndexedDB read failed:', e); }
+  // Fallback: migrate from localStorage
   try {
     var raw = localStorage.getItem(STORAGE_KEY);
     if (raw) {
@@ -291,10 +268,9 @@ async function loadFromServer() {
 
 // defaultSettings / migrateSettings 已迁移到 db.js
 
-// 从 IndexedDB 异步加载 settings，IDB 缺失/失败时从 localStorage 镜像兜底
-// init() 中 await 调用；全部失败时使用内存中的默认值，不阻断启动
+// 从 IndexedDB 异步加载 settings，首次启动时从旧 localStorage 迁移
+// init() 中 await 调用；失败时使用内存中的默认值，不阻断启动
 async function initSettings() {
-  var idbFailed = false;
   // 1. 先尝试从 IDB 读
   try {
     var idbData = await idbGet(SETTINGS_IDB_KEY);
@@ -303,30 +279,26 @@ async function initSettings() {
       _settingsLoaded = true;
       return;
     }
-  } catch(e) {
-    console.warn('initSettings: IDB read failed:', e);
-    idbFailed = true;  // v97: IDB 异常标记（禁止后续用空数据覆盖写回）
-  }
-  if (idbFailed) state._idbError = true;
+  } catch(e) { console.warn('initSettings: IDB read failed:', e); }
 
-  // 2. IDB 无数据/失败：从 localStorage 镜像读取（v97 双写后为常驻兜底，不再一次性迁移+删除）
+  // 2. IDB 无数据：尝试从旧 localStorage 迁移（仅一次）
   try {
     var raw = localStorage.getItem(SETTINGS_KEY);
     if (raw) {
       var s = JSON.parse(raw);
       settings = migrateSettings(s);
-      // IDB 正常但键缺失（首次迁移）：写回 IDB；IDB 异常时不写（避免覆盖/干扰恢复）
-      if (!idbFailed) {
-        try {
-          await idbPut(SETTINGS_IDB_KEY, settings);
-        } catch(e2) {
-          console.warn('[chat-lite] settings 写回 IDB 失败，localStorage 镜像保留:', e2);
-        }
+      // 写入 IDB，迁移成功后清理 localStorage
+      try {
+        await idbPut(SETTINGS_IDB_KEY, settings);
+        localStorage.removeItem(SETTINGS_KEY);
+        console.log('[chat-lite] settings 已从 localStorage 迁移到 IndexedDB');
+      } catch(e2) {
+        console.warn('[chat-lite] settings 迁移到 IDB 失败，保留 localStorage:', e2);
       }
       _settingsLoaded = true;
       return;
     }
-  } catch(e) { console.warn('initSettings: localStorage 读取失败:', e); }
+  } catch(e) { console.warn('initSettings: localStorage 迁移失败:', e); }
 
   // 3. 都没有：使用默认值
   settings = defaultSettings();
@@ -507,9 +479,6 @@ async function init() {
   renderSidebar();
   renderMessages();
   applyBackgroundImage();
-
-  // v97: 每日自动备份到 Filesystem（防 IDB 目录丢失，见 io.js autoBackupDaily）
-  autoBackupDaily();
 
   // Capacitor 模式标记（CSS 用，隐藏 .web-only 元素）
   if (isCapacitor()) {

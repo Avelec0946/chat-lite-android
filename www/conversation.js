@@ -127,12 +127,6 @@ function getBranchPath(conv, leafId) {
 // ===== 会话渲染 =====
 function restoreConversationState() {
   if (state.conversations.length === 0) {
-    // v97: IDB 读取异常时禁止自动新建会话并 save() 覆盖——数据可能只是暂时读不出，
-    // 新建+写入会把幸存数据覆盖成空（2026-08-21 IDB 目录丢失事故的放大因素）
-    if (state._idbError) {
-      showToast('本地数据库读取异常，数据未能加载——请通过「导入数据」恢复备份', 'warn');
-      return;
-    }
     const conv = newConversation();
     conv.title = '对话 1';
     state.conversations.push(conv);
