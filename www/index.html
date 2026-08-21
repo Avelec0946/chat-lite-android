@@ -5,7 +5,7 @@
   <link rel="icon" href="favicon.png" type="image/png">
 <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0">
 <title>chat-lite</title>
-<link rel="stylesheet" href="style.css?v=97">
+<link rel="stylesheet" href="style.css?v=99">
 <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github-dark.min.css">
   <meta name="theme-color" content="#7c3aed">
   <link rel="manifest" href="manifest.json">
@@ -492,10 +492,13 @@
               </select>
             </label>
             <label class="card-field"><span>默认模型</span><input id="img-provider-default-model-input" class="card-input" placeholder="如 gpt-image-2 / gemini-3-pro-image-preview"></label>
+            <label class="card-field"><span>生图超时（秒）</span><input id="image-timeout-input" class="card-input" type="number" min="60" max="3600" title="生图专用总超时，默认 600 秒（10 分钟）；不影响聊天超时" placeholder="默认 600（10 分钟）"></label>
             <div class="provider-editor-actions">
+              <button id="btn-test-image-provider" class="btn btn-small" style="background:var(--bg3);color:var(--text)" title="用当前填写的地址/密钥发 1 张最小请求验证连接（可能产生极少量费用）">测试连接</button>
               <button id="btn-save-image-provider" class="btn btn-small btn-primary">保存</button>
               <button id="btn-close-image-provider-editor" class="btn btn-small" style="background:var(--bg3);color:var(--text)">取消</button>
             </div>
+            <div id="image-provider-test-result" class="image-provider-test-result"></div>
           </div>
           <div class="setting-divider"></div>
           <span class="setting-hint">图库统计：<span id="image-gallery-count">0</span> 张</span>
@@ -535,14 +538,14 @@
 
 <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/marked/12.0.1/marked.min.js"></script>
-<script src="db.js?v=97"></script>
-<script src="haptics.js?v=97"></script>
-<script src="providers.js?v=97"></script>
-<script src="image-gen.js?v=97"></script>
-<script src="conversation.js?v=97"></script>
-<script src="chat.js?v=97"></script>
-<script src="io.js?v=97"></script>
-<script src="gesture-helpers.js?v=97"></script>
-<script src="app.js?v=97"></script>
+<script src="db.js?v=99"></script>
+<script src="haptics.js?v=99"></script>
+<script src="providers.js?v=99"></script>
+<script src="image-gen.js?v=99"></script>
+<script src="conversation.js?v=99"></script>
+<script src="chat.js?v=99"></script>
+<script src="io.js?v=99"></script>
+<script src="gesture-helpers.js?v=99"></script>
+<script src="app.js?v=99"></script>
 </body>
 </html>

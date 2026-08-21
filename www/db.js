@@ -118,6 +118,8 @@ function defaultSettings() {
   return {
     thinkingEnabled: true, apiKey: '', fontSize: '15', lineSpacing: '1.6',
     directMode: false, hapticFeedback: true, nativeStreamingMode: 'auto', nativeTimeoutMs: 120000,
+    // v99: 生图专用总超时（毫秒，默认 600s=10 分钟；聊天 nativeTimeoutMs 不影响生图）
+    imageNativeTimeoutMs: 600000,
     // B2: 分模型修饰语 {"<providerId>:<modelId>": {text: "修饰语\n\n===强调===\n强调内容"}}
     modelPrompts: {},
     // C5: 设置分组收折状态记忆 {groupKey: true=折叠/false=展开}

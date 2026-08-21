@@ -562,6 +562,9 @@ body:not(.capacitor-mode) .capacitor-only{display:none !important}
 
 /* F1: 生图 Provider 编辑器（复用 .provider-editor 结构） */
 .image-provider-editor{background:var(--bg3);border:1px solid var(--border);border-radius:var(--radius);padding:12px;margin-top:8px}
+.image-provider-test-result{font-size:12px;margin-top:6px;padding:6px 10px;border-radius:6px;background:var(--bg2);border:1px solid var(--border);color:var(--text2);min-height:16px}
+.image-provider-test-result.ok{color:var(--success);border-color:var(--success);background:var(--bg3)}
+.image-provider-test-result.err{color:var(--danger);border-color:var(--danger);background:var(--bg3)}
 
 /* v66: 图片预览 overlay 升级（手势 + 工具栏） */
 .image-preview-overlay{position:fixed;top:0;left:0;right:0;bottom:0;background:rgba(0,0,0,.9);z-index:200;display:flex;align-items:center;justify-content:center;padding:24px;animation:fadeIn .15s;overflow:hidden;touch-action:manipulation;user-select:none;-webkit-user-select:none}

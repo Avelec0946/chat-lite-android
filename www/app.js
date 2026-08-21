@@ -44,6 +44,12 @@ const state = {
   _isTouching: false,
   // 当前正在流式输出的 assistantMsg（松手后立即渲染）
   _streamingMsg: null,
+  // v99: 生图——用户主动停止标记（区分「停止」与「超时」的 AbortError）
+  _imageStopRequested: false,
+  // v99: 生图——同接口连续失败计数（≥3 熔断提示检查配置）
+  _imageProviderFailStreak: {},
+  // v99: 生图——进度状态（阶段/已等待秒数/重试信息/下载进度）
+  _imageProgress: null,
 };
 
 // STORAGE_KEY / SETTINGS_KEY 已迁移到 db.js

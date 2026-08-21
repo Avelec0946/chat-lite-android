@@ -1,6 +1,6 @@
 ﻿// ===== image-gen.js : 生图功能模块（v2.0 拆分）=====
 // 模块名：image-gen.js
-// 版本：v78（cache-bust）
+// 版本：v99（cache-bust，2026-08-21 连接可信度加固：错误分类/自动重试/限流感知/超时拆分/测试连接/进度反馈/熔断）
 // 迁移日期：2026-07-26
 // 来源：从 app.js 拆分
 // 职责：生图接口管理、生图界面、图库、图片预览、图片存储、核心生图、完成通知
@@ -1180,41 +1180,30 @@ async function generateImage() {
     stream.scrollTop = stream.scrollHeight;
   }
 
-  // 调用 API（gpt_image 图生图/nano_banana 生图较慢，超时 600s；其他 120s）
+  // v99: 生图专用超时（默认 600s），聊天 nativeTimeoutMs 不再影响生图
   // 注：app 切后台时 Android WebView 会暂停 JS，fetch 挂起但不会报错，切回前台后继续等待
-  var timeoutMs = settings.nativeTimeoutMs || 120000;
-  if (((provider.requestFormat || provider.template) === 'gemini_image' || reqBody._useEdits) && timeoutMs < 600000) timeoutMs = 600000;
+  var timeoutMs = resolveImageTimeout(settings);
   state._imageGenerating = true;  // 标记请求进行中，供 appStateChange 监听用
+  state._imageStopRequested = false;  // v99: 区分「用户停止」与「真超时」
+  // v99: 进度反馈（loading 文本每秒更新）
+  state._imageProgress = { phase: 'connecting', elapsed: 0, retry: null, done: 0, total: n };
+  var progressTimer = setInterval(updateImageProgress, 1000);
   try {
     var controller = new AbortController();
     state._imageAbortController = controller;  // v66: 暴露给停止按钮
-    var timer = setTimeout(function() { controller.abort(); }, timeoutMs);
-    var resp;
-    try {
-      resp = await fetch(req.url, {
-        method: 'POST',
-        headers: req.headers,
-        body: (req.payload instanceof FormData) ? req.payload : JSON.stringify(req.payload),
-        signal: controller.signal
-      });
-    } finally {
-      clearTimeout(timer);
-    }
-    if (!resp.ok) {
-      var errText = '';
-      try { errText = await resp.text(); } catch(e) {}
-      throw new Error('HTTP ' + resp.status + (errText ? ': ' + errText.slice(0, 200) : ''));
-    }
-    // v96: 解析前先验证 Content-Type——接口返回 HTML（404 页/网关拦截页）时给可读报错，
-    // 而非 JSON 解析的 "Unexpected token '<'"。常见根因：baseUrl 带版本路径（如 /api/v1）导致 URL 拼错
-    var ct = (resp.headers.get('content-type') || '').toLowerCase();
-    if (ct.indexOf('application/json') === -1 && ct.indexOf('text/json') === -1 && ct.indexOf('+json') === -1) {
-      var htmlHint = '';
-      try { htmlHint = (await resp.text()).slice(0, 120); } catch(e) {}
-      throw new Error('接口返回了非 JSON 内容（' + (ct.split(';')[0] || '未知') + '）——通常是地址/端点拼错或服务拦截页。' +
-        '检查 baseUrl 是否带版本路径（如 https://xxx/api/v1 应整体填入 API 地址栏，无需再手动拼 /v1）。' +
-        (htmlHint ? '响应开头：' + htmlHint.replace(/\s+/g, ' ').slice(0, 100) : ''));
-    }
+    var resp = await fetchWithImageRetry({
+      url: req.url,
+      headers: req.headers,
+      payload: req.payload,
+      timeoutMs: timeoutMs,
+      signal: controller.signal,
+      onRetry: function(info) {
+        state._imageProgress.phase = 'retry';
+        state._imageProgress.retry = info;
+        showToast('网络/服务异常，' + Math.max(1, Math.round(info.waitMs / 1000)) + 's 后自动重试（' + info.attempt + '/' + info.max + '）', 'info');
+      }
+    });
+    state._imageProgress.phase = 'parsing';
     var data = await resp.json();
     // 移除加载占位
     var loadingEl = document.getElementById('image-loading-msg');
@@ -1223,6 +1212,9 @@ async function generateImage() {
     var fmtResp = getImageFormat(provider.requestFormat || provider.template);
     var results = fmtResp.parseResponse(data) || [];
     if (results.length === 0) throw new Error('响应中无图片数据');
+    // v99: 多图计数——实际成功数 + 外链回退数（修复「虚报 N 张」黑箱 bug）
+    var savedCount = 0;
+    var fallbackCount = 0;
     for (var i = 0; i < results.length; i++) {
       var item = results[i];
       var dataUrl = '';
@@ -1230,8 +1222,12 @@ async function generateImage() {
         var mime = item.mime || 'image/png';
         dataUrl = 'data:' + mime + ';base64,' + item.b64_json;
       } else if (item.url) {
-        // 下载 URL 转 base64
+        // v99: 下载 URL 转 base64（30s 超时 + 20MB 上限）；失败回退外链并计数提示
+        state._imageProgress.phase = 'download';
+        state._imageProgress.done = i;
+        state._imageProgress.total = results.length;
         dataUrl = await fetchImageAsDataUrl(item.url);
+        if (!dataUrl) { fallbackCount++; dataUrl = item.url; }
       }
       if (!dataUrl) continue;
       // v68: 从 base64 解码实际像素尺寸（gpt-image-2 返回的图片常被压缩，实际尺寸 < 请求 size 参数）
@@ -1266,19 +1262,35 @@ async function generateImage() {
       };
       if (!settings.images) settings.images = [];
       settings.images.push(imgObj);
+      savedCount++;
     }
+    // v99: 成功后熔断清零
+    clearFailStreak(state._imageProviderFailStreak, provider.id);
     saveImageProviders();
     renderImageStream();
     updateImageGalleryCount();
     if (indicator) indicator.className = 'image-status-indicator ok';
-    showToast('生成完成，共 ' + results.length + ' 张', 'success');
+    var doneMsg = '生成完成，共 ' + savedCount + ' 张' + (fallbackCount > 0 ? '（其中 ' + fallbackCount + ' 张为外链，可能过期）' : '');
+    showToast(doneMsg, 'success');
     // v70: 无论前后台都发系统通知（前台 toast + 通知栏，后台仅通知栏）
-    notifyImageComplete(results.length);
+    notifyImageComplete(savedCount);
   } catch(e) {
     var loadingEl2 = document.getElementById('image-loading-msg');
     if (loadingEl2) loadingEl2.remove();
     if (indicator) indicator.className = 'image-status-indicator err';
-    var errMsg = e.name === 'AbortError' ? '请求超时（' + (timeoutMs / 1000) + 's）' : (e.message || '生成失败');
+    // v99: 错误分类 + 停止/超时区分 + 熔断
+    var imgErr = e.imageError || classifyImageError(null, '', e);
+    var errMsg;
+    if (e.name === 'AbortError') {
+      errMsg = state._imageStopRequested ? '已停止生成' : (imgErr.hint || ('请求超时（' + Math.round(timeoutMs / 1000) + 's）'));
+    } else {
+      errMsg = imgErr.hint || (e.message || '生成失败');
+      if (imgErr.attempts > 1) errMsg += '（已自动重试 ' + (imgErr.attempts - 1) + ' 次）';
+    }
+    if (state._imageProviderFailStreak) {
+      var bs = bumpFailStreak(state._imageProviderFailStreak, provider.id, 3);
+      if (bs.tripped) errMsg += ' ——该接口连续失败 ' + bs.count + ' 次，建议检查接口配置';
+    }
     // 在图片流中显示错误消息
     if (stream) {
       var errEl = document.createElement('div');
@@ -1290,17 +1302,318 @@ async function generateImage() {
     showToast(errMsg, 'warn');
     console.error('generateImage failed:', e);
   } finally {
+    clearInterval(progressTimer);
+    state._imageProgress = null;  // v99: 清理进度状态
     if (sendBtn) { sendBtn.disabled = false; sendBtn.classList.remove('stopping'); sendBtn.title = ''; }
     state._imageAbortController = null;  // v66: 清理引用
     state._imageGenerating = false;  // 清除请求进行中标记
+    state._imageStopRequested = false;  // v99: 复位停止标记
+  }
+}
+
+// ===== v99: 连接可信度加固核心 =====
+// 错误分类：将任何失败归一化为 {type, retryable, hint}
+// type: network | timeout | url-invalid | auth | quota | content-policy
+//       | rate-limit | server | client | non-json | unknown
+function classifyImageError(status, bodyText, err) {
+  var text = String(bodyText || '') + ' ' + String((err && err.message) || '');
+  var low = text.toLowerCase();
+  if (status === null || status === undefined) {
+    if (err && err.name === 'AbortError') {
+      return { type: 'timeout', retryable: false, hint: '' };  // 由调用方区分「用户停止」与「真超时」
+    }
+    if (err && err.name === 'TypeError') {
+      if (/construct|invalid url|\burl\b/.test(low)) {
+        return { type: 'url-invalid', retryable: false, hint: 'API 地址格式错误，请检查是否以 http:// 或 https:// 开头' };
+      }
+      return { type: 'network', retryable: true, hint: '网络连接失败，已自动重试' };
+    }
+    return { type: 'network', retryable: true, hint: '网络连接失败，已自动重试' };
+  }
+  if (status === 401) {
+    return { type: 'auth', retryable: false, hint: 'API 密钥无效（401），请检查该生图接口的密钥是否正确' };
+  }
+  if (status === 403) {
+    if (/quota|insufficient|billing|credit|balance/i.test(low)) {
+      return { type: 'quota', retryable: false, hint: '账户配额不足或欠费（403），请到对应平台充值或检查用量' };
+    }
+    return { type: 'auth', retryable: false, hint: '请求被拒绝（403），检查密钥权限或账户状态' };
+  }
+  if (status === 400) {
+    if (/content_policy|moderation|refus|nsfw|violat|policy/i.test(low)) {
+      return { type: 'content-policy', retryable: false, hint: '提示词被内容策略拒绝（400），请调整措辞后重试' };
+    }
+    return { type: 'client', retryable: false, hint: '请求参数有误（400）：' + (bodyText ? bodyText.slice(0, 120) : '检查提示词/尺寸/模型名') };
+  }
+  if (status === 404) {
+    return { type: 'url-invalid', retryable: false, hint: '地址或端点错误（404）——检查 API 地址与 Endpoint 路径，以及 baseUrl 是否带版本路径（如 /api/v1）' };
+  }
+  if (status === 429) {
+    if (/image_generation_user_error|content_policy|moderation|refus/i.test(low)) {
+      return { type: 'content-policy', retryable: false, hint: '提示词被内容策略拒绝（429），请调整措辞后重试' };
+    }
+    return { type: 'rate-limit', retryable: true, hint: '接口限流（429），等待后自动重试' };
+  }
+  if (status >= 500 && status < 600) {
+    return { type: 'server', retryable: true, hint: '服务端暂时异常（' + status + '），自动重试中' };
+  }
+  if (status >= 400 && status < 500) {
+    return { type: 'client', retryable: false, hint: '请求被拒绝（' + status + '）：' + (bodyText ? bodyText.slice(0, 120) : '检查接口配置') };
+  }
+  return { type: 'unknown', retryable: false, hint: '未知响应（' + status + '）：' + (bodyText ? bodyText.slice(0, 120) : '') };
+}
+
+// 解析限流头：x-ratelimit-remaining-requests / x-ratelimit-reset-requests / retry-after
+function readRateLimitHeaders(headers) {
+  try {
+    var remaining = headers.get('x-ratelimit-remaining-requests') || headers.get('x-ratelimit-remaining-tokens');
+    var resetStr = headers.get('x-ratelimit-reset-requests');
+    var retryAfter = headers.get('retry-after');
+    var resetMs = 0;
+    if (resetStr) {
+      var m = resetStr.match(/(?:(\d+)m)?(\d+)s/);
+      if (m) resetMs = (parseInt(m[1] || '0', 10) * 60 + parseInt(m[2] || '0', 10)) * 1000;
+    } else if (retryAfter) {
+      var ra = parseInt(retryAfter, 10);
+      if (!isNaN(ra) && ra >= 0) resetMs = ra * 1000;
+    }
+    var hasRemaining = remaining !== null && remaining !== undefined;
+    if (!hasRemaining && resetMs === 0) return null;
+    return { remaining: hasRemaining ? parseInt(remaining, 10) : null, resetMs: resetMs };
+  } catch(e) {
+    return null;
+  }
+}
+
+// 可中断等待（重试退避用；abort 时抛 AbortError）
+function sleepWithAbort(ms, signal) {
+  return new Promise(function(resolve, reject) {
+    if (signal && signal.aborted) {
+      var ae = new Error('aborted');
+      ae.name = 'AbortError';
+      reject(ae);
+      return;
+    }
+    var timer = setTimeout(function() {
+      if (signal) signal.removeEventListener('abort', onAbort);
+      resolve();
+    }, ms);
+    function onAbort() {
+      clearTimeout(timer);
+      var ae = new Error('aborted');
+      ae.name = 'AbortError';
+      reject(ae);
+    }
+    if (signal) signal.addEventListener('abort', onAbort);
+  });
+}
+
+// 带重试的请求封装（v99 核心）：仅 network / rate-limit(429) / server(5xx) 自动重试，
+// 429 尊重 Retry-After，退避 2s/4s + jitter，重试等待可被 signal（停止按钮）打断；
+// 超时（单次超 timeoutMs）不重试；非 JSON 响应抛 non-json 分类；错误统一带 .imageError
+function fetchWithImageRetry(opts) {
+  var url = opts.url, headers = opts.headers || {}, payload = opts.payload;
+  var timeoutMs = opts.timeoutMs || 600000;
+  var signal = opts.signal || null;
+  var maxRetries = (opts.maxRetries === undefined) ? 2 : opts.maxRetries;
+  var onRetry = opts.onRetry || null;
+  var maxTotalWaitMs = 60000;
+  var totalWaitMs = 0;
+  var lastErr = null;
+
+  async function attemptOnce(attempt) {
+    var timeoutFired = false;
+    var externalAborted = false;
+    if (signal && signal.aborted) externalAborted = true;
+    var controller = new AbortController();
+    var timer = setTimeout(function() { timeoutFired = true; controller.abort(); }, timeoutMs);
+    if (signal && !signal.aborted) {
+      signal.addEventListener('abort', function() { externalAborted = true; controller.abort(); });
+    }
+    var resp;
+    try {
+      resp = await fetch(url, {
+        method: 'POST',
+        headers: headers,
+        body: (payload instanceof FormData) ? payload : JSON.stringify(payload),
+        signal: controller.signal
+      });
+    } catch(e) {
+      if (externalAborted) {
+        var ue = new Error('已停止生成');
+        ue.name = 'AbortError';
+        throw ue;
+      }
+      if (timeoutFired) {
+        var te = new Error('请求超时（' + Math.round(timeoutMs / 1000) + 's）');
+        te.name = 'AbortError';
+        te.imageError = { type: 'timeout', retryable: false, hint: '服务端响应超时——生成过慢或网络不稳，可稍后手动重试', status: null, attempts: attempt + 1 };
+        throw te;
+      }
+      var ce = classifyImageError(null, '', e);
+      ce.status = null; ce.attempts = attempt + 1;
+      var ne = new Error(ce.hint || '网络错误');
+      ne.name = 'NetworkError';
+      ne.imageError = ce;
+      throw ne;
+    } finally {
+      clearTimeout(timer);
+    }
+    var bodyText = '';
+    try { bodyText = await resp.text(); } catch(e) { bodyText = ''; }
+    if (!resp.ok) {
+      var cls = classifyImageError(resp.status, bodyText, null);
+      cls.status = resp.status;
+      cls.attempts = attempt + 1;
+      if (cls.type === 'rate-limit') {
+        var rl = readRateLimitHeaders(resp.headers);
+        if (rl && rl.resetMs > 0) cls.retryAfterMs = rl.resetMs;
+      }
+      var he = new Error(cls.hint || ('HTTP ' + resp.status));
+      he.status = resp.status;
+      he.imageError = cls;
+      throw he;
+    }
+    var ct = (resp.headers.get('content-type') || '').toLowerCase();
+    if (ct.indexOf('application/json') === -1 && ct.indexOf('text/json') === -1 && ct.indexOf('+json') === -1) {
+      var htmlHint = bodyText ? bodyText.slice(0, 100).replace(/\s+/g, ' ') : '';
+      var nj = new Error('接口返回了非 JSON 内容（' + (ct.split(';')[0] || '未知') + '）——通常是地址/端点拼错或服务拦截页。检查 baseUrl 是否带版本路径（如 /api/v1 应整体填入 API 地址栏）。' + (htmlHint ? '响应开头：' + htmlHint : ''));
+      nj.imageError = { type: 'non-json', retryable: false, hint: nj.message, status: resp.status, attempts: attempt + 1 };
+      throw nj;
+    }
+    return new Response(bodyText, { status: resp.status, headers: resp.headers });
+  }
+
+  async function run() {
+    for (var attempt = 0; attempt <= maxRetries; attempt++) {
+      try {
+        return await attemptOnce(attempt);
+      } catch(e) {
+        lastErr = e;
+        if (e.name === 'AbortError') throw e;
+        var cls = (e.imageError || {});
+        if (!cls.retryable || attempt >= maxRetries) throw e;
+        var waitMs = cls.retryAfterMs || (Math.min(2000 * Math.pow(2, attempt), 10000) + Math.floor(Math.random() * 500));
+        if (totalWaitMs + waitMs > maxTotalWaitMs) throw e;
+        totalWaitMs += waitMs;
+        if (onRetry) onRetry({ type: cls.type, attempt: attempt + 1, max: maxRetries, waitMs: waitMs, status: cls.status });
+        await sleepWithAbort(waitMs, signal);
+      }
+    }
+    throw lastErr;
+  }
+  return run();
+}
+
+// v99: 生图专用超时（默认 600s，范围 60s~1h）；聊天 nativeTimeoutMs 不再影响生图
+function resolveImageTimeout(settings) {
+  var v = parseInt(settings.imageNativeTimeoutMs, 10);
+  if (!isNaN(v) && v >= 60000 && v <= 3600000) return v;
+  return 600000;
+}
+
+// v99: 熔断计数（连续失败 ≥3 提示检查配置）
+function bumpFailStreak(streak, providerId, threshold) {
+  var n = (streak[providerId] || 0) + 1;
+  streak[providerId] = n;
+  return { count: n, tripped: n >= threshold };
+}
+function clearFailStreak(streak, providerId) {
+  streak[providerId] = 0;
+}
+
+// v99: 进度反馈（loading 文本每秒更新：阶段 + 已等待秒数）
+function updateImageProgress() {
+  var p = state._imageProgress;
+  if (!p) return;
+  p.elapsed++;
+  var el = document.getElementById('image-loading-msg');
+  var textEl = el ? el.querySelector('.loading-text') : null;
+  if (!textEl) return;
+  var label = '生成中';
+  var detail = '';
+  if (p.phase === 'retry' && p.retry) {
+    label = '网络异常';
+    detail = ' ' + Math.max(1, Math.round(p.retry.waitMs / 1000)) + 's 后自动重试（' + p.retry.attempt + '/' + p.retry.max + '）';
+  } else if (p.phase === 'download') {
+    label = '下载图片';
+    detail = ' ' + p.done + '/' + p.total;
+  }
+  var min = Math.floor(p.elapsed / 60);
+  var sec = p.elapsed % 60;
+  textEl.textContent = label + detail + '（已等待 ' + min + ' 分 ' + sec + ' 秒）';
+}
+
+// v99: 测试连接——用表单当前值（未保存）发最小请求验证 baseUrl/端点/鉴权
+async function testImageProviderConnection() {
+  var btn = document.getElementById('btn-test-image-provider');
+  var resultEl = document.getElementById('image-provider-test-result');
+  if (!btn || !resultEl) return;
+  var urlInput = document.getElementById('img-provider-url-input');
+  if (!urlInput || !urlInput.value.trim()) {
+    resultEl.className = 'image-provider-test-result err';
+    resultEl.textContent = '请先填写 API 地址';
+    return;
+  }
+  btn.disabled = true;
+  resultEl.className = 'image-provider-test-result';
+  resultEl.textContent = '测试中（将发送 1 张最小生成请求）...';
+  try {
+    var nameInput = document.getElementById('img-provider-name-input');
+    var endpointInput = document.getElementById('img-provider-endpoint-input');
+    var keyInput = document.getElementById('img-provider-key-input');
+    var formatSel = document.getElementById('img-provider-format-select');
+    var authSel = document.getElementById('img-provider-auth-select');
+    var presetSel = document.getElementById('img-provider-preset-select');
+    var modelInput = document.getElementById('img-provider-default-model-input');
+    var preset = IMAGE_PROVIDER_PRESETS[presetSel ? presetSel.value : 'custom'] || {};
+    var formatName = (formatSel && formatSel.value) || preset.format || 'flat';
+    var tmpProvider = {
+      id: 'test-' + Date.now(),
+      name: (nameInput && nameInput.value.trim()) || '测试',
+      template: formatName,
+      baseUrl: urlInput.value.trim(),
+      endpointPath: endpointInput ? endpointInput.value.trim() : '',
+      apiKey: keyInput ? keyInput.value.trim() : '',
+      authType: (authSel && authSel.value) ? authSel.value : undefined,
+      defaultModel: (modelInput && modelInput.value.trim()) || preset.defaultModel || 'gpt-image-2'
+    };
+    var norm = normalizeImageProvider(tmpProvider);
+    var fmt = getImageFormat(norm.requestFormat || norm.template);
+    var reqBody = fmt.buildBody(norm, {
+      model: norm.defaultModel, prompt: 'test', refDataUrls: [],
+      sizeConfig: { size: 'auto', imageConfig: null },
+      n: 1, negativePrompt: '', promptExtend: false, watermark: false, quality: 'auto'
+    });
+    var req = buildImageRequestPayload(norm, reqBody);
+    var controller = new AbortController();
+    var resp = await fetchWithImageRetry({
+      url: req.url, headers: req.headers, payload: req.payload,
+      isFormData: false, timeoutMs: 10000, signal: controller.signal, maxRetries: 0
+    });
+    var data = await resp.json();
+    var results = fmt.parseResponse(data) || [];
+    resultEl.className = 'image-provider-test-result ok';
+    resultEl.textContent = '连接成功 ✓（端点响应正常，' + (results.length > 0 ? '返回 ' + results.length + ' 张图片数据' : '请求已受理') + '）';
+  } catch(e) {
+    var cls = e.imageError || classifyImageError(null, '', e);
+    resultEl.className = 'image-provider-test-result err';
+    resultEl.textContent = '连接失败：' + (cls.hint || e.message || '未知错误');
+  } finally {
+    btn.disabled = false;
   }
 }
 
 // F1: 把图片 URL 下载为 data URL（避免外链失效）
+// v99: 加 30s 超时 + 20MB 大小上限；失败返回 null（由调用方回退外链并计数提示）
 async function fetchImageAsDataUrl(url) {
+  var controller = new AbortController();
+  var timer = setTimeout(function() { controller.abort(); }, 30000);
   try {
-    var resp = await fetch(url);
+    var resp = await fetch(url, { signal: controller.signal });
+    if (!resp.ok) throw new Error('HTTP ' + resp.status);
     var blob = await resp.blob();
+    if (blob.size > 20 * 1024 * 1024) throw new Error('图片超过 20MB 上限');
     return await new Promise(function(resolve, reject) {
       var reader = new FileReader();
       reader.onload = function() { resolve(reader.result); };
@@ -1309,7 +1622,9 @@ async function fetchImageAsDataUrl(url) {
     });
   } catch(e) {
     console.warn('fetchImageAsDataUrl failed, fallback to url:', e);
-    return url;  // 失败时回退为直接 URL（外链）
+    return null;
+  } finally {
+    clearTimeout(timer);
   }
 }
 // F1: 清空图库
@@ -1449,12 +1764,34 @@ function initImageView() {
   if (sendBtn) sendBtn.addEventListener('click', function() {
     // v66: 生成中点击则停止，否则触发生成
     if (state._imageGenerating && state._imageAbortController) {
+      state._imageStopRequested = true;  // v99: 标记用户主动停止（区分超时）
       state._imageAbortController.abort();
       showToast('已停止生成', 'info');
     } else {
       generateImage();
     }
   });
+
+  // v99: 测试连接按钮
+  var testBtn = document.getElementById('btn-test-image-provider');
+  if (testBtn) testBtn.addEventListener('click', testImageProviderConnection);
+
+  // v99: 生图超时设置（秒 → 内部 ms）
+  var timeoutInput = document.getElementById('image-timeout-input');
+  if (timeoutInput) {
+    timeoutInput.value = String(Math.round((settings.imageNativeTimeoutMs || 600000) / 1000));
+    timeoutInput.addEventListener('change', function() {
+      var v = parseInt(timeoutInput.value, 10);
+      if (!isNaN(v) && v >= 60 && v <= 3600) {
+        settings.imageNativeTimeoutMs = v * 1000;
+        saveImageProviders();
+        showToast('生图超时已设为 ' + v + ' 秒', 'success');
+      } else {
+        timeoutInput.value = String(Math.round((settings.imageNativeTimeoutMs || 600000) / 1000));
+        showToast('超时需在 60-3600 秒之间', 'warn');
+      }
+    });
+  }
 
   // 高级参数折叠
   var advToggle = document.getElementById('image-advanced-toggle');
