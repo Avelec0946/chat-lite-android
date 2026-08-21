@@ -196,6 +196,14 @@ function saveSettings() {
     });
   }
   // 异步写 IDB，不阻塞 UI；写入失败仅提示
+  // v97 双写冗余：localStorage 镜像（settings 不含大 base64，体积可控）——WebView 更新/损坏导致
+  // IDB 目录丢失时（2026-08-21 实测事故），localStorage 镜像可兜底恢复；读取时 IDB 优先、镜像兜底
+  try {
+    localStorage.setItem(SETTINGS_KEY, JSON.stringify(toPersist));
+  } catch(e) {
+    // 镜像写入失败（配额等）不阻断主流程，仅记录
+    console.warn('saveSettings: localStorage 镜像写入失败:', e);
+  }
   idbPut(SETTINGS_IDB_KEY, toPersist).then(function() {
     // 静默成功
   }).catch(function(e) {

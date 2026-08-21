@@ -221,17 +221,42 @@ function getModelsEndpoint(provider) {
 }
 
 async function loadProviders() {
+  var idbFailed = false;
   try {
     var data = await idbGet(PROVIDERS_KEY);
     if (data && Array.isArray(data)) {
       state.providers = data.map(function(p) { return normalizeProvider(p); });
       return;
     }
-  } catch(e) { console.warn('loadProviders failed:', e); }
+  } catch(e) {
+    console.warn('loadProviders failed:', e);
+    idbFailed = true;  // v97: IDB 读取异常，标记并尝试 localStorage 镜像
+  }
+  // v97 双写冗余：IDB 失败/缺失时从 localStorage 镜像兜底
+  try {
+    var rawLs = localStorage.getItem(PROVIDERS_KEY);
+    if (rawLs) {
+      var arr = JSON.parse(rawLs);
+      if (Array.isArray(arr)) {
+        state.providers = arr.map(function(p) { return normalizeProvider(p); });
+        if (!idbFailed) {
+          // IDB 正常但键缺失（首次迁移）：写回 IDB
+          idbPut(PROVIDERS_KEY, state.providers).catch(function() {});
+        }
+        return;
+      }
+    }
+  } catch(e) { console.warn('loadProviders: localStorage 镜像读取失败:', e); }
   state.providers = [];
 }
 
 function saveProviders() {
+  // v97 双写冗余：localStorage 镜像 + IDB 主存（防 IDB 目录丢失后配置全丢）
+  try {
+    localStorage.setItem(PROVIDERS_KEY, JSON.stringify(state.providers));
+  } catch(e) {
+    console.warn('saveProviders: localStorage 镜像写入失败:', e);
+  }
   idbPut(PROVIDERS_KEY, state.providers).catch(function(e) {
     console.warn('saveProviders failed:', e);
     showToast('接口配置保存失败', 'warn');
