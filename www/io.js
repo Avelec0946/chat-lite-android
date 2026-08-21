@@ -174,48 +174,7 @@ async function autoBackupDaily() {
   }
 }
 
-// v98: 启动自动发现备份——本地数据为空但存在备份文件时提示一键恢复
-// 扫描目录：CACHE（手动导出分享的备份） + DATA/chatlite_backups（v97 起每日自动备份）
-// 返回 [{name, size, directory}]，按大小降序（最大的最可能是全量备份），无则 null
-async function discoverLocalBackups() {
-  if (!isCapacitor() || !CapFilesystem) return null;
-  var found = [];
-  var scanDirs = [
-    { directory: 'CACHE', path: '' },
-    { directory: 'DATA', path: BACKUP_DIR }
-  ];
-  for (var di = 0; di < scanDirs.length; di++) {
-    try {
-      var res = await CapFilesystem.readdir({ path: scanDirs[di].path, directory: scanDirs[di].directory });
-      var files = (res && res.files) || [];
-      for (var fi = 0; fi < files.length; fi++) {
-        var f = files[fi];
-        if (f.type === 'file' && /^(chat-lite-backup|auto-backup)-.*\.json$/i.test(f.name)) {
-          found.push({ name: f.name, size: f.size || 0, directory: scanDirs[di].directory });
-        }
-      }
-    } catch(e) { /* 目录不存在或读取失败，跳过 */ }
-  }
-  found.sort(function(a, b) { return (b.size || 0) - (a.size || 0); });
-  return found.length ? found : null;
-}
-
-// v98: 从本地备份一键恢复（读取备份 → 全量覆盖导入；导入内部 skipConfirm 因外层已确认）
-async function restoreFromLocalBackup(backup) {
-  try {
-    showToast('正在读取本地备份，请稍候...', 'info');
-    await new Promise(r => setTimeout(r, 50));
-    var res = await CapFilesystem.readFile({ path: backup.name, directory: backup.directory, encoding: 'utf8' });
-    await importAllData(res.data, 'overwrite', true);
-    return true;
-  } catch(e) {
-    console.error('restoreFromLocalBackup failed:', e);
-    showToast('自动恢复失败：' + (e && e.message ? e.message : e) + '——请改用「导入数据」手动恢复', 'danger');
-    return false;
-  }
-}
-
-async function importAllData(jsonText, mode, skipConfirm) {
+async function importAllData(jsonText, mode) {
   await ensureDataLoaded();
   mode = mode || 'overwrite';
 
@@ -239,8 +198,7 @@ async function importAllData(jsonText, mode, skipConfirm) {
   }
 
   const modeText = mode === 'merge' ? '合并' : '覆盖';
-  // v98: skipConfirm 用于启动自动恢复（外层已确认），避免二次弹窗
-  if (!skipConfirm && !confirm('即将以「' + modeText + '」方式导入数据。\n\n覆盖：直接替换当前所有数据\n合并：按 ID 去重，冲突时用导入数据替换本地\n\n确定继续吗？')) return;
+  if (!confirm('即将以「' + modeText + '」方式导入数据。\n\n覆盖：直接替换当前所有数据\n合并：按 ID 去重，冲突时用导入数据替换本地\n\n确定继续吗？')) return;
 
   // APK 模式：导入前自动备份当前数据到 Cache（静默，不弹分享框）
   if (isCapacitor() && CapFilesystem && (state.conversations.length > 0 || (state.providers && state.providers.length > 0))) {
