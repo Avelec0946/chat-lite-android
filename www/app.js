@@ -502,6 +502,23 @@ async function init() {
     }
   });
 
+  // v98: 数据为空时自动发现本地备份——IDB 丢失事故后，让更新后的应用能主动找回幸存数据
+  // 触发条件：APK 模式 + 对话/聊天接口/生图接口全为空（全新状态）；恢复成功则跳过下方空会话初始化
+  if (isCapacitor() && state.conversations.length === 0 &&
+      (!state.providers || state.providers.length === 0) &&
+      (!settings.imageProviders || settings.imageProviders.length === 0)) {
+    try {
+      var backups = await discoverLocalBackups();
+      if (backups && backups.length > 0) {
+        var b = backups[0];
+        var sizeMB = (b.size / 1048576).toFixed(1);
+        if (confirm('检测到本地备份「' + b.name + '」（' + sizeMB + ' MB）\n\n当前应用内数据为空，是否一键恢复？')) {
+          await restoreFromLocalBackup(b);
+        }
+      }
+    } catch(e) { console.warn('自动发现备份失败：', e); }
+  }
+
   restoreConversationState();
   syncModelSelector();
   renderSidebar();
