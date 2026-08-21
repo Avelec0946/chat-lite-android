@@ -195,6 +195,14 @@ function saveSettings() {
       return lite;
     });
   }
+  // v97 方案B（最小冗余）：settings 同步镜像一份到 localStorage（不含大 base64，体积可控）。
+  // IndexedDB 目录丢失时（2026-08-21 实测事故：WebView 更新/损坏重建清掉 app_webview/Default/IndexedDB），
+  // localStorage 镜像可兜底恢复配置；读取时 IDB 优先、镜像兜底。镜像常驻不删除。
+  try {
+    localStorage.setItem(SETTINGS_KEY, JSON.stringify(toPersist));
+  } catch(e) {
+    console.warn('saveSettings: localStorage 镜像写入失败:', e);
+  }
   // 异步写 IDB，不阻塞 UI；写入失败仅提示
   idbPut(SETTINGS_IDB_KEY, toPersist).then(function() {
     // 静默成功

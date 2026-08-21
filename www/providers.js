@@ -228,10 +228,27 @@ async function loadProviders() {
       return;
     }
   } catch(e) { console.warn('loadProviders failed:', e); }
+  // v97 方案B：IDB 无数据/失败时从 localStorage 镜像兜底（saveProviders 已双写）
+  try {
+    var rawLs = localStorage.getItem(PROVIDERS_KEY);
+    if (rawLs) {
+      var arr = JSON.parse(rawLs);
+      if (Array.isArray(arr) && arr.length > 0) {
+        state.providers = arr.map(function(p) { return normalizeProvider(p); });
+        return;
+      }
+    }
+  } catch(e) { console.warn('loadProviders: localStorage 镜像读取失败:', e); }
   state.providers = [];
 }
 
 function saveProviders() {
+  // v97 方案B：localStorage 镜像（后台无感）+ IDB 主存
+  try {
+    localStorage.setItem(PROVIDERS_KEY, JSON.stringify(state.providers));
+  } catch(e) {
+    console.warn('saveProviders: localStorage 镜像写入失败:', e);
+  }
   idbPut(PROVIDERS_KEY, state.providers).catch(function(e) {
     console.warn('saveProviders failed:', e);
     showToast('接口配置保存失败', 'warn');

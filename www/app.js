@@ -268,7 +268,7 @@ async function loadFromServer() {
 
 // defaultSettings / migrateSettings 已迁移到 db.js
 
-// 从 IndexedDB 异步加载 settings，首次启动时从旧 localStorage 迁移
+// 从 IndexedDB 异步加载 settings，IDB 无数据时从 localStorage 镜像兜底
 // init() 中 await 调用；失败时使用内存中的默认值，不阻断启动
 async function initSettings() {
   // 1. 先尝试从 IDB 读
@@ -276,29 +276,29 @@ async function initSettings() {
     var idbData = await idbGet(SETTINGS_IDB_KEY);
     if (idbData && typeof idbData === 'object') {
       settings = migrateSettings(idbData);
+      // v97 方案B：同步镜像到 localStorage（保持兜底副本最新；首次升级后立即生效）
+      try { localStorage.setItem(SETTINGS_KEY, JSON.stringify(settings)); } catch(e) {}
       _settingsLoaded = true;
       return;
     }
   } catch(e) { console.warn('initSettings: IDB read failed:', e); }
 
-  // 2. IDB 无数据：尝试从旧 localStorage 迁移（仅一次）
+  // 2. IDB 无数据：从 localStorage 镜像读取（v97 方案B 起镜像常驻，不再一次性迁移后删除）
   try {
     var raw = localStorage.getItem(SETTINGS_KEY);
     if (raw) {
       var s = JSON.parse(raw);
       settings = migrateSettings(s);
-      // 写入 IDB，迁移成功后清理 localStorage
+      // 写回 IDB（镜像为主源时补主存）
       try {
         await idbPut(SETTINGS_IDB_KEY, settings);
-        localStorage.removeItem(SETTINGS_KEY);
-        console.log('[chat-lite] settings 已从 localStorage 迁移到 IndexedDB');
       } catch(e2) {
-        console.warn('[chat-lite] settings 迁移到 IDB 失败，保留 localStorage:', e2);
+        console.warn('[chat-lite] settings 写回 IDB 失败，localStorage 镜像保留:', e2);
       }
       _settingsLoaded = true;
       return;
     }
-  } catch(e) { console.warn('initSettings: localStorage 迁移失败:', e); }
+  } catch(e) { console.warn('initSettings: localStorage 读取失败:', e); }
 
   // 3. 都没有：使用默认值
   settings = defaultSettings();
