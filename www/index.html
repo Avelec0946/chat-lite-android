@@ -5,7 +5,7 @@
   <link rel="icon" href="favicon.png" type="image/png">
 <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0">
 <title>chat-lite</title>
-<link rel="stylesheet" href="style.css?v=100">
+<link rel="stylesheet" href="style.css?v=101">
 <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github-dark.min.css">
   <meta name="theme-color" content="#7c3aed">
   <link rel="manifest" href="manifest.json">
@@ -98,7 +98,8 @@
         <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="19" y1="12" x2="5" y2="12"/><polyline points="12 19 5 12 12 5"/></svg>
       </button>
       <select id="image-provider-select" class="model-select" title="切换生图接口"></select>
-      <input id="image-model-input" class="image-model-input" type="text" placeholder="模型名（如 dall-e-3）">
+      <input id="image-model-input" class="image-model-input" type="text" placeholder="模型名（如 dall-e-3）" list="image-model-suggestions">
+      <datalist id="image-model-suggestions"></datalist>
       <span id="image-status-indicator" class="image-status-indicator"></span>
     </div>
     <div id="image-stream" class="image-stream">
@@ -493,6 +494,9 @@
             </label>
             <label class="card-field"><span>默认模型</span><input id="img-provider-default-model-input" class="card-input" placeholder="如 gpt-image-2 / gemini-3-pro-image-preview"></label>
             <label class="card-field"><span>生图超时（秒）</span><input id="image-timeout-input" class="card-input" type="number" min="60" max="3600" title="生图专用总超时，默认 600 秒（10 分钟）；不影响聊天超时" placeholder="默认 600（10 分钟）"></label>
+            <label class="card-field"><span>提示词前缀</span><input id="image-prompt-prefix-input" class="card-input" title="每次生成自动拼在最前，如：best quality, masterpiece（可留空）" placeholder="全局前缀（可留空）"></label>
+            <label class="card-field"><span>负面前缀</span><input id="image-negative-prefix-input" class="card-input" title="自动拼到负面提示词前，如：lowres, blurry, bad anatomy（可留空）" placeholder="全局负面词前缀（可留空）"></label>
+            <label class="card-field"><span>提示词模板</span><input id="image-prompt-template-input" class="card-input" title="含 {prompt} 占位符，如：photo of {prompt}, 4k（留空 = 仅 {prompt}）" placeholder="含 {prompt} 占位，默认 {prompt}"></label>
             <div class="provider-editor-actions">
               <button id="btn-test-image-provider" class="btn btn-small" style="background:var(--bg3);color:var(--text)" title="用当前填写的地址/密钥发 1 张最小请求验证连接（可能产生极少量费用）">测试连接</button>
               <button id="btn-save-image-provider" class="btn btn-small btn-primary">保存</button>
@@ -538,14 +542,14 @@
 
 <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/marked/12.0.1/marked.min.js"></script>
-<script src="db.js?v=100"></script>
-<script src="haptics.js?v=100"></script>
-<script src="providers.js?v=100"></script>
-<script src="image-gen.js?v=100"></script>
-<script src="conversation.js?v=100"></script>
-<script src="chat.js?v=100"></script>
-<script src="io.js?v=100"></script>
-<script src="gesture-helpers.js?v=100"></script>
-<script src="app.js?v=100"></script>
+<script src="db.js?v=101"></script>
+<script src="haptics.js?v=101"></script>
+<script src="providers.js?v=101"></script>
+<script src="image-gen.js?v=101"></script>
+<script src="conversation.js?v=101"></script>
+<script src="chat.js?v=101"></script>
+<script src="io.js?v=101"></script>
+<script src="gesture-helpers.js?v=101"></script>
+<script src="app.js?v=101"></script>
 </body>
 </html>

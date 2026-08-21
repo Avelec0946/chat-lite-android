@@ -1,6 +1,6 @@
 ﻿// ===== image-gen.js : 生图功能模块（v2.0 拆分）=====
 // 模块名：image-gen.js
-// 版本：v100（cache-bust，2026-08-21：URL 版本段剥离重写修复 OpenRouter 丢 /api 段 + 新增 openrouter_image 格式族（input_references 参考图，官方验证流程）+ 重试总时长预算 15min 防无限循环 + 参考图 JPEG 压缩）
+// 版本：v101（cache-bust，2026-08-22：生图体验优化——prompt 前缀体系（全局前缀/负面前缀/消息模板 {prompt}）+ 模型特定适配（dall-e-2/3、gpt-image 提示词截断与尺寸上限）+ 模型下拉建议 datalist；思路取经 SillyTavern stable-diffusion 扩展，代码自行实现（MIT 不受 AGPL 污染））
 // 迁移日期：2026-07-26
 // 来源：从 app.js 拆分
 // 职责：生图接口管理、生图界面、图库、图片预览、图片存储、核心生图、完成通知
@@ -1116,6 +1116,8 @@ async function generateImage() {
     showToast('请输入提示词', 'warn');
     return;
   }
+  // v101: prompt 前缀体系（全局前缀 + 消息模板 {prompt} 占位）
+  prompt = combineImagePrefixes(settings.imagePromptPrefix || '', prompt, settings.imagePromptTemplate || '');
   var provider = getCurrentImageProvider();
   if (!provider) {
     showToast('请先在设置中添加生图接口', 'warn');
@@ -1124,6 +1126,8 @@ async function generateImage() {
   var modelInput = document.getElementById('image-model-input');
   var model = modelInput ? modelInput.value.trim() : '';
   if (!model) model = provider.defaultModel || 'dall-e-3';
+  // v101: 模型特定提示词截断（dall-e-2/3、gpt-image 有字符上限）
+  prompt = adaptPromptForModel(model, prompt);
 
   // 尺寸：从「分辨率 + 宽高比」两层下拉读取
   var resolutionSel = document.getElementById('image-resolution-select');
@@ -1133,6 +1137,8 @@ async function generateImage() {
   var aspect = aspectSel ? aspectSel.value : 'auto';
   var customSize = (aspect === 'custom' && aspectCustom) ? aspectCustom.value.trim() : '';
   var sizeConfig = buildImageSizeConfig(provider, resolution, aspect, customSize);
+  // v101: 模型特定尺寸上限（gpt_image 系 dall-e-3 1792 / gpt-image 1536，超出等比收窄）
+  sizeConfig = adaptSizeForModel(provider.requestFormat || provider.template, model, sizeConfig);
 
   // 高级参数
   var negPromptEl = document.getElementById('image-negative-prompt');
@@ -1140,7 +1146,8 @@ async function generateImage() {
   var promptExtendEl = document.getElementById('image-prompt-extend');
   var watermarkEl = document.getElementById('image-watermark');
   var qualitySel = document.getElementById('image-quality-select');
-  var negativePrompt = negPromptEl ? negPromptEl.value.trim() : '';
+  // v101: 负面前缀合并（全局负面前缀 + 输入框负面词）
+  var negativePrompt = combineImagePrefixes(settings.imageNegativePrefix || '', negPromptEl ? negPromptEl.value.trim() : '', '');
   var n = Math.max(1, Math.min(4, parseInt(batchNEl ? batchNEl.value : '1') || 1));
   if (provider.features && provider.features.maxBatch) {
     n = Math.min(n, provider.features.maxBatch);
@@ -1560,6 +1567,79 @@ function resolveImageTimeout(settings) {
   return 600000;
 }
 
+// ===== v101: 生图体验优化（思路取经 SillyTavern stable-diffusion 扩展，代码自行实现）=====
+// prompt 前缀体系：全局前缀 + 消息模板 {prompt} 占位合并（酒馆 combinePrefixes 同款思路）
+function combineImagePrefixes(prefix, prompt, template) {
+  var tpl = (template === undefined || template === null || template === '') ? '{prompt}' : template;
+  var core = tpl.indexOf('{prompt}') >= 0 ? tpl.replace(/\{prompt\}/g, prompt) : prompt;
+  var parts = [];
+  if (prefix && prefix.trim()) parts.push(prefix.trim());
+  if (core && core.trim()) parts.push(core.trim());
+  return parts.join(', ');
+}
+
+// 模型特定提示词截断（酒馆 generateOpenAiImage 同款：dall-e-2 1000 / dalle-3 4000 / gpt-image 32000 字符）
+function adaptPromptForModel(model, prompt) {
+  var m = String(model || '').toLowerCase();
+  var limit = 0;
+  if (m.indexOf('dall-e-2') >= 0) limit = 1000;
+  else if (m.indexOf('dall-e-3') >= 0) limit = 4000;
+  else if (m.indexOf('gpt-image') >= 0) limit = 32000;
+  return (limit > 0 && prompt.length > limit) ? prompt.slice(0, limit) : prompt;
+}
+
+// 模型特定尺寸上限（酒馆同款：dall-e-3 最大 1792、gpt-image 最大 1536，超出等比收窄）
+function adaptSizeForModel(fmt, model, sizeConfig) {
+  if (fmt !== 'gpt_image') return sizeConfig;
+  var m = String(model || '').toLowerCase();
+  var cfg = sizeConfig || { size: 'auto', imageConfig: null };
+  var size = cfg.size;
+  if (!size || size === 'auto') return cfg;
+  var mm = size.match(/^(\d+)x(\d+)$/i);
+  if (!mm) return cfg;
+  var w = parseInt(mm[1], 10), h = parseInt(mm[2], 10);
+  var cap = 0;
+  if (m.indexOf('dall-e-3') >= 0) cap = 1792;
+  else if (m.indexOf('gpt-image') >= 0) cap = 1536;
+  if (!cap) return cfg;
+  if (w > cap) { h = Math.round(h * cap / w); w = cap; }
+  if (h > cap) { w = Math.round(w * cap / h); h = cap; }
+  return { size: w + 'x' + h, imageConfig: cfg.imageConfig };
+}
+
+// 模型下拉建议：当前接口默认模型 + 图库历史模型（去重，最多 20）
+function getImageModelSuggestions(provider, images) {
+  var seen = {};
+  var list = [];
+  function add(m) { if (m && typeof m === 'string' && !seen[m]) { seen[m] = 1; list.push(m); } }
+  if (provider && provider.defaultModel) add(provider.defaultModel);
+  var imgs = images || [];
+  for (var i = imgs.length - 1; i >= 0 && list.length < 20; i--) {
+    add(imgs[i].model);
+  }
+  return list;
+}
+
+// 刷新模型下拉建议（datalist）
+function refreshImageModelSuggestions() {
+  var dl = document.getElementById('image-model-suggestions');
+  if (!dl) return;
+  var provider = getCurrentImageProvider();
+  var list = getImageModelSuggestions(provider, settings.images || []);
+  dl.innerHTML = list.map(function(m) { return '<option value="' + escapeHtml(m) + '">'; }).join('');
+}
+
+// 生图设置输入绑定（前缀/模板等纯字符串设置项）
+function bindImageSettingInput(id, key) {
+  var el = document.getElementById(id);
+  if (!el) return;
+  el.value = settings[key] || '';
+  el.addEventListener('change', function() {
+    settings[key] = el.value.trim();
+    saveImageProviders();
+  });
+}
+
 // v99: 熔断计数（连续失败 ≥3 提示检查配置）
 function bumpFailStreak(streak, providerId, threshold) {
   var n = (streak[providerId] || 0) + 1;
@@ -1706,6 +1786,7 @@ function initImageView() {
     var current = getCurrentImageProvider();
     if (modelInput && current) modelInput.value = current.defaultModel || '';
     updateImageAdvancedVisibility();
+    refreshImageModelSuggestions();  // v101: 切接口后刷新模型建议
   });
 
   // 参考图选择
@@ -1823,6 +1904,12 @@ function initImageView() {
   // v99: 测试连接按钮
   var testBtn = document.getElementById('btn-test-image-provider');
   if (testBtn) testBtn.addEventListener('click', testImageProviderConnection);
+
+  // v101: 模型下拉建议（datalist）+ 生图设置输入绑定
+  refreshImageModelSuggestions();
+  bindImageSettingInput('image-prompt-prefix-input', 'imagePromptPrefix');
+  bindImageSettingInput('image-negative-prefix-input', 'imageNegativePrefix');
+  bindImageSettingInput('image-prompt-template-input', 'imagePromptTemplate');
 
   // v99: 生图超时设置（秒 → 内部 ms）
   var timeoutInput = document.getElementById('image-timeout-input');
