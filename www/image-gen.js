@@ -1346,7 +1346,7 @@ async function generateImage() {
       var item = results[i];
       var dataUrl = '';
       if (item.b64_json) {
-        var mime = item.mime || 'image/png';
+        var mime = (item.mime || item.media_type || 'image/png').toLowerCase();  // v107: 兼容 OpenRouter media_type
         dataUrl = 'data:' + mime + ';base64,' + item.b64_json;
       } else if (item.url) {
         // v99: 下载 URL 转 base64（30s 超时 + 20MB 上限）；失败回退外链并计数提示
