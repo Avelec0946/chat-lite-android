@@ -68,7 +68,9 @@ const IMAGE_FORMATS = {
     authPrefix: 'Bearer ',
     requestFormat: 'gpt_image',
     responseFormat: 'b64_only',
-    features: { supportsReferenceImage: true, supportsNegativePrompt: false, supportsCustomSize: true, supportsBatch: false, maxBatch: 1, supportsQuality: true, supportsResolution: true, supportsAspectRatio: true },
+    defaultModel: 'gpt-image-2',
+    features: { supportsReferenceImage: true, supportsNegativePrompt: false, supportsCustomSize: true, supportsBatch: false, maxBatch: 1, supportsQuality: true, supportsResolution: false, supportsAspectRatio: true },
+    // v103: gpt_image 尺寸集固定, resolution 应隐藏
     // 文生图 flat + quality/output_format/moderation；图生图走 edits 端点（multipart）
     buildBody: function(provider, ctx) {
       var body = { model: ctx.model, prompt: ctx.prompt, n: ctx.n, size: ctx.sizeConfig.size || 'auto', quality: ctx.quality || 'auto', output_format: 'png', moderation: 'auto' };
@@ -179,7 +181,7 @@ const IMAGE_FORMATS = {
     authPrefix: 'Bearer ',
     requestFormat: 'zhipu',
     responseFormat: 'url_or_b64',
-    features: { supportsReferenceImage: false, supportsNegativePrompt: false, supportsCustomSize: true, supportsBatch: false, maxBatch: 1, supportsResolution: false, supportsAspectRatio: false, supportsQuality: true },
+    features: { supportsReferenceImage: false, supportsNegativePrompt: false, supportsCustomSize: true, supportsBatch: false, maxBatch: 1, supportsResolution: true, supportsAspectRatio: false, supportsQuality: true },
     buildBody: function(provider, ctx) {
       var body = { model: ctx.model, prompt: ctx.prompt };
       if (ctx.sizeConfig.size && ctx.sizeConfig.size !== 'auto') body.size = ctx.sizeConfig.size;
@@ -187,6 +189,45 @@ const IMAGE_FORMATS = {
       return body;
     },
     parseResponse: function(data) { return (data && data.data) || []; }
+  },
+  minimax: {
+    label: 'MiniMax 海螺（image-01）',
+    endpointPath: '/v1/image_generation',
+    authType: 'bearer',
+    authHeader: 'Authorization',
+    authPrefix: 'Bearer ',
+    requestFormat: 'minimax',
+    responseFormat: 'url_or_b64',
+    defaultModel: 'image-01',
+    // v103: 新增格式族。MiniMax 走 /v1/image_generation，尺寸是 aspect_ratio（非 size），响应为
+    // data.data.image_urls[]（URL 串）或 data.data[]（base64/dataURL 串）。
+    features: { supportsReferenceImage: false, supportsNegativePrompt: false, supportsCustomSize: true, supportsBatch: true, maxBatch: 4, supportsResolution: false, supportsAspectRatio: true },
+    // 请求体：{model, prompt, n, aspect_ratio, response_format}；不用 size
+    buildBody: function(provider, ctx) {
+      var body = { model: ctx.model, prompt: ctx.prompt, n: Math.max(1, Math.min(4, ctx.n || 1)) };
+      var ratio = ctx.sizeConfig && ctx.sizeConfig.imageConfig && ctx.sizeConfig.imageConfig.aspectRatio || (ctx.sizeConfig && ctx.sizeConfig.aspectRatio);
+      if (ratio && ratio !== 'auto') body.aspect_ratio = ratio;
+      body.response_format = 'url';
+      return body;
+    },
+    // 响应 data.data: {image_urls:[str]} | [ {url} ] | [b64 str | dataURL str]
+    parseResponse: function(data) {
+      var arr = (data && data.data) ? data.data : null;
+      if (!arr) return [];
+      if (Array.isArray(arr.image_urls)) arr = arr.image_urls;
+      if (!Array.isArray(arr)) {
+        var alt = arr && (arr.image_urls || arr.images);
+        if (Array.isArray(alt)) arr = alt; else return [];
+      }
+      return arr.map(function(v) {
+        if (v && typeof v === 'object') return v;           // 已是 {url}/{b64_json}
+        v = String(v || '');
+        if (/^https?:\/\//.test(v)) return { url: v };      // URL 串
+        if (v.indexOf('data:') === 0) v = v.replace(/^data:image\/[^;]+;base64,/, ''); // dataURL 串
+        if (v) return { b64_json: v };                      // 裸 base64 串
+        return null;
+      }).filter(Boolean);
+    }
   }
 };
 
@@ -197,6 +238,7 @@ const IMAGE_PROVIDER_PRESETS = {
   gemini: { label: 'Google Gemini', format: 'gemini_image', baseUrl: 'https://generativelanguage.googleapis.com', defaultModel: 'gemini-3-pro-image-preview' },
   wanxiang: { label: '阿里通义万相', format: 'wanxiang', baseUrl: 'https://dashscope.aliyuncs.com', defaultModel: 'wan2.6-t2i' },
   zhipu_cogview: { label: '智谱 CogView', format: 'zhipu', baseUrl: 'https://open.bigmodel.cn', defaultModel: 'cogview-4' },  // v102: 修正官方端点 /api/paas/v4（原 flat /v1 导致 405）
+  minimax: { label: 'MiniMax 海螺', format: 'minimax', baseUrl: 'https://api.minimaxi.com', defaultModel: 'image-01' },  // v103: 新增 MiniMax（/v1/image_generation + aspect_ratio）
   openrouter: { label: 'OpenRouter 新版图片 API', format: 'openrouter_image', baseUrl: 'https://openrouter.ai', defaultModel: 'openai/gpt-image-2' },  // v100: 对齐官方 /api/v1/images + input_references（参考图走 JSON 不走 edits）
   doubao_seedream: { label: '豆包 Seedream', format: 'flat', baseUrl: 'https://ark.cn-beijing.volces.com', defaultModel: 'doubao-seedream-3-0-t2i-250415' },
   siliconflow: { label: '硅基流动', format: 'flat', baseUrl: 'https://api.siliconflow.cn', defaultModel: 'black-forest-labs/FLUX.1-schnell' },
@@ -251,7 +293,7 @@ function normalizeImageProvider(p) {
     authType: p.authType || format.authType,
     authHeader: p.authHeader || format.authHeader,
     authPrefix: p.authPrefix !== undefined ? p.authPrefix : format.authPrefix,
-    defaultModel: p.defaultModel || 'gpt-image-2',
+    defaultModel: p.defaultModel || format.defaultModel || 'gpt-image-2',  // v103: 格式族 defaultModel 优先（minimax→image-01 等）
     requestFormat: format.requestFormat,
     responseFormat: format.responseFormat,
     features: Object.assign({}, format.features, p.features || {}),
@@ -528,12 +570,12 @@ function updateImageAdvancedVisibility() {
   var provider = getCurrentImageProvider();
   var fmt = provider ? (provider.requestFormat || provider.template) : 'flat';
   var features = provider ? provider.features : null;
-  // quality 行：仅 gpt_image 格式显示
+  // v103: quality 行由 features.supportsQuality 驱动（gpt_image/zhipu 显示，其余隐藏）
   var qualityRow = document.getElementById('image-quality-row');
-  if (qualityRow) qualityRow.style.display = (fmt === 'gpt_image') ? '' : 'none';
-  // 分辨率选择：gpt_image 格式隐藏（gpt-image-2 只支持 1024 基础，分辨率无意义）
+  if (qualityRow) qualityRow.style.display = (features && features.supportsQuality) ? '' : 'none';
+  // v103: 分辨率选择由 features.supportsResolution 驱动（gpt_image 尺寸集固定/minimax 无分辨率 → 隐藏）
   var resSelect = document.getElementById('image-resolution-select');
-  if (resSelect) resSelect.style.display = (fmt === 'gpt_image') ? 'none' : '';
+  if (resSelect) resSelect.style.display = (features && features.supportsResolution) ? '' : 'none';
   // 负面提示词：格式不支持时隐藏
   var negRow = document.getElementById('image-negative-prompt-row');
   if (negRow) negRow.style.display = (features && features.supportsNegativePrompt) ? '' : 'none';
@@ -1048,6 +1090,16 @@ function buildImageSizeConfig(provider, resolution, aspect, customSize) {
     } else {
       result.size = _GPT_IMAGE_SIZE_MAP[aspect] || '1024x1024';
     }
+    return result;
+  }
+  // v103: minimax 尺寸走 aspect_ratio（无像素 WxH）
+  if (fmt === 'minimax') {
+    if (aspect === 'custom' && customSize) {
+      if (/^\d+:\d+$/.test(customSize)) { result.imageConfig = { aspectRatio: customSize }; return result; }
+      if (/^\d+x\d+$/i.test(customSize)) { var mm = customSize.match(/^(\d+)x(\d+)$/i); result.imageConfig = { aspectRatio: mm[1] + ':' + mm[2] }; return result; }
+      return result; // 无法表达 → 按 auto
+    }
+    if (aspect !== 'auto') result.imageConfig = { aspectRatio: aspect };
     return result;
   }
   // auto 分辨率或 auto 宽高比 → 让模型自由
