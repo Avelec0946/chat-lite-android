@@ -269,6 +269,9 @@ function normalizeImageProvider(p) {
   var format = getImageFormat(formatName);
   var baseUrl = normalizeBaseUrl(p.baseUrl);
   var endpointPath = p.endpointPath;
+  // v104: 显式端点残留通用默认（flat 的 /v1/images/generations）且当前格式族端点不同 → 跟随格式族（防 minimax 等走错端点）
+  var flatDefault = IMAGE_FORMATS.flat ? IMAGE_FORMATS.flat.endpointPath : null;
+  if (flatDefault && format.endpointPath && endpointPath === flatDefault && format.endpointPath !== flatDefault) endpointPath = null;
   // v100: 版本段剥离重写——baseUrl 以 /api、/api/vN、/vN 结尾都剥离（v96 正则漏 /api 结尾），
   // 且显式 endpointPath 也参与（v96 只处理默认端点，OpenRouter 显式 endpointPath 丢 /api 段的漏网实锤）
   var verMatch = baseUrl.match(/^(.*?)(\/api(\/v\d+)?|\/v\d+)$/i);
@@ -517,7 +520,13 @@ function onImageProviderPresetChange() {
     var modelInput = document.getElementById('img-provider-default-model-input');
     if (modelInput && !modelInput.value && preset.defaultModel) modelInput.value = preset.defaultModel;
     var endpointInput = document.getElementById('img-provider-endpoint-input');
-    if (endpointInput && fmt.endpointPath) endpointInput.placeholder = fmt.endpointPath;
+    if (endpointInput && fmt.endpointPath) {
+      // v104: 选预设时端点跟随格式。空值或残留 flat 通用默认时才覆盖，保留用户自定义端点
+      var cur = (endpointInput.value || '').trim();
+      var flatDef = IMAGE_FORMATS.flat ? IMAGE_FORMATS.flat.endpointPath : null;
+      if (!cur || (flatDef && cur === flatDef && fmt.endpointPath !== flatDef)) endpointInput.value = fmt.endpointPath;
+      endpointInput.placeholder = fmt.endpointPath;
+    }
   }
 }
 
