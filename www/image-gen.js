@@ -303,7 +303,10 @@ function normalizeImageProvider(p) {
     defaultModel: p.defaultModel || format.defaultModel || 'gpt-image-2',  // v103: 格式族 defaultModel 优先（minimax→image-01 等）
     requestFormat: format.requestFormat,
     responseFormat: format.responseFormat,
-    features: Object.assign({}, format.features, p.features || {}),
+    // v106: features 一律以格式族定义为准（持久化 p.features 是旧版本派生的过期快照，
+    // 会覆盖格式族最新能力演进，如 minimax supportsReferenceImage=false 旧快照挡图生图）；
+    // features 为纯派生元数据且无用户编辑入口，故只读 format.features。
+    features: Object.assign({}, format.features),
     createdAt: p.createdAt || Date.now()
   };
   // 保留 editsPath（图生图专用端点）；带版本前缀时同步修正
