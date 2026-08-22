@@ -200,14 +200,18 @@ const IMAGE_FORMATS = {
     responseFormat: 'url_or_b64',
     defaultModel: 'image-01',
     // v103: 新增格式族。MiniMax 走 /v1/image_generation，尺寸是 aspect_ratio（非 size），响应为
-    // data.data.image_urls[]（URL 串）或 data.data[]（base64/dataURL 串）。
-    features: { supportsReferenceImage: false, supportsNegativePrompt: false, supportsCustomSize: true, supportsBatch: true, maxBatch: 4, supportsResolution: false, supportsAspectRatio: true },
+    // data.data.image_urls[]（URL 串）或 data.data[]（base64/dataURL 串）。  // v105: 图生图——同一端点加 subject_reference 数组（不入 edits/multipart），有参考图即同链路静默切换。
+    features: { supportsReferenceImage: true, supportsNegativePrompt: false, supportsCustomSize: true, supportsBatch: true, maxBatch: 4, supportsResolution: false, supportsAspectRatio: true },
     // 请求体：{model, prompt, n, aspect_ratio, response_format}；不用 size
     buildBody: function(provider, ctx) {
       var body = { model: ctx.model, prompt: ctx.prompt, n: Math.max(1, Math.min(4, ctx.n || 1)) };
       var ratio = ctx.sizeConfig && ctx.sizeConfig.imageConfig && ctx.sizeConfig.imageConfig.aspectRatio || (ctx.sizeConfig && ctx.sizeConfig.aspectRatio);
       if (ratio && ratio !== 'auto') body.aspect_ratio = ratio;
       body.response_format = 'url';
+      // v105: 参考图 → subject_reference（仅首图作为主体参考，官方当前仅支持 character/人像）
+      if (ctx.refDataUrls && ctx.refDataUrls.length > 0) {
+        body.subject_reference = [{ type: 'character', image_file: ctx.refDataUrls[0] }];
+      }
       return body;
     },
     // 响应 data.data: {image_urls:[str]} | [ {url} ] | [b64 str | dataURL str]
