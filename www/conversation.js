@@ -1,6 +1,6 @@
 // ===== conversation.js : 会话管理模块（v2.0 拆分）=====
 // 模块名：conversation.js
-// 版本：v109（cache-bust）
+// 版本：v110（cache-bust）
 // 迁移日期：2026-07-26
 // 来源：从 app.js 拆分
 // 职责：会话模型、会话列表渲染、消息渲染、分支树（SVG）、分支搜索、长按菜单、冲突对话框
@@ -553,18 +553,21 @@ function showBubbleContextMenu(event, msg) {
   }
 
   // 改名
-  addItem('改名', function() {
+  addItem('更改会话标签名称', function() {
     const newName = prompt('输入新名称:', msg.title || '');
     if (newName !== null && newName.trim()) {
       msg.title = newName.trim();
       save();
       renderMessages();
       refreshBranchTree();
+      showToast('已更改标签在分支总览中显示的名称', 'success');
     }
   });
   // 选色（色板弹窗）
-  addItem('选色', function() {
-    openNodeColorPicker(msg);
+  addItem('更改会话标签颜色', function() {
+    openNodeColorPicker(msg, function() {
+      showToast('已更改标签在分支总览中显示的颜色', 'success');
+    });
   });
   // 编辑（仅 user）
   if (msg.role === 'user') addItem('编辑', function() { enterEditMode(msg.id); });
@@ -599,7 +602,7 @@ function showBubbleContextMenu(event, msg) {
 }
 
 // ===== 节点选色色板（分支总览 + 气泡菜单共用）=====
-function openNodeColorPicker(msg) {
+function openNodeColorPicker(msg, onColorApplied) {
   if (!msg) return;
   closeNodeColorPicker();
   const cur = msg.color || null;
@@ -624,6 +627,7 @@ function openNodeColorPicker(msg) {
         save();
         refreshBranchTree();
         renderMessages();
+        if (typeof onColorApplied === 'function') onColorApplied();
       }
       closeNodeColorPicker();
     });
