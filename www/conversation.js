@@ -1,6 +1,6 @@
 // ===== conversation.js : 会话管理模块（v2.0 拆分）=====
 // 模块名：conversation.js
-// 版本：v83（cache-bust）
+// 版本：v108（cache-bust）
 // 迁移日期：2026-07-26
 // 来源：从 app.js 拆分
 // 职责：会话模型、会话列表渲染、消息渲染、分支树（SVG）、分支搜索、长按菜单、冲突对话框
@@ -122,6 +122,48 @@ function getBranchPath(conv, leafId) {
     current = msg.parentId;
   }
   return path;
+}
+
+// v108：节点跳转"完整链延伸"——根→nodeId 回溯 + nodeId→叶子延伸（后续消息不截断）
+function getBranchPathToLeaf(conv, nodeId) {
+  // 1) 根→nodeId 回溯（路径含 nodeId 本身）
+  const up = [];
+  let cur = nodeId;
+  while (cur) {
+    up.unshift(cur);
+    const m = conv.messageMap[cur];
+    if (!m || !m.parentId) break;
+    cur = m.parentId;
+  }
+  // 2) nodeId→叶子：优先沿用当前 activePath 后续段（保持用户当前分支）
+  let down = [];
+  const ap = conv.activePath || [];
+  const ai = ap.indexOf(nodeId);
+  if (ai >= 0 && ai < ap.length - 1) {
+    const tail = ap.slice(ai + 1);
+    let ok = true, prev = nodeId;
+    for (const id of tail) {
+      const m = conv.messageMap[id];
+      if (!m || m.parentId !== prev) { ok = false; break; }
+      prev = id;
+    }
+    if (ok) down = tail;
+  }
+  // 3) 无可用延续段：沿 children[0] 走到叶子（防环）
+  if (down.length === 0) {
+    const seen = new Set([nodeId]);
+    let c = nodeId;
+    for (;;) {
+      const m = conv.messageMap[c];
+      if (!m || !m.children || m.children.length === 0) break;
+      const next = m.children[0];
+      if (seen.has(next)) break;
+      seen.add(next);
+      down.push(next);
+      c = next;
+    }
+  }
+  return up.concat(down);
 }
 
 // ===== 会话渲染 =====
@@ -820,13 +862,28 @@ function escapeSvg(str) {
 window.svgNodeClick = function(nodeId) {
   const conv = currentConv();
   if (!conv) return;
-  const newPath = getBranchPath(conv, nodeId);
+  const newPath = getBranchPathToLeaf(conv, nodeId);
   conv.activePath = newPath;
   save();
   renderMessages();
   renderBreadcrumb(conv);
   closeBranchDrawer();
+  scrollMessagesTo(nodeId);
 };
+
+// v108：节点跳转后滚动定位到目标节点消息（可视区垂直居中）
+function scrollMessagesTo(msgId) {
+  if (!msgId) return;
+  let el = null;
+  const msgs = messagesEl.querySelectorAll('.message');
+  for (const m of msgs) {
+    if (m.dataset.id === msgId) { el = m; break; }
+  }
+  if (!el) return;
+  const cRect = messagesEl.getBoundingClientRect();
+  const eRect = el.getBoundingClientRect();
+  messagesEl.scrollTop = messagesEl.scrollTop + (eRect.top - cRect.top) - messagesEl.clientHeight / 2 + el.clientHeight / 2;
+}
 
 function applyBranchZoom() {
   const svg = document.querySelector('.branch-svg');
