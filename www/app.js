@@ -908,7 +908,7 @@ function newChat() {
 
 // 流式振感反馈（_initStreamHaptics / triggerHapticFeedback 及五档常量）已迁移到 haptics.js
 // ===== C1: 回到底部/顶部 方向按钮 =====
-// 距底 >200px 显示，<200px 隐藏；图标跟随最近滚动方向：
+// 距底/距顶均 >200px 时才显示（顶部/底部附近均不显示，滑动离开后出现）；图标跟随最近滚动方向：
 // 往上滚(看历史)->向上箭头点击回顶部；往下滚(看新消息)->向下箭头点击回底部
 const _SCROLL_BTN_ICONS = {
   down: '<svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><polyline points="6 9 12 15 18 9"/></svg>',
@@ -948,7 +948,8 @@ function initScrollBottomButton() {
     else if (st > lastScrollTop) setMode('down'); // 往下滚(看新消息) -> 回底部
     lastScrollTop = st;
     const distFromBottom = messagesEl.scrollHeight - st - messagesEl.clientHeight;
-    btn.style.display = (distFromBottom > 200) ? 'flex' : 'none';
+    // 顶部/底部附近都不显示，滑动离开后才出现
+    btn.style.display = (distFromBottom > 200 && st > 200) ? 'flex' : 'none';
   };
   messagesEl.addEventListener('scroll', onScroll, { passive: true });
   // 点击按当前方向平滑滚动
