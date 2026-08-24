@@ -20,7 +20,7 @@ def branchTag = isMain ? "" : branchLast
 def appIdBase = "com.avelec.chatlite"
 def appIdFull = isMain ? appIdBase : appIdBase + "." + variantSuffix
 def appNameFull = isMain ? "chat-lite" : "chat-lite [" + branchTag + "]"
-def versionNameFull = isMain ? "2.0" : "2.0-" + branchTag
+def versionNameFull = isMain ? "2.1" : "2.1-" + branchTag
 
 android {
     namespace "com.avelec.chatlite"
