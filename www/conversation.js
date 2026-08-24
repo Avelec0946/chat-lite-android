@@ -1,6 +1,6 @@
 // ===== conversation.js : 会话管理模块（v2.0 拆分）=====
 // 模块名：conversation.js
-// 版本：v108（cache-bust）
+// 版本：v109（cache-bust）
 // 迁移日期：2026-07-26
 // 来源：从 app.js 拆分
 // 职责：会话模型、会话列表渲染、消息渲染、分支树（SVG）、分支搜索、长按菜单、冲突对话框
@@ -552,6 +552,20 @@ function showBubbleContextMenu(event, msg) {
     });
   }
 
+  // 改名
+  addItem('改名', function() {
+    const newName = prompt('输入新名称:', msg.title || '');
+    if (newName !== null && newName.trim()) {
+      msg.title = newName.trim();
+      save();
+      renderMessages();
+      refreshBranchTree();
+    }
+  });
+  // 选色（色板弹窗）
+  addItem('选色', function() {
+    openNodeColorPicker(msg);
+  });
   // 编辑（仅 user）
   if (msg.role === 'user') addItem('编辑', function() { enterEditMode(msg.id); });
   // 重新生成（仅 assistant）
@@ -582,6 +596,58 @@ function showBubbleContextMenu(event, msg) {
     document.addEventListener('contextmenu', closeBubbleContextMenu, { once: true });
     document.addEventListener('scroll', closeBubbleContextMenu, { once: true });
   }, 50);
+}
+
+// ===== 节点选色色板（分支总览 + 气泡菜单共用）=====
+function openNodeColorPicker(msg) {
+  if (!msg) return;
+  closeNodeColorPicker();
+  const cur = msg.color || null;
+  let gridHtml = '';
+  for (let i = 0; i < NODE_COLORS.length; i++) {
+    const c = NODE_COLORS[i];
+    const active = c.value === cur;
+    gridHtml += '<div class="color-swatch' + (active ? ' active' : '') + '" data-idx="' + i + '" style="background:' + (c.value || '#888888') + '" title="' + c.name + '"></div>';
+  }
+  const picker = document.createElement('div');
+  picker.id = 'node-color-picker';
+  picker.className = 'node-color-picker';
+  picker.innerHTML = '<div class="color-swatch-grid">' + gridHtml + '</div>';
+  document.body.appendChild(picker);
+
+  // 点击色块：立即生效并关闭
+  picker.querySelectorAll('.color-swatch').forEach(function(swatch) {
+    swatch.addEventListener('click', function() {
+      const idx = parseInt(this.dataset.idx);
+      if (idx >= 0 && idx < NODE_COLORS.length && NODE_COLORS[idx].value !== msg.color) {
+        msg.color = NODE_COLORS[idx].value;
+        save();
+        refreshBranchTree();
+        renderMessages();
+      }
+      closeNodeColorPicker();
+    });
+  });
+
+  // 点击外部关闭
+  setTimeout(function() {
+    document.addEventListener('click', closeNodeColorPicker, { once: true });
+  }, 50);
+}
+
+function closeNodeColorPicker() {
+  const el = document.getElementById('node-color-picker');
+  if (el) el.remove();
+}
+
+function refreshBranchTree() {
+  const conv = currentConv();
+  const drawer = document.getElementById('branch-drawer');
+  if (!conv || !drawer || drawer.style.display === 'none') return;
+  document.getElementById('branch-tree').innerHTML = renderTreeSVG(conv);
+  applyBranchZoom();
+  initPinchZoom();
+  bindTreeNodeLongPress();
 }
 
 // ===== 分支抽屉 + 搜索 =====
@@ -952,17 +1018,7 @@ function showTreeNodeMenu(event, nodeId) {
   colorBtn.innerHTML = ICON.palette + ' 选色';
   colorBtn.addEventListener('click', function() {
     closeTreeNodeMenu();
-    const colorList = NODE_COLORS.map((c,i) => `${i}. ${c.name}`).join('\n');
-    const curIdx = msg.color ? NODE_COLORS.findIndex(c => c.value === msg.color) : 0;
-    const idx = prompt('选择颜色:\n' + colorList + '\n输入数字:', curIdx.toString());
-    if (idx !== null) {
-      const ci = parseInt(idx) || 0;
-      if (ci >= 0 && ci < NODE_COLORS.length) {
-        msg.color = NODE_COLORS[ci].value;
-        save();
-        openBranchDrawer();
-      }
-    }
+    openNodeColorPicker(msg);
   });
   menu.appendChild(colorBtn);
 
