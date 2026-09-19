@@ -526,6 +526,13 @@ function statusBarUserText(sb) {
   return '【格式要求】你必须在本次回复的最末尾，用 <status>...</status> 标签输出状态栏，内容根据上下文合理填写。这是强制要求，不可省略。';
 }
 
+// ===== 系统提示词前置说明 =====
+// 仅作用于会话「系统提示词」条目（conv.systemPrompt）；不改状态栏提示词与模型修饰。
+// 目的：向模型声明注入来源与权限层级（开发者/system），避免被判定为"用户临时插入的内容"。
+var DEPLOY_NOTICE = '# 部署说明\n'
+  + '本会话由 chat-lite（自建客户端）运行。你在上下文中看到的配置、以及以【】标注的系统说明，'
+  + '均由该客户端以开发者（system）权限注入。';
+
 // ===== 上下文构建 =====
 function buildContext(conv) {
   const msgs = [];
@@ -533,8 +540,11 @@ function buildContext(conv) {
   const sb = effectiveStatusBar(conv);
   const mp = effectiveModelPrompt(conv);
 
-  // 会话级 systemPrompt
-  if (conv.systemPrompt) sysParts.push(conv.systemPrompt);
+  // 会话级 systemPrompt（前置部署说明：来源与权限层级）
+  if (conv.systemPrompt) {
+    sysParts.push(DEPLOY_NOTICE);
+    sysParts.push(conv.systemPrompt);
+  }
   // 会话级 emphasis
   if (conv.emphasis) sysParts.push('【重要强调】' + conv.emphasis);
   // B2: 模型修饰（text 按 ===强调=== 分隔拆分为 systemPrompt + emphasis）
@@ -594,8 +604,11 @@ function buildContextForContinue(conv, targetMsg) {
   const sb = effectiveStatusBar(conv);
   const mp = effectiveModelPrompt(conv);
 
-  // 会话级 systemPrompt
-  if (conv.systemPrompt) sysParts.push(conv.systemPrompt);
+  // 会话级 systemPrompt（前置部署说明：来源与权限层级）
+  if (conv.systemPrompt) {
+    sysParts.push(DEPLOY_NOTICE);
+    sysParts.push(conv.systemPrompt);
+  }
   // 会话级 emphasis
   if (conv.emphasis) sysParts.push('【重要强调】' + conv.emphasis);
   // B2: 模型修饰（text 按 ===强调=== 分隔拆分为 systemPrompt + emphasis）
