@@ -12,6 +12,7 @@ let CapHttp = null;
 let CapStreamHttp = null;
 let CapHaptics = null;
 let CapRichHaptics = null;
+let CapMediaSaver = null;  // v113: 自写插件——用 MediaStore 把图片存进系统相册
 if (isCapacitor()) {
   try {
     CapFilesystem = Capacitor.Plugins && Capacitor.Plugins.Filesystem;
@@ -20,6 +21,11 @@ if (isCapacitor()) {
     CapStreamHttp = Capacitor.Plugins && Capacitor.Plugins.StreamHttp;
     CapHaptics = Capacitor.Plugins && Capacitor.Plugins.Haptics;
     CapRichHaptics = Capacitor.Plugins && (Capacitor.Plugins.RichHaptics || Capacitor.Plugins['capacitor-rich-haptics']);
+    // v113: 自写插件。Capacitor.Plugins 上若还没有，用 registerPlugin 现场建代理
+    CapMediaSaver = (Capacitor.Plugins && Capacitor.Plugins.MediaSaver) || null;
+    if (!CapMediaSaver && typeof Capacitor.registerPlugin === 'function') {
+      try { CapMediaSaver = Capacitor.registerPlugin('MediaSaver'); } catch (e2) { CapMediaSaver = null; }
+    }
   } catch (e) {
     console.warn('Capacitor plugins init failed:', e);
   }
@@ -163,7 +169,12 @@ function buildFileContent(m) {
 
 // 图片预览与分享（showImagePreview/closeImagePreview/shareImage/deleteImageFromGallery） 已迁移到 image-gen.js
 
-// F1: 保存图片到设备相册（APK 用 Filesystem 写入 Download 目录，浏览器用 a 下载）
+// F1: 保存图片到设备相册
+// v113: APK 模式优先走自写原生插件 MediaSaver（MediaStore 接口）——Android 10+ 无需任何权限，
+//   图片落到 Pictures/chat-lite/ 并自动进入系统相册；插件不可用或失败时回退 Filesystem，
+//   最后才用浏览器下载。
+//   旧路径（EXTERNAL_STORAGE 写 Download）在 Android 10 + targetSdk 34 下必然报
+//   Missing READ/WRITE_EXTERNAL_STORAGE，仅作为兼容兜底保留（不能删）。
 async function saveImageToDevice(id) {
   var img = (settings.images || []).find(function(x) { return x.id === id; });
   if (!img) return;
@@ -171,15 +182,34 @@ async function saveImageToDevice(id) {
     // 先获取 dataUrl（APK 模式从 Filesystem 读）
     var dataUrl = await getImageDataUrl(img);
     if (!dataUrl) { showToast('图片数据不可用', 'warn'); return; }
+    var base64Data = dataUrl.split(',')[1];
+    var mime = (dataUrl.match(/data:(.*?);base64/) || [])[1] || 'image/png';
+    var ext = mime === 'image/jpeg' ? 'jpg' : (mime === 'image/webp' ? 'webp' : 'png');
+    var fileName = 'chatlite_' + Date.now() + '.' + ext;
+
+    // v113 首选：MediaStore（无需权限，直接进系统相册）
+    if (!CapMediaSaver && isCapacitor() && Capacitor.Plugins) {
+      CapMediaSaver = Capacitor.Plugins.MediaSaver || null;  // 兜底：初始化时未取到
+    }
+    if (CapMediaSaver) {
+      try {
+        var saved = await CapMediaSaver.saveImage({
+          base64: base64Data,
+          fileName: fileName,
+          mimeType: mime,
+          album: 'chat-lite'
+        });
+        showToast('已保存到相册' + (saved && saved.path ? '（' + saved.path + '）' : ''), 'success');
+        return;
+      } catch (eMedia) {
+        console.warn('MediaSaver 失败，回退 Filesystem 路径:', eMedia);
+      }
+    }
+
     if (isCapacitor() && CapFilesystem) {
-      // 写入 Download 目录
-      var base64Data = dataUrl.split(',')[1];
-      var mime = (dataUrl.match(/data:(.*?);base64/) || [])[1] || 'image/png';
-      var ext = mime === 'image/jpeg' ? 'jpg' : (mime === 'image/webp' ? 'webp' : 'png');
-      var fileName = 'chatlite_' + Date.now() + '.' + ext;
-      var path = 'Download/' + fileName;
+      // 兜底：写入 Download 目录（需要外部存储权限，Android 11+ 多半会失败）
       await CapFilesystem.writeFile({
-        path: path,
+        path: 'Download/' + fileName,
         data: base64Data,
         directory: 'EXTERNAL_STORAGE',
         recursive: true

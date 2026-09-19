@@ -39,6 +39,9 @@
 
     <uses-permission android:name="android.permission.INTERNET" />
     <uses-permission android:name="android.permission.VIBRATE" />
+    <!-- v113: MediaStore 写入相册在 Android 9 及以下需要此权限；Android 10+ 走分区存储无需它，
+         故用 maxSdkVersion 限制，避免在新系统上申请（也不会影响新版权限模型） -->
+    <uses-permission android:name="android.permission.WRITE_EXTERNAL_STORAGE" android:maxSdkVersion="28" />
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
     <uses-permission android:name="android.permission.WAKE_LOCK" />
 </manifest>

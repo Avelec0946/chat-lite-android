@@ -10,6 +10,9 @@ public class MainActivity extends BridgeActivity {
 
     @Override
     public void onCreate(Bundle savedInstanceState) {
+        // v113: 注册自写插件——通过 MediaStore 把图片存入系统相册
+        // （原 Filesystem EXTERNAL_STORAGE 路径在 Android 10 + targetSdk 34 下必然被拒）
+        registerPlugin(MediaSaverPlugin.class);
         super.onCreate(savedInstanceState);
         // v71: 创建 WakeLock，用于后台期间保持 CPU 活跃
         PowerManager pm = (PowerManager) getSystemService(POWER_SERVICE);
