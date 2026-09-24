@@ -1,6 +1,6 @@
 // ===== haptics.js : 振感反馈模块（v2.0 拆分）=====
 // 模块名：haptics.js
-// 版本：v75（cache-bust）
+// 版本：v75（拆分）→ v115（修复 rich-haptics 永不回退隐患，见 _fallbackHaptic）
 // 迁移日期：2026-07-26
 // 来源：从 app.js 拆分
 // 职责：流式输出振感反馈（五档质感分层）
@@ -41,6 +41,28 @@ const _HAPTIC_LOW_ID = 'streamLow';
 const _HAPTIC_CLICK_ID = 'streamClick';
 const _HAPTIC_THUD_ID = 'streamThud';
 
+// 兜底链路：rich-haptics 不可用、或调用失败时走这里（CapHaptics -> navigator.vibrate）
+function _fallbackHaptic(kind) {
+  try {
+    if (CapHaptics && typeof CapHaptics.impact === 'function') {
+      CapHaptics.impact({ style: (kind === 'thud' || kind === 'click') ? 'MEDIUM' : 'LIGHT' });
+      return;
+    }
+    if (typeof navigator !== 'undefined' && navigator.vibrate) {
+      const ms = (kind === 'thud') ? 18 : (kind === 'click' ? 12 : (kind === 'soft' ? 8 : 5));
+      navigator.vibrate(ms);
+    }
+  } catch (e) {}
+}
+
+// preload 的 Promise 统一接管，避免 unhandled rejection 污染控制台
+function _preloadSafe(opt) {
+  try {
+    const p = CapRichHaptics.preload(opt);
+    if (p && typeof p.catch === 'function') p.catch(function(){});
+  } catch (e) {}
+}
+
 // 懒初始化 rich-haptics 并预加载五档模式（首次流式时触发，async 不阻塞）
 function _initStreamHaptics() {
   if (_richHapticsInitStarted) return;
@@ -50,11 +72,11 @@ function _initStreamHaptics() {
     if (!r.supported || !r.userEnabled) return;
     _richHapticsReady = true;
     _hapticEngineType = r.engine || 'none';
-    CapRichHaptics.preload({ id: _HAPTIC_CHAR_ID,  intensity: 0.18, sharpness: 0.55 });
-    CapRichHaptics.preload({ id: _HAPTIC_SOFT_ID,  intensity: 0.28, sharpness: 0.55 });
-    CapRichHaptics.preload({ id: _HAPTIC_LOW_ID,   intensity: 0.14, sharpness: 0.35 });
-    CapRichHaptics.preload({ id: _HAPTIC_CLICK_ID, intensity: 0.55, sharpness: 0.85 });
-    CapRichHaptics.preload({ id: _HAPTIC_THUD_ID,  intensity: 0.72, sharpness: 0.15 });
+    _preloadSafe({ id: _HAPTIC_CHAR_ID,  intensity: 0.18, sharpness: 0.55 });
+    _preloadSafe({ id: _HAPTIC_SOFT_ID,  intensity: 0.28, sharpness: 0.55 });
+    _preloadSafe({ id: _HAPTIC_LOW_ID,   intensity: 0.14, sharpness: 0.35 });
+    _preloadSafe({ id: _HAPTIC_CLICK_ID, intensity: 0.55, sharpness: 0.85 });
+    _preloadSafe({ id: _HAPTIC_THUD_ID,  intensity: 0.72, sharpness: 0.15 });
   }).catch(function(){});
 }
 
@@ -86,21 +108,33 @@ function triggerHapticFeedback(content) {
   else id = _HAPTIC_CHAR_ID;
   try {
     if (CapRichHaptics && _richHapticsReady) {
-      CapRichHaptics.playPreloaded({ id: id });
+      let p = null;
+      try {
+        p = CapRichHaptics.playPreloaded({ id: id });
+      } catch (eRich) {
+        // 同步抛错：立即摘掉 rich 标记并补一次兜底振动，后续不再重试
+        _richHapticsReady = false;
+        _fallbackHaptic(kind);
+        return;
+      }
+      if (p && typeof p.catch === 'function') {
+        // v115 修复：原实现在此处直接 return 且不接管 Promise，playPreloaded 一旦
+        // reject 就整条链路静默失效；现在失败即摘掉标记并降级到 CapHaptics
+        p.catch(function() {
+          _richHapticsReady = false;
+          _fallbackHaptic(kind);
+        });
+      }
       // 字符主路径每 3 次用 play 覆盖抖动强度（±15%），仅 composition 引擎下生效
       if (kind === 'char' && _hapticCharCount % 3 === 0 && _hapticEngineType === 'composition') {
         const jitter = 0.18 + (Math.random() * 0.06 - 0.03); // 0.15–0.21
-        CapRichHaptics.play({ intensity: jitter, sharpness: 0.55 });
+        try {
+          const p2 = CapRichHaptics.play({ intensity: jitter, sharpness: 0.55 });
+          if (p2 && typeof p2.catch === 'function') p2.catch(function(){});
+        } catch (e2) {}
       }
       return;
     }
-    if (CapHaptics && typeof CapHaptics.impact === 'function') {
-      CapHaptics.impact({ style: (kind === 'thud' || kind === 'click') ? 'MEDIUM' : 'LIGHT' });
-      return;
-    }
-    if (typeof navigator !== 'undefined' && navigator.vibrate) {
-      const ms = (kind === 'thud') ? 18 : (kind === 'click' ? 12 : (kind === 'soft' ? 8 : 5));
-      navigator.vibrate(ms);
-    }
+    _fallbackHaptic(kind);
   } catch(e) {}
 }
