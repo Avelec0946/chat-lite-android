@@ -1,41 +1,63 @@
-// ===== latex.js : LaTeX 渲染模块（v117）=====
+// ===== latex.js : LaTeX 渲染模块（v118）=====
 // 模块名：latex.js
-// 版本：v117（cache-bust）
-// 创建日期：2026-09-25（v116 首版；v117 新增文本样式指令层 + 优雅回退）
-// 职责：三层渲染 ——
-//   Layer 1  数学公式      $…$ / $$…$$ / \(…\) / \[…\]  →  KaTeX
-//   Layer 2  文本样式指令  \scalebox \textcolor \textbf … →  HTML/CSS
-//   Layer 3  代码保护      ``` 围栏与 `code` 内一律不处理
-// 依赖：window.katex（缺失时公式回退原文）、window.marked
-// 加载顺序：在 vendor/katex/katex.min.js 之后、chat.js 之前
+// 版本：v118（cache-bust）
+// 创建日期：2026-09-25
+//    v116 首版（数学公式 + 第三方库本地化）
+//   →v117 自建文本样式指令层（正则解析）
+//   →v118 **推翻 v117 的指令层，改为「命令改写 + KaTeX 原生渲染」**
+// 依赖：window.katex（缺失时回退原文）、window.marked
+// 加载顺序：vendor/katex/katex.min.js 之后、chat.js 之前
 // 不访问 state / settings，无副作用
 //
-// ── 设计要点 ────────────────────────────────────────────────
-// 1. 管线顺序「先提取 → marked 解析 → 回填 HTML」，而非「marked 先行、DOM 后处理」。
-//    原因：公式内的 _ * \ 等字符若先经 marked 会被当作 markdown 语法破坏
-//    （$x_1$ → $x<em>1</em>$），源码无法还原。
-// 2. 代码块采取「分区域跳过」而非「剥离-回填」：``` 与 ` 段落原样留在文本里交给
-//    marked 自行渲染成 <pre><code>，只是不参与扫描。整体剥离会让代码块失去
-//    marked 的转义与包装。
-// 3. 未闭合定界符天然不渲染：所有规则均为「只匹配成对」的惰性正则，流式输出中途的
-//    半截公式不满足成对条件，自动保留为纯文本——无需显式闭合检测。
-// 4. 渲染失败优雅回退（2026-09-25 参照 DeepSeek 网页端实现）：
-//    DeepSeek 用 katex.renderToString(..., {throwOnError:true, strict:false}) 并以
-//    try/catch 兜底，失败时退回纯文本。本模块采用同一策略——不再用 errorColor 标红，
-//    避免整段消息被刺眼的红色错误提示污染。
-// 5. 文本样式指令层（Layer 2）：KaTeX 不认识 \scalebox 等排版命令（会标红），
-//    这些命令本质不属于数学排版，故单独用 HTML/CSS 渲染，与数学管线分离。
+// ── 为什么 v118 要推翻 v117 的做法 ───────────────────────────
+// v117 用一组正则从文本里"抠出" \scalebox / \colorbox 等命令，自己生成
+// <span style=...>。单层命令能跑通，但遇到嵌套就散架：
+//     \{\scalebox{2}{\colorbox{black}{\textcolor{#800000}{\text{...}}}}\}
+// 正则 \{([^{}]*)\} 无法跨越内层花括号，兜底分支 [^\n]* 又把行尾残留的 }}}
+// 一起吞掉 —— 现象就是「黑底块里漏出一截 LaTeX 源码」。
+// 根因：**正则不是解析器**，嵌套是需要状态机才能表达的东西。
+//
+// v118 的正解：**把非标准命令改写成 KaTeX 能理解的等价形式，其余交给 KaTeX**。
+//     \scalebox{2}{X}  →  \htmlStyle{font-size:2em}{X}
+//     \hl{X}           →  \htmlStyle{background-color:rgba(250,204,21,.35)}{X}
+//     \sout{X}         →  \htmlStyle{text-decoration:line-through}{X}
+//     \bgcolor{c}{X}   →  \colorbox{c}{X}      （别名替换）
+//     \ul{X}           →  \underline{X}        （别名替换）
+// 花括号配对用**平衡扫描**（matchBrace）完成，嵌套天然正确；而 KaTeX 本身就是
+// 成熟解析器，边界 / 基线 / 嵌套全归它管 —— 观感因此与 KaTeX 原生一致，
+// 这正是 DeepSeek 网页端那条路。
+//
+// ── 管线 ────────────────────────────────────────────────────
+//   源文本
+//     →① 无害化：用户直写的 \htmlStyle 去反斜杠（防绕过 trust 白名单）
+//     →② 命令改写：非标准命令 → KaTeX 等价形式（平衡花括号扫描）
+//     →③ 行包裹：含样式命令的行补 $…$ 定界符（若该行尚无 $）
+//     →④ 公式提取：$…$ / $$…$$ / \(…\) / \[…\] → NUL 占位符（代码区跳过）
+//     →⑤ marked 解析
+//     →⑥ 回填 KaTeX HTML（trust 白名单）
+//
+// ── 代码块 ──────────────────────────────────────────────────
+// 采取「分区域跳过」而非「剥离-回填」：``` 与 ` 段落原样留在文本里交给 marked
+// 自行渲染成 <pre><code>，只是不参与任何扫描。
+//
+// ── 未闭合定界符 ────────────────────────────────────────────
+// 所有定界符规则均为「只匹配成对」的惰性正则，流式输出中途的半截公式天然
+// 匹配不上、自动保留为纯文本，无需额外的闭合检测。
+//
+// ── 渲染失败 ────────────────────────────────────────────────
+// throwOnError:true + try/catch → 失败退回纯文本（不做 errorColor 标红）。
+// 该策略取自 DeepSeek 网页端实现（见看板 §4.10）。
 
 (function (global) {
   'use strict';
 
   var PH = '\u0000';                                   // 占位符定界（用户内容中不可能出现）
-  var RE_MATH_PH = /\u0000M(\d+)\u0000/g;              // 公式占位符
-  var RE_CMD_PH = /\u0000X(\d+)\u0000/g;               // 指令占位符
+  var RE_MATH_PH = /\u0000M(\d+)\u0000/g;
   var CACHE_LIMIT = 1500;
   var _cache = new Map();
-  var _stats = { hits: 0, misses: 0, errors: 0, fallback: 0, cmdFallback: 0, cmds: 0 };
+  var _stats = { hits: 0, misses: 0, errors: 0, fallback: 0, rewrites: 0, wrappedLines: 0 };
   var MAX_SCALE = 8;                                   // 字号倍率上限（防版面爆炸）
+  var MIN_SCALE = 0.3;
 
   // ── 工具 ──────────────────────────────────────────────────
   function _str(s) { return s == null ? '' : String(s); }
@@ -46,21 +68,169 @@
       .replace(/>/g, '&gt;').replace(/"/g, '&quot;');
   }
 
-  // 转义但保留占位符（占位符是 NUL 序列，不能被转义破坏）
-  function _escKeepPh(s) {
-    var parts = _str(s).split(/\u0000([MX]\d+)\u0000/);
-    var out = '';
-    for (var i = 0; i < parts.length; i++) {
-      out += (i % 2 === 1) ? (PH + parts[i] + PH) : _esc(parts[i]);
-    }
-    return out;
-  }
-
   function _plainHtml(src) {
     return _esc(src).replace(/\n/g, '<br>');
   }
 
-  // ── Layer 1：数学定界符规则（按优先级：块级在前，避免 $$ 被 $ 规则先吃掉）──
+  // ── 平衡花括号扫描：s[i] === '{' 时返回配对 '}' 的下标，失败返回 -1 ──
+  function matchBrace(s, i) {
+    if (s.charAt(i) !== '{') return -1;
+    var depth = 0;
+    for (var k = i; k < s.length; k++) {
+      var ch = s.charAt(k);
+      if (ch === '\\') { k++; continue; }               // 跳过转义（\{ \} \\）
+      if (ch === '{') depth++;
+      else if (ch === '}') { depth--; if (depth === 0) return k; }
+    }
+    return -1;
+  }
+
+  function _skipSpace(s, i, stopAtNewline) {
+    while (i < s.length) {
+      var ch = s.charAt(i);
+      if (ch === '\n' && stopAtNewline) break;
+      if (!/\s/.test(ch)) break;
+      i++;
+    }
+    return i;
+  }
+
+  // ── ② 命令改写 ────────────────────────────────────────────
+  var ALIAS = { bgcolor: 'colorbox', ul: 'underline' };
+  var STYLE_BOX = {
+    hl: 'background-color:rgba(250,204,21,.35)',
+    mark: 'background-color:rgba(250,204,21,.35)',
+    sout: 'text-decoration:line-through',
+    st: 'text-decoration:line-through',
+    del: 'text-decoration:line-through'
+  };
+  // 解析 \cmd{N}{内容} / \cmd{N} 内容 / \cmdN 内容 —— 返回 {value, content, next}
+  function parseArgAndBody(s, i) {
+    var n = s.length;
+    var p = _skipSpace(s, i, true);
+    var arg;
+    if (s.charAt(p) === '{') {
+      var e = matchBrace(s, p);
+      if (e < 0) return null;
+      arg = s.slice(p + 1, e);
+      p = e + 1;
+    } else {
+      var m = /^[0-9]*\.?[0-9]+/.exec(s.slice(p, p + 12));
+      if (!m) return null;
+      arg = m[0];
+      p += m[0].length;
+    }
+    p = _skipSpace(s, p, true);
+    var body;
+    if (s.charAt(p) === '{') {
+      var e2 = matchBrace(s, p);
+      if (e2 < 0) return null;
+      body = s.slice(p + 1, e2);
+      p = e2 + 1;
+    } else {
+      var nl = s.indexOf('\n', p);
+      if (nl < 0) nl = n;
+      body = s.slice(p, nl);
+      p = nl;
+    }
+    if (!body) return null;
+    return { value: arg, content: body, next: p };
+  }
+
+  function rewriteCommands(src) {
+    var out = '';
+    var i = 0;
+    var n = src.length;
+    var count = 0;
+    while (i < n) {
+      var c = src.charAt(i);
+      if (c !== '\\') { out += c; i++; continue; }
+      var m = /^\\([a-zA-Z]+)/.exec(src.slice(i, i + 24));
+      if (!m) { out += c; i++; continue; }              // \{ \\ 等转义原样保留
+      var name = m[1];
+      var after = i + m[0].length;
+
+      // 别名：\bgcolor → \colorbox，\ul → \underline
+      if (ALIAS[name]) {
+        out += '\\' + ALIAS[name];
+        i = after;
+        count++;
+        continue;
+      }
+
+      // 字号缩放：\scalebox / \fontsize / \fs → \htmlStyle{font-size:Nem}
+      if (name === 'scalebox' || name === 'fontsize' || name === 'fs') {
+        var r = parseArgAndBody(src, after);
+        if (r) {
+          var v = parseFloat(r.value);
+          if (isFinite(v) && v > 0) {
+            v = Math.min(MAX_SCALE, Math.max(MIN_SCALE, v));
+            v = Math.round(v * 1000) / 1000;
+            out += '\\htmlStyle{font-size:' + v + 'em}{' + r.content + '}';
+            i = r.next;
+            count++;
+            continue;
+          }
+        }
+      }
+
+      // 高亮 / 删除线：\hl{X} \sout{X} → \htmlStyle{...}{X}
+      if (STYLE_BOX[name]) {
+        var p2 = _skipSpace(src, after, true);
+        if (src.charAt(p2) === '{') {
+          var e3 = matchBrace(src, p2);
+          if (e3 > 0) {
+            out += '\\htmlStyle{' + STYLE_BOX[name] + '}{' + src.slice(p2 + 1, e3) + '}';
+            i = e3 + 1;
+            count++;
+            continue;
+          }
+        }
+      }
+
+      out += '\\' + name;
+      i = after;
+    }
+    if (count) _stats.rewrites += count;
+    return out;
+  }
+
+  // ── ① 无害化：用户直写的 \htmlStyle 等去反斜杠 ────────────
+  // 我们自己生成的 \htmlStyle 在下一步才插入，故此处的替换是安全的。
+  function neutralize(src) {
+    return src
+      .replace(/\\htmlStyle(?![a-zA-Z])/g, 'htmlStyle')
+      .replace(/\\htmlClass(?![a-zA-Z])/g, 'htmlClass')
+      .replace(/\\htmlId(?![a-zA-Z])/g, 'htmlId')
+      .replace(/\\htmlData(?![a-zA-Z])/g, 'htmlData');
+  }
+
+  // ── ③ 行包裹：含样式命令的行补 $…$（若该行尚无 $）────────
+  // 检测模式须同时覆盖「原始命令名」与「改写产物」——因为 rewriteCommands 先于
+  // wrapStyleLines 执行，此时行内的 \scalebox 已变成 \htmlStyle。
+  // （用户直写的 \htmlStyle 已被 neutralize 去掉反斜杠，不会误触。）
+  var STYLE_CMD_LINE = /\\(?:scalebox|fontsize|fs|colorbox|bgcolor|textcolor|hl|sout|st|del|ul|underline|htmlStyle)(?![a-zA-Z])/;
+  // 整行被 \{ … \} 整体包裹时剥掉外壳：该写法里 \{ \} 只是容器，而它们位于
+  // \colorbox 之外、不会被黑底遮住，会露出两个突兀的括号（DeepSeek 网页端同样不显示）
+  var RE_OUTER_BRACES = /^(\s*)\\\{([\s\S]*)\\\}(\s*)$/;
+
+  function wrapStyleLines(seg) {
+    if (!STYLE_CMD_LINE.test(seg)) return seg;
+    var lines = seg.split('\n');
+    for (var i = 0; i < lines.length; i++) {
+      var ln = lines[i];
+      if (!ln || ln.indexOf('$') >= 0) continue;        // 空行 / 已有定界符 → 交给公式规则
+      if (!STYLE_CMD_LINE.test(ln)) continue;
+      if (!ln.trim()) continue;
+      var m = RE_OUTER_BRACES.exec(ln);
+      if (m) ln = m[1] + m[2] + m[3];                   // 剥掉外层 \{ \}
+      lines[i] = '$' + ln + '$';
+      _stats.wrappedLines++;
+    }
+    return lines.join('\n');
+  }
+
+  // ── ④ 数学定界符规则（块级在前，避免 $$ 被 $ 规则先吃掉）──
   var RULES = null;
   function buildRules() {
     var rules = [
@@ -68,12 +238,10 @@
       { re: /\\\[([\s\S]+?)\\\]/g, display: true, name: 'bracket-block' },
       { re: /\\\(([\s\S]+?)\\\)/g, display: false, name: 'paren-inline' }
     ];
-    // 行内 $...$：左 $ 后非空白、右 $ 前非空白且右 $ 后非数字（防「$5 到 $10」误判）。
-    // 用 lookbehind，需检测引擎支持；旧引擎下静默放弃该规则，其余三条仍可用。
     var dollar = null;
     try {
       dollar = new RegExp('(?<!\\\\)\\$(?!\\s)((?:\\\\\\$|[^$\\n])+?)(?<!\\s)\\$(?!\\d)', 'g');
-      new RegExp('(?<!x)y').test('zy');               // 二次确认 lookbehind 真的被引擎接受
+      new RegExp('(?<!x)y').test('zy');               // 确认 lookbehind 被引擎接受
     } catch (e) {
       dollar = null;
       _stats.fallback++;
@@ -83,126 +251,9 @@
   }
   function rules() { if (!RULES) RULES = buildRules(); return RULES; }
 
-  // ── Layer 3：代码保护段（``` 围栏、~~~ 围栏、行内 `code`）──
+  // ── 代码保护段（``` 围栏、~~~ 围栏、行内 `code`）──────────
   var RE_CODE = /```[\s\S]*?```|~~~[\s\S]*?~~~|`[^`\n]*`/g;
 
-  // ── Layer 2：文本样式指令 ─────────────────────────────────
-  // 指令嗅探（不带 g，供 test() 使用）：整篇快路径判断 + 公式内指令检测
-  var TEXT_CMD_SNIFF = /\\(?:scalebox|fontsize|fs|textcolor|colorbox|bgcolor|color|hl|textbf|bf|textit|emph|it|underline|ul|sout|st|del|tiny|scriptsize|footnotesize|small|normalsize|large|Large|LARGE|huge|Huge|begin\s*\{\s*(?:center|right))(?![a-zA-Z])/;
-
-  // 预设字号命令 → em 倍率（沿用 LaTeX 的视觉比例）
-  var SIZE_CMDS = {
-    tiny: 0.5, scriptsize: 0.7, footnotesize: 0.8, small: 0.9, normalsize: 1,
-    large: 1.2, Large: 1.44, LARGE: 1.73, huge: 2.07, Huge: 2.49
-  };
-
-  // 通用形式：命令 + 参数(可选花括号) + 内容(花括号 或 到行尾)
-  //   捕获组从后往前取：最后一个非 undefined = 内容，再前一个 = 参数
-  var CMD_DEFS = [
-    { kind: 'scale', re: /\\scalebox\s*(?:\{\s*([0-9]*\.?[0-9]+)\s*\}|([0-9]*\.?[0-9]+))\s*(?:\{([^{}]*)\}|([^\n]*))/g },
-    { kind: 'scale', re: /\\fontsize\s*(?:\{\s*([0-9]*\.?[0-9]+)\s*\}|([0-9]*\.?[0-9]+))\s*(?:\{([^{}]*)\}|([^\n]*))/g },
-    { kind: 'scale', re: /\\fs\s*\{?([0-9]*\.?[0-9]+)\}?\s*(?:\{([^{}]*)\}|([^\n]*))/g },
-    { kind: 'color', re: /\\textcolor\s*\{([^{}]+)\}\s*(?:\{([^{}]*)\}|([^\n]*))/g },
-    { kind: 'color', re: /\\color\s*\{([^{}]+)\}\s*(?:\{([^{}]*)\}|([^\n]*))/g },
-    { kind: 'bg', re: /\\colorbox\s*\{([^{}]+)\}\s*(?:\{([^{}]*)\}|([^\n]*))/g },
-    { kind: 'bg', re: /\\bgcolor\s*\{([^{}]+)\}\s*(?:\{([^{}]*)\}|([^\n]*))/g },
-    { kind: 'hl', re: /\\hl\s*\{([^{}]*)\}/g },
-    { kind: 'bold', re: /\\textbf\s*\{([^{}]*)\}/g },
-    { kind: 'bold', re: /\\bf\s*\{([^{}]*)\}/g },
-    { kind: 'italic', re: /\\textit\s*\{([^{}]*)\}/g },
-    { kind: 'italic', re: /\\emph\s*\{([^{}]*)\}/g },
-    { kind: 'italic', re: /\\it\s*\{([^{}]*)\}/g },
-    { kind: 'underline', re: /\\underline\s*\{([^{}]*)\}/g },
-    { kind: 'underline', re: /\\ul\s*\{([^{}]*)\}/g },
-    { kind: 'strike', re: /\\sout\s*\{([^{}]*)\}/g },
-    { kind: 'strike', re: /\\st\s*\{([^{}]*)\}/g },
-    { kind: 'strike', re: /\\del\s*\{([^{}]*)\}/g },
-    // 环境：\begin{center} … \end{center}（可跨行）
-    { kind: 'center', re: /\\begin\s*\{\s*center\s*\}([\s\S]*?)\\end\s*\{\s*center\s*\}/g },
-    { kind: 'right', re: /\\begin\s*\{\s*right\s*\}([\s\S]*?)\\end\s*\{\s*right\s*\}/g },
-    // 预设字号命令：作用于本行剩余内容
-    { kind: 'sizeCmd', re: /\\(tiny|scriptsize|footnotesize|small|normalsize|large|Large|LARGE|huge|Huge)(?![a-zA-Z])\s*([^\n]*)/g }
-  ];
-
-  // 颜色白名单（防 style 注入）：颜色名 / hex / rgb(a) / hsl(a)，再补常见 LaTeX 别名
-  var COLOR_ALIAS = {
-    red: 'red', blue: 'blue', green: 'green', yellow: 'yellow', orange: 'orange',
-    purple: 'purple', pink: 'pink', gray: 'gray', grey: 'gray', black: 'black',
-    white: 'white', cyan: 'cyan', magenta: 'magenta', brown: 'brown', lime: 'lime',
-    teal: 'teal', navy: 'navy', olive: 'olive', maroon: 'maroon', silver: 'silver',
-    gold: 'gold', violet: 'violet', indigo: 'indigo', crimson: 'crimson',
-    darkred: '#8b0000', darkblue: '#00008b', darkgreen: '#006400',
-    lightgray: '#d3d3d3', lightgrey: '#d3d3d3', lightblue: '#add8e6',
-    lightgreen: '#90ee90', darkorange: '#ff8c00', steelblue: '#4682b4'
-  };
-  function cssColor(raw) {
-    var s = _str(raw).trim();
-    if (!s) return 'currentColor';
-    if (/^[a-zA-Z]{3,20}$/.test(s)) return COLOR_ALIAS[s.toLowerCase()] || 'currentColor';
-    if (/^#[0-9a-fA-F]{3,8}$/.test(s)) return s;
-    if (/^rgba?\(\s*[0-9.,%\s]+\)$/.test(s)) return s;
-    if (/^hsla?\(\s*[0-9.,%\s]+\)$/.test(s)) return s;
-    return 'currentColor';
-  }
-
-  // 指令 → HTML
-  function cmdToHtml(item) {
-    if (!item) return '';
-    var inner = _escKeepPh(item.inner || '');
-    switch (item.kind) {
-      case 'scale': {
-        var n = parseFloat(item.arg);
-        if (!isFinite(n) || n <= 0) return inner;
-        if (n < 0.3) n = 0.3;
-        if (n > MAX_SCALE) n = MAX_SCALE;
-        return '<span class="clx-scale" style="font-size:' + (Math.round(n * 1000) / 1000) + 'em">' + inner + '</span>';
-      }
-      case 'sizeCmd': {
-        var m = SIZE_CMDS[item.arg] || 1;
-        return '<span class="clx-scale" style="font-size:' + m + 'em">' + inner + '</span>';
-      }
-      case 'color':
-        return '<span class="clx-color" style="color:' + cssColor(item.arg) + '">' + inner + '</span>';
-      case 'bg':
-        return '<span class="clx-bg" style="background-color:' + cssColor(item.arg) + '">' + inner + '</span>';
-      case 'hl':
-        return '<mark class="clx-mark">' + inner + '</mark>';
-      case 'bold': return '<strong class="clx-bold">' + inner + '</strong>';
-      case 'italic': return '<em class="clx-italic">' + inner + '</em>';
-      case 'underline': return '<u class="clx-underline">' + inner + '</u>';
-      case 'strike': return '<del class="clx-strike">' + inner + '</del>';
-      case 'center': return '<div class="clx-block clx-center">' + inner + '</div>';
-      case 'right': return '<div class="clx-block clx-right">' + inner + '</div>';
-    }
-    return inner;
-  }
-
-  // 在给定文本段上应用全部指令（inner 递归处理，支持指令嵌套）
-  function applyCommands(seg, cmds, depth) {
-    if (!TEXT_CMD_SNIFF.test(seg)) return seg;
-    if (depth > 4) return seg;                          // 递归深度保护
-    for (var i = 0; i < CMD_DEFS.length; i++) {
-      var def = CMD_DEFS[i];
-      def.re.lastIndex = 0;
-      seg = seg.replace(def.re, function () {
-        var args = Array.prototype.slice.call(arguments);
-        var groups = args.slice(1, args.length - 2);    // 去掉 match / offset / string
-        var inner = '', arg = '';
-        for (var k = groups.length - 1; k >= 0; k--) {
-          if (groups[k] === undefined) continue;
-          if (!inner) { inner = groups[k]; }
-          else { arg = groups[k]; break; }
-        }
-        inner = applyCommands(inner, cmds, depth + 1);  // 子指令递归
-        cmds.push({ kind: def.kind, arg: arg, inner: inner });
-        _stats.cmds++;
-        return PH + 'X' + (cmds.length - 1) + PH;
-      });
-    }
-    return seg;
-  }
-
-  // ── 单段文本：先公式、后指令 ──────────────────────────────
   function _applyMathRules(seg, math) {
     if (!seg) return seg;
     if (seg.indexOf('$') < 0 && seg.indexOf('\\(') < 0 && seg.indexOf('\\[') < 0) return seg;
@@ -212,12 +263,7 @@
       rule.re.lastIndex = 0;
       seg = seg.replace(rule.re, function (m, g1) {
         var tex = (g1 || '').trim();
-        if (!tex) return m;                             // 空公式（如 $$ $$）原样保留
-        // 公式里含文本样式指令（KaTeX 不认）→ 剥掉定界符交回文本流，由指令层渲染
-        if (TEXT_CMD_SNIFF.test(tex)) {
-          _stats.cmdFallback++;
-          return g1;
-        }
+        if (!tex) return m;                             // 空公式（$$ $$）原样保留
         math.push({ tex: tex, display: rule.display, raw: m });
         return PH + 'M' + (math.length - 1) + PH;
       });
@@ -226,14 +272,17 @@
   }
 
   function _processSeg(seg, ctx) {
+    if (!seg) return seg;
+    seg = neutralize(seg);
+    seg = rewriteCommands(seg);
+    seg = wrapStyleLines(seg);
     seg = _applyMathRules(seg, ctx.math);
-    seg = applyCommands(seg, ctx.cmds, 0);
     return seg;
   }
 
   // ── 提取：按代码段切分，只在非代码区处理 ──────────────────
   function extractLatex(src) {
-    var ctx = { text: '', math: [], cmds: [] };
+    var ctx = { text: '', math: [] };
     var s = _str(src);
     var out = '';
     var last = 0;
@@ -241,7 +290,7 @@
     RE_CODE.lastIndex = 0;
     while ((m = RE_CODE.exec(s)) !== null) {
       out += _processSeg(s.slice(last, m.index), ctx);
-      out += m[0];                                      // 代码段原样保留，交 marked 处理
+      out += m[0];                                      // 代码段原样保留
       last = m.index + m[0].length;
     }
     out += _processSeg(s.slice(last), ctx);
@@ -249,12 +298,24 @@
     return ctx;
   }
 
-  // ── 公式 → KaTeX HTML（带缓存）───────────────────────────
+  // ── ⑥ KaTeX 渲染（带缓存）────────────────────────────────
+  // trust 白名单：\htmlStyle 只服务我们自己生成的样式串（原文里的已被无害化）；
+  // \href/\url 仅放行 http(s) 与相对路径，杜绝 javascript: 之类。
+  function trustFn(ctx) {
+    var cmd = ctx && ctx.command;
+    if (cmd === '\\htmlStyle') return true;
+    if (cmd === '\\href' || cmd === '\\url') {
+      var proto = ctx.protocol;
+      return proto === 'http' || proto === 'https' || proto === '_relative' || proto === '_ftp';
+    }
+    return false;
+  }
+
   function mathToHtml(item) {
     if (!item) return '';
     var kx = global.katex;
     if (!kx || typeof kx.renderToString !== 'function') {
-      return _esc(item.raw);                            // KaTeX 缺失：回填原文（转义）
+      return _esc(item.raw);
     }
     var key = (item.display ? 'D' : 'I') + '\u0001' + item.tex;
     var hit = _cache.get(key);
@@ -264,56 +325,38 @@
     try {
       html = kx.renderToString(item.tex, {
         displayMode: !!item.display,
-        // throwOnError:true + catch 兜底（取自 DeepSeek 网页端的做法）：
-        // 失败时退回纯文本，而不是用 errorColor 把整段标红
-        throwOnError: true,
-        strict: false,                                  // 宽容模式：中文、非标准命令不报错
-        trust: false,                                   // 禁用 \href 等，防注入
-        output: 'html'                                  // 省掉 MathML 副本，移动端 DOM 体积减半
+        throwOnError: true,                             // 失败即回退纯文本，不做标红
+        strict: false,                                  // 宽容：中文、非标准写法不报错
+        trust: trustFn,                                 // 白名单式放行
+        output: 'html'                                  // 省掉 MathML 副本，移动端 DOM 减半
       });
     } catch (e) {
       _stats.errors++;
       html = '<span class="clx-tex-raw" title="此处 LaTeX 未能解析，已按原文显示">' + _esc(item.raw) + '</span>';
     }
-    if (_cache.size >= CACHE_LIMIT) _cache.clear();     // 简易淘汰：整体清空
+    if (_cache.size >= CACHE_LIMIT) _cache.clear();
     _cache.set(key, html);
     return html;
   }
 
-  // ── 回填：先指令（其 HTML 内可能含公式占位符），再公式 ────
   function restoreLatex(html, ctx) {
-    if (!ctx) return html;
-    if (ctx.cmds && ctx.cmds.length) {
-      // 指令可嵌套（外层指令的 HTML 里仍含内层占位符），故循环回填至稳定
-      var prev = null;
-      var guard = 0;
-      while (html !== prev && guard++ < 8) {
-        prev = html;
-        html = html.replace(RE_CMD_PH, function (m, i) {
-          var it = ctx.cmds[+i];
-          return it ? cmdToHtml(it) : m;
-        });
-      }
-    }
-    if (ctx.math && ctx.math.length) {
-      html = html.replace(RE_MATH_PH, function (m, i) {
-        var it = ctx.math[+i];
-        return it ? mathToHtml(it) : m;
-      });
-    }
-    return html;
+    if (!ctx || !ctx.math || !ctx.math.length) return html;
+    return html.replace(RE_MATH_PH, function (m, i) {
+      var it = ctx.math[+i];
+      return it ? mathToHtml(it) : m;
+    });
   }
 
-  // ── 对外主入口：文本 → 含公式与样式指令的 HTML ────────────
+  // ── 对外主入口 ────────────────────────────────────────────
   function renderMarkdownWithLatex(src) {
     var s = _str(src);
     if (!s) return '';
     if (typeof marked === 'undefined' || !marked || typeof marked.parse !== 'function') {
-      return _plainHtml(s);                             // marked 缺失：降级为纯文本
+      return _plainHtml(s);
     }
-    // 快路径：既无公式符号也无样式指令 → 直接走 marked，零额外开销
+    // 快路径：无公式符号、无样式命令、无潜在 htmlStyle 绕过 → 直接走 marked
     var hasMath = s.indexOf('$') >= 0 || s.indexOf('\\(') >= 0 || s.indexOf('\\[') >= 0;
-    if (!hasMath && !TEXT_CMD_SNIFF.test(s)) {
+    if (!hasMath && !STYLE_CMD_LINE.test(s) && s.indexOf('\\html') < 0) {
       try {
         return marked.parse(s, { breaks: true, gfm: true });
       } catch (e) {
@@ -332,14 +375,15 @@
 
   // ── 导出 ──────────────────────────────────────────────────
   global.renderMarkdownWithLatex = renderMarkdownWithLatex;
-  global.latexExtract = extractLatex;                   // 单测 / 调试
+  global.latexExtract = extractLatex;
   global.latexRestore = restoreLatex;
-  global.latexCmdToHtml = cmdToHtml;
+  global.latexRewrite = rewriteCommands;                // 单测 / 调试
+  global.latexMatchBrace = matchBrace;
   global.latexStats = function () {
     return {
       cacheSize: _cache.size, hits: _stats.hits, misses: _stats.misses,
       errors: _stats.errors, fallback: _stats.fallback,
-      cmdFallback: _stats.cmdFallback, cmds: _stats.cmds,
+      rewrites: _stats.rewrites, wrappedLines: _stats.wrappedLines,
       hasKatex: !!(global.katex && global.katex.renderToString),
       rules: (RULES || buildRules()).map(function (r) { return r.name; })
     };
@@ -351,7 +395,8 @@
       renderMarkdownWithLatex: renderMarkdownWithLatex,
       extractLatex: extractLatex,
       restoreLatex: restoreLatex,
-      cmdToHtml: cmdToHtml
+      rewriteCommands: rewriteCommands,
+      matchBrace: matchBrace
     };
   }
 })(typeof window !== 'undefined' ? window : globalThis);
