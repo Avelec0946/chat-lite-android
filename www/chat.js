@@ -102,14 +102,47 @@ function appendChildPath(conv, fromId) {
   appendChildPath(conv, nextId);
 }
 
+// ===== 渲染范围策略（v117）=====
+// 助手正文：完整渲染（Markdown + LaTeX 公式 + 文本样式指令）
+// 思维链  ：同样完整渲染
+// 用户消息：默认不渲染公式与样式指令 —— 用户输入的是提示词，里面常出现
+//          \scalebox 这类命令字面量，渲染出来反而看不出原文；
+//          可在设置「常用偏好」中开启。Markdown 仍照常渲染（保持既有行为）。
+function renderBody(msg) {
+  var text = (msg && msg.content) || '';
+  if (msg && msg.role === 'user' && !renderUserLatexEnabled()) {
+    try {
+      if (typeof marked !== 'undefined' && marked && typeof marked.parse === 'function') {
+        return marked.parse(text, { breaks: true, gfm: true });
+      }
+    } catch (e) { /* 落到最下面的纯文本兜底 */ }
+    return escapeHtml(text).replace(/\n/g, '<br>');
+  }
+  return renderMarkdownWithLatex(text);
+}
+
+function renderReasoning(text) {
+  if (!text) return '';
+  return renderMarkdownWithLatex(text);
+}
+
+function renderUserLatexEnabled() {
+  try {
+    // settings 由 app.js 以 const 声明；此处为运行时访问，不在加载期触碰（§3.2 第 7 条）
+    return !!(typeof settings !== 'undefined' && settings && settings.renderUserLatex);
+  } catch (e) {
+    return false;                                   // TDZ 等异常一律按"不渲染"处理
+  }
+}
+
 function renderContent(msg) {
   let html = '';
 
-  // Reasoning content (collapsible, if exists)
+  // 思维链（可折叠）：走与正文相同的完整渲染管线（Markdown + LaTeX + 样式指令）
   if (msg.reasoningContent) {
     html += `<details class="reasoning-details">
       <summary class="reasoning-summary">思考过程</summary>
-      <div class="reasoning-content">${escapeHtml(msg.reasoningContent)}</div>
+      <div class="reasoning-content">${renderReasoning(msg.reasoningContent)}</div>
     </details>`;
   }
 
@@ -122,9 +155,8 @@ function renderContent(msg) {
 
   if (msg.isFileOnly) return html;
 
-  // Markdown content（含 LaTeX：走 latex.js，无公式时与 marked.parse 逐字节一致）
-  const rendered = renderMarkdownWithLatex(msg.content || '');
-  html += rendered;
+  // 正文：按渲染范围策略选管线（助手完整渲染；用户消息默认不渲染公式/指令）
+  html += renderBody(msg);
 
   // Status bar: extract <status>...</status> and render as styled block
   // B3: 先把代码块替换成占位符，避免代码块内的 <status> 示例被误提取
@@ -445,7 +477,7 @@ function updateMessageContent(msgId, content, reasoning) {
       el.insertBefore(reasoningEl, el.firstChild);
     }
     const rContent = reasoningEl.querySelector('.rendered-reasoning');
-    if (rContent) rContent.textContent = reasoning;
+    if (rContent) rContent.innerHTML = renderMarkdownWithLatex(reasoning);
   } else if (reasoningEl) {
     reasoningEl.remove();
   }

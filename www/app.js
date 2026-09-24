@@ -497,6 +497,9 @@ async function init() {
   // C3: 振感开关回填（默认开；老用户 settings 无此字段时按默认开处理）
   const hapticCheck = document.getElementById('haptic-feedback-check');
   if (hapticCheck) hapticCheck.checked = (settings.hapticFeedback !== false);
+  // v117: 用户消息公式渲染开关（默认关——用户提示词里的 \命令 按原文显示）
+  const userLatexCheck = document.getElementById('render-user-latex-check');
+  if (userLatexCheck) userLatexCheck.checked = (settings.renderUserLatex === true);
   applyDisplaySettings();
 
   // Thinking toggle auto-saves immediately (会话级)
@@ -1367,6 +1370,8 @@ function fillSettingsForm() {
   if (smSelect) smSelect.value = settings.nativeStreamingMode || 'auto';
   var hfCheck = document.getElementById('haptic-feedback-check');
   if (hfCheck) hfCheck.checked = settings.hapticFeedback !== false;
+  var ulCheck = document.getElementById('render-user-latex-check');
+  if (ulCheck) ulCheck.checked = settings.renderUserLatex === true;
   var fsSelect = document.getElementById('font-size-select');
   var lsSelect = document.getElementById('line-spacing-select');
   if (fsSelect) fsSelect.value = settings.fontSize || '15';
@@ -1434,6 +1439,9 @@ function saveSettingsHandler() {
   if (streamingModeSelect) settings.nativeStreamingMode = streamingModeSelect.value;
   const hapticCheck = document.getElementById('haptic-feedback-check');
   if (hapticCheck) settings.hapticFeedback = hapticCheck.checked;
+  // v117: 用户消息公式渲染开关
+  const userLatexCheck = document.getElementById('render-user-latex-check');
+  if (userLatexCheck) settings.renderUserLatex = userLatexCheck.checked;
   const fsSelect = document.getElementById('font-size-select');
   const lsSelect = document.getElementById('line-spacing-select');
   if (fsSelect) settings.fontSize = fsSelect.value;

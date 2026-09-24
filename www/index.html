@@ -7,7 +7,7 @@
 <title>chat-lite</title>
 <link rel="stylesheet" href="vendor/highlight/github-dark.min.css?v=116">
 <link rel="stylesheet" href="vendor/katex/katex.min.css?v=116">
-<link rel="stylesheet" href="style.css?v=116">
+<link rel="stylesheet" href="style.css?v=117">
   <meta name="theme-color" content="#7c3aed">
   <link rel="manifest" href="manifest.json">
 </head>
@@ -334,6 +334,16 @@
           </label>
           <span class="setting-hint capacitor-only">流式输出时振动反馈（默认开）</span>
           <div class="setting-divider"></div>
+          <span class="setting-section-title">渲染</span>
+          <label class="setting-row">
+            <span>渲染用户消息中的公式</span>
+            <label class="toggle-switch">
+              <input type="checkbox" id="render-user-latex-check">
+              <span class="toggle-slider"></span>
+            </label>
+          </label>
+          <span class="setting-hint">默认关闭：用户消息里的 \命令 与 $公式$ 按原文显示，便于核对提示词。开启后与助手消息同管线渲染。思维链与助手正文始终渲染；代码块内的内容一律不渲染。</span>
+          <div class="setting-divider"></div>
           <span class="setting-section-title">显示</span>
           <label class="setting-row">
             <span>字体大小</span>
@@ -550,15 +560,15 @@
 <script src="vendor/marked/marked.min.js?v=116"></script>
 <script src="vendor/katex/katex.min.js?v=116"></script>
 <!-- LaTeX 渲染层：须在 katex.min.js 之后、chat.js 之前加载 -->
-<script src="latex.js?v=116"></script>
+<script src="latex.js?v=117"></script>
 <script src="db.js?v=102"></script>
 <script src="haptics.js?v=115"></script>
 <script src="providers.js?v=102"></script>
 <script src="image-gen.js?v=107"></script>
 <script src="conversation.js?v=112"></script>
-<script src="chat.js?v=116"></script>
+<script src="chat.js?v=117"></script>
 <script src="io.js?v=102"></script>
 <script src="gesture-helpers.js?v=102"></script>
-<script src="app.js?v=115"></script>
+<script src="app.js?v=117"></script>
 </body>
 </html>
