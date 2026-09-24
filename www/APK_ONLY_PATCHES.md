@@ -1001,3 +1001,46 @@ image: <reference.png Blob>
 
 **验证**：node --check 通过；CDP 确认 v89 运行时 `importAllData`/`importAllDataStreamed` 函数体均含 `saveProviders()` 调用。APK 已装机，待用户重新导入备份验证 key 持久化。
 
+
+### 29. 保存到相册改走 MediaStore（自写原生插件 MediaSaver，cache-bust 仅 app.js v112 → v115，2026-09-24 摘回主干）
+
+**背景**：用户反馈华为平板 M6（`SCM-AL09` / Android 10 / API 29 / EMUI 12 底层鸿蒙 2.x，应用 targetSdk 34）上「生图无法保存」。
+
+**根因（CDP 实测取证）**：`saveImageToDevice` 用 Capacitor Filesystem 的 `directory:'EXTERNAL_STORAGE'` 直接写 `/sdcard/Download/`，publicStorage 权限检查必然失败：
+
+```json
+"fsCheckPermissions": { "publicStorage": "denied" },
+"write_EXTERNAL_STORAGE": "ERR Missing the following permissions in AndroidManifest.xml:
+    android.permission.READ_EXTERNAL_STORAGE
+    android.permission.WRITE_EXTERNAL_STORAGE"
+```
+
+旁证：`/sdcard/Download/` 下无任何 chatlite 文件、`/sdcard/Android/data/<pkg>/` 整个不存在；而图库内部存储 `files/chatlite_images/` 里 5 张 PNG（2.4–3.4MB）完整 → **生图本身没问题，坏的只有"保存到相册"这一步**。
+
+**为什么"补权限"不是正解**：targetSdk=34 时，Android 11+ 写公共目录需 `MANAGE_EXTERNAL_STORAGE`（"所有文件访问"，要用户去系统设置手动开启，华为管控更严）；`requestLegacyExternalStorage` 又只对 Android 10 设备有效，覆盖面有限。
+
+**方案**：新增自写 Capacitor 插件，走 **MediaStore**（分区存储时代写相册的正道）。
+
+| 文件 | 改动 |
+|---|---|
+| `android/app/src/main/java/com/avelec/chatlite/MediaSaverPlugin.java` | **新增**。`@CapacitorPlugin(name="MediaSaver")`，方法 `saveImage({base64,fileName,mimeType,album})`：`ContentResolver.insert(MediaStore.Images.Media.EXTERNAL_CONTENT_URI)` + `RELATIVE_PATH=Pictures/chat-lite` + `IS_PENDING` 两段式写入（保证原子性），失败时 delete 掉半成品条目。Android ≤9 走 WRITE_EXTERNAL_STORAGE 权限申请 |
+| `MainActivity.java` | `onCreate` 中 `super.onCreate()` **之前**调用 `registerPlugin(MediaSaverPlugin.class)` |
+| `AndroidManifest.xml` | 新增 `<uses-permission android:name="android.permission.WRITE_EXTERNAL_STORAGE" android:maxSdkVersion="28" />`（仅老系统生效，不影响新版权限模型） |
+| `app.js`（插件初始化区） | 新增 `CapMediaSaver`：优先取 `Capacitor.Plugins.MediaSaver`，取不到则用 `Capacitor.registerPlugin('MediaSaver')` 现场建代理 |
+| `app.js`（`saveImageToDevice`） | 改为三级降级：**MediaSaver（首选，进系统相册）→ Filesystem 写 Download（兜底）→ `<a download>`（浏览器）** |
+| `index.html` | cache-bust **只升 app.js：v112 → v115**（其余模块一律不动，原因见下方「cache-bust 教训」） |
+
+**关键点**：
+1. **Android 10+ 往 MediaStore 写自己创建的媒体，不需要任何权限** —— 这是选它而不是补权限的根本理由
+2. **原生注册不等于 JS 可用**：Capacitor 的原生插件必须同时在 JS 侧 `registerPlugin(name)` 建代理，才能通过 `Capacitor.Plugins.X` 调用
+
+**⚠️ 摘回历史（2026-09-24）**：本补丁最初随 commit `53f18eb` 落地，随后连同 2026-09 期间其它改动一起被整体回退（原提交保留在 `backup/v113-mediasaver` tag），确认与振动问题无关后，于当日**单独摘回主干**。
+
+**cache-bust 教训（重要）**：`53f18eb` 当时把 `index.html` 里**全部 9 个模块**的 cache-bust 一次性统一升到 v113，等于顺手强制 WebView 重新下载 `haptics.js`。而该文件自 2026-08-02 起内容从未变过、cache-bust 一直停在 v102（长期走用户端缓存），重新拉取后暴露了它既有的 `_richHapticsReady` 永不回退隐患——`playPreloaded` 的 Promise 无人接管且调用后无条件 `return`，一旦 reject 即**整条振动链路静默失效**（无振动、也无报错）。
+
+> **规则**：模块级 cache-bust 只在**该模块自身内容变化**时升号，不要"顺手统一版本号"。升号会强制用户端重新下载，把长期被缓存掩盖的问题一并翻出来，且极难归因。
+
+**顺带记录的坑**：Capacitor 6 的 `Directory` 枚举值必须**大写**（`'EXTERNAL_STORAGE'` / `'DATA'` / `'CACHE'` / `'DOCUMENTS'`），传小写 `'External'` / `'Documents'` 会返回 `INVALID_DIR`（CDP 实测）。
+
+> 本次改动含 Capacitor 专属 API（自写插件 + 权限声明），**不推主仓库**。
+
