@@ -612,5 +612,7 @@ body:not(.capacitor-mode) .capacitor-only{display:none !important}
 /* KaTeX 的 strut 按基础字号计算行高，字号被放大后会溢出，故做行高补偿 */
 .katex [style*="font-size"]{line-height:1.35;overflow-wrap:break-word;word-break:normal}
 .katex-display [style*="font-size"]{line-height:1.3}
-/* 未能解析的 LaTeX：按原文显示，不做标红（对齐 DeepSeek 网页端做法：失败即回退纯文本） */
-.clx-tex-raw{color:inherit;opacity:.85;border-bottom:1px dotted currentColor}
+/* 未能解析的 LaTeX：按原文静静显示，不加任何装饰（对齐 DeepSeek 网页端做法）
+   不加虚线/变色 —— 思维链里常有非 LaTeX 的 $ 用法，标出来反而像报错。
+   hover 时 title 属性仍会提示原因。 */
+.clx-tex-raw{color:inherit}

@@ -219,7 +219,10 @@
     var lines = seg.split('\n');
     for (var i = 0; i < lines.length; i++) {
       var ln = lines[i];
-      if (!ln || ln.indexOf('$') >= 0) continue;        // 空行 / 已有定界符 → 交给公式规则
+      // 空行 / 已有任何定界符（$ 或 \( \[）→ 交给公式规则，绝不能再套一层
+      // （2026-09-25 修：原先只认 $，AI 用 \(…\) 定界符时会被重复包裹，
+      //   导致「$ + 占位符 + $」，行内 $ 规则再把占位符当公式送进 KaTeX 而失败）
+      if (!ln || ln.indexOf('$') >= 0 || ln.indexOf('\\(') >= 0 || ln.indexOf('\\[') >= 0) continue;
       if (!STYLE_CMD_LINE.test(ln)) continue;
       if (!ln.trim()) continue;
       var m = RE_OUTER_BRACES.exec(ln);
@@ -264,6 +267,7 @@
       seg = seg.replace(rule.re, function (m, g1) {
         var tex = (g1 || '').trim();
         if (!tex) return m;                             // 空公式（$$ $$）原样保留
+        if (tex.indexOf(PH) >= 0) return m;             // 已含占位符 → 上游处理过，跳过（防御）
         math.push({ tex: tex, display: rule.display, raw: m });
         return PH + 'M' + (math.length - 1) + PH;
       });
