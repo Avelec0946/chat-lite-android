@@ -122,8 +122,8 @@ function renderContent(msg) {
 
   if (msg.isFileOnly) return html;
 
-  // Markdown content
-  const rendered = marked.parse(msg.content || '', { breaks: true, gfm: true });
+  // Markdown content（含 LaTeX：走 latex.js，无公式时与 marked.parse 逐字节一致）
+  const rendered = renderMarkdownWithLatex(msg.content || '');
   html += rendered;
 
   // Status bar: extract <status>...</status> and render as styled block
@@ -142,7 +142,7 @@ function renderContent(msg) {
     statusMatch = [contentNoCode.slice(lastStatusStart, lastStatusEnd + '</status>'.length), contentNoCode.slice(lastStatusStart + '<status>'.length, lastStatusEnd)];
   }
   if (statusMatch) {
-    var statusHtml = marked.parse(statusMatch[1].trim(), { breaks: true, gfm: true });
+    var statusHtml = renderMarkdownWithLatex(statusMatch[1].trim());
     var conv = currentConv();
     // B1: position 支持 effectiveStatusBar（继承全局）
     var sbEff = effectiveStatusBar(conv);
@@ -462,7 +462,8 @@ function updateMessageContent(msgId, content, reasoning) {
       el.appendChild(contentEl);
     }
   }
-  contentEl.innerHTML = marked.parse(content || '', { breaks: true, gfm: true });
+  // 流式增量渲染：latex.js 内部对已渲染公式走 LRU 缓存，重复重渲的边际开销趋近于零
+  contentEl.innerHTML = renderMarkdownWithLatex(content || '');
 
   // Highlight code blocks
   contentEl.querySelectorAll('pre code').forEach(block => {

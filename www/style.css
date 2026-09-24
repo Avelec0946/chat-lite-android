@@ -589,3 +589,18 @@ body:not(.capacitor-mode) .capacitor-only{display:none !important}
 .image-send-btn.stopping{background:var(--danger);animation:pulseStop 1s ease-in-out infinite}
 @keyframes pulseStop{0%,100%{opacity:1}50%{opacity:.6}}
 .image-stop-hint{position:absolute;top:8px;left:50%;transform:translateX(-50%);background:var(--danger);color:var(--on-primary);padding:4px 12px;border-radius:12px;font-size:11px;z-index:10;animation:fadeIn .2s}
+
+/* ===== v116: LaTeX (KaTeX) 渲染适配 ===== */
+/* KaTeX 不声明 color，公式色继承所在消息文本色 —— 明暗主题自动适配，无需分别维护 */
+.msg-bubble .katex{font-size:1.08em}
+/* 复位 .msg-bubble 的 word-break:break-word：该属性会继承进 KaTeX DOM，导致公式内部乱断行 */
+.katex,.katex *{word-break:normal;overflow-wrap:normal}
+/* 块级公式：超宽时横向滚动，不撑破气泡；首尾 margin 归零避免与 <p> 的间距叠加 */
+.katex-display{margin:.5em 0;padding:2px 0;overflow-x:auto;overflow-y:hidden;-webkit-overflow-scrolling:touch}
+.katex-display:first-child{margin-top:0}
+.katex-display:last-child{margin-bottom:0}
+/* 渲染失败（LaTeX 语法错误）：红字原文内联提示，不中断整条消息 */
+/* KaTeX 会向 .katex-error 写内联 color，故须 !important 才能跟随主题变量 */
+.katex-error{color:var(--danger)!important;background:rgba(239,68,68,.1);border-radius:4px;padding:0 4px;font-size:.9em}
+/* 用户气泡（深底）内错误公式的底色需反向处理，保证可读 */
+.message.user .msg-bubble .katex-error{background:rgba(255,255,255,.2)}

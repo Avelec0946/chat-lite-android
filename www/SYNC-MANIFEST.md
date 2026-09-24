@@ -1,6 +1,6 @@
 # SYNC-MANIFEST — 双向同步声明
 
-**最后更新**：2026-08-01
+**最后更新**：2026-09-25（v116：LaTeX 适配 + 第三方库全本地化）
 **用途**：chat-lite（主仓库）与 chat-lite-android（APK 仓库）按需互相同步时的差异声明
 
 > 两个仓库是**独立的**。任何一方的改进，另一方**不默认跟进**。
@@ -22,6 +22,8 @@
 | `chat.js` | 聊天核心（消息发送/流式请求） |
 | `io.js` | 导入导出 + 角色卡 + 格式转换 |
 | `gesture-helpers.js` | 手势辅助 |
+| `latex.js` | LaTeX 渲染层（定界符提取 → 占位符穿越 marked → KaTeX 回填）**v116 新增** |
+| `vendor/` | **目录（递归同步）**：本地化第三方库——`katex/`（0.16.47，含 20 个 woff2 字体）、`marked/`（12.0.1）、`highlight/`（11.9.0）。**v116 新增**，替代原 cdnjs 引用 |
 | `index.html` | 页面结构 |
 | `style.css` | 样式 |
 | `favicon.png` / `icon-192.png` / `icon-512.png` | 图标 |
@@ -58,8 +60,9 @@
 3. **web 降级**：APK 特有代码用 `isCapacitor()` 隔离，web 下返回 false 自动走 web 分支，无需剥离
 4. **b61c923 修复**（models URL 从聊天端点派生）：主仓库已有，APK 若缺失需手工补
 5. **同步后**：`node --check` 全部 JS + 各仓库自行 commit（sync.ps1 不自动提交）
-6. **cache-bust**：同步后按各仓库自身版本续编，不强行统一
+6. **cache-bust**：同步后按各仓库自身版本续编，不强行统一。**且只有内容真的变了的模块才升号**——"顺手统一升全部模块"会强制用户端重下未变文件，并把被缓存掩盖的问题一起翻出来（2026-09-19 v113 实证，详见看板 §4.7）
 7. **OOM 修复**：APK 用 `encoding:'utf8'`（Filesystem API）；web 分支保留 `<a download>` + 紧凑 JSON 优化
+8. **`vendor/` 按目录同步**（v116 起）：`sync.ps1` 递归比对 `vendor/`，逐文件 SHA1，只复制有差异的；无需在脚本里逐个登记 26 个字体/库文件
 
 ## 五、快速决策表
 

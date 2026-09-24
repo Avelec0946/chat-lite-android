@@ -31,8 +31,15 @@ $ErrorActionPreference = "Stop"
 $sharedFiles = @(
     "app.js", "db.js", "haptics.js", "providers.js",
     "image-gen.js", "conversation.js", "chat.js", "io.js",
-    "gesture-helpers.js", "style.css",
+    "gesture-helpers.js", "style.css", "latex.js",
     "favicon.png", "icon-192.png", "icon-512.png", "manifest.json"
+)
+
+# Shared directories - compared recursively; only differing files are copied.
+# vendor/ holds the localized third-party libs (katex + fonts / marked / highlight),
+# added in v116 when all CDN dependencies were moved in-repo.
+$sharedDirs = @(
+    "vendor"
 )
 
 # Merge-only files - repos intentionally differ (deployment paths, splash, cache-bust).
@@ -121,6 +128,33 @@ foreach ($f in $sharedFiles) {
         Write-Host "  [DIFF] $f" -ForegroundColor Yellow
         $changed += $f
         if (-not $Preview) { Copy-Item $src $dst -Force }
+    }
+}
+
+foreach ($d in $sharedDirs) {
+    $srcD = Join-Path $srcDir $d
+    $dstD = Join-Path $dstDir $d
+    if (-not (Test-Path $srcD)) { continue }
+
+    $nNew = 0; $nDiff = 0; $nSame = 0
+    foreach ($sf in (Get-ChildItem -Path $srcD -Recurse -File)) {
+        $rel = $sf.FullName.Substring($srcD.Length).TrimStart('\')
+        $df = Join-Path $dstD $rel
+        if (-not (Test-Path $df)) {
+            $nNew++
+            if (-not $Preview) {
+                $parent = Split-Path $df -Parent
+                if (-not (Test-Path $parent)) { New-Item -ItemType Directory -Path $parent -Force | Out-Null }
+                Copy-Item $sf.FullName $df -Force
+            }
+        } elseif ((Get-Sha1 $sf.FullName) -ne (Get-Sha1 $df)) {
+            $nDiff++
+            if (-not $Preview) { Copy-Item $sf.FullName $df -Force }
+        } else { $nSame++ }
+    }
+    if (($nNew + $nDiff) -gt 0) {
+        Write-Host "  [DIR] $d/ : new=$nNew diff=$nDiff same=$nSame" -ForegroundColor Yellow
+        $changed += "$d/ ($($nNew + $nDiff) changed)"
     }
 }
 

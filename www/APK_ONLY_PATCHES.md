@@ -45,6 +45,21 @@ JSON 用紧凑格式（去 `null, 2` 缩进）再省 30%+ 体积。
 ### 4. 数据结构新增字段（sync 后旧 APK 数据无影响，但需保留读取兼容）
 - `settings.hapticFeedback` (boolean, 默认 true，批次1+修正) — C3 振感开关
 
+### 5. v116：LaTeX 适配 + 第三方库全本地化（**非 APK 专属，同期已同步至主仓库**）
+
+本项**不满足**下方任一「不推主仓库」条件（无 `Cap*` / 无 `isCapacitor()` / 非 APK 独有行为），
+故已于同日推送主仓库 chat-lite。登记于此仅为留痕。
+
+| 项 | 内容 |
+|---|---|
+| 新增模块 | `latex.js` — 字符串级 LaTeX 渲染层（定界符提取 → NUL 占位符穿越 marked → KaTeX 回填） |
+| 新增目录 | `vendor/`（26 文件 / 0.68MB）：`katex/` 0.16.47 + `fonts/`（20 个 woff2）、`marked/` 12.0.1、`highlight/` 11.9.0 |
+| 改动文件 | `chat.js`（3 处 `marked.parse` → `renderMarkdownWithLatex`）、`style.css`（新增 KaTeX 适配段）、`index.html`（3 处 cdnjs → 本地 `vendor/`，新增 `latex.js`） |
+| cache-bust | `chat.js` v102→v116、`style.css` v112→v116、`latex.js` 新增 v116；**其余 8 个模块 Cache-bust 保持原值不动**（遵 §4.7 只升变化模块） |
+| KaTeX CSS 处理 | 上游 CSS 引用 woff2/woff/ttf 各 20 份；仅打包 woff2，故改写为只留 woff2（避免 40 个无谓 404），@font-face 数量仍为 20 |
+| APK 影响 | 包体 3.80MB → **4.23MB**；`cap sync` 自动带 `vendor/`（已核验包内 `assets/public/vendor/…` 齐全、cdnjs 残留 0） |
+| 同步工具 | `sync.ps1` 新增 `$sharedDirs = @("vendor")` 目录递归同步（逐文件 SHA1）+ `latex.js` 加入 `$sharedFiles` |
+
 ---
 
 ## 同步前自检命令

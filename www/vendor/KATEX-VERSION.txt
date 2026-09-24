@@ -1,0 +1,3 @@
+KaTeX 0.16.47
+marked 12.0.1
+highlight.js 11.9.0
