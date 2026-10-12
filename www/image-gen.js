@@ -1477,7 +1477,8 @@ async function generateImage() {
     var imgErr = e.imageError || classifyImageError(null, '', e);
     var errMsg;
     if (e.name === 'AbortError') {
-      errMsg = state._imageStopRequested ? '已停止生成' : (imgErr.hint || ('请求超时（' + Math.round(timeoutMs / 1000) + 's）'));
+      // v121: 优先用分类给出的 hint（停止 → 「已停止等待——服务端请求无法中止，可能仍在生成」）
+      errMsg = imgErr.hint || (state._imageStopRequested ? '已停止等待' : ('请求超时（' + Math.round(timeoutMs / 1000) + 's）'));
     } else {
       errMsg = imgErr.hint || (e.message || '生成失败');
       if (imgErr.attempts > 1) errMsg += '（已自动重试 ' + (imgErr.attempts - 1) + ' 次）';
@@ -1622,24 +1623,55 @@ function fetchWithImageRetry(opts) {
   async function attemptOnce(attempt) {
     var timeoutFired = false;
     var externalAborted = false;
-    if (signal && signal.aborted) externalAborted = true;
     var controller = new AbortController();
-    var timer = setTimeout(function() { timeoutFired = true; controller.abort(); }, timeoutMs);
-    if (signal && !signal.aborted) {
-      signal.addEventListener('abort', function() { externalAborted = true; controller.abort(); });
+
+    // v121: 生图 POST 在 APK 上走 CapacitorHttp 原生通道 —— native-bridge 的 fetch patch
+    //   只把 GET 交给本地代理，POST 走 cap.nativePromise 且**不传递 signal**。
+    //   后果：controller.abort() 之后 Promise 既不 resolve 也不 reject，界面会一直挂着，
+    //   而服务端请求其实仍在执行。故超时与「停止」统一改为「放弃等待」语义：
+    //   用 race 让 JS 侧立即脱身并如实告知（浏览器模式下 abort() 仍照常生效）。
+    var abandon = null;
+    var abandonPromise = new Promise(function(_, reject) { abandon = reject; });
+    abandonPromise.catch(function() {});  // 无人接管时静默，避免 unhandled rejection
+    function giveUp() {
+      if (abandon) { var f = abandon; abandon = null; f(new Error('__GIVE_UP__')); }
     }
+
+    function onSignalAbort() {
+      externalAborted = true;
+      controller.abort();  // 浏览器模式有效
+      giveUp();            // APK 原生通道靠这条脱身
+    }
+
+    if (signal && signal.aborted) {
+      externalAborted = true;
+      giveUp();
+    } else if (signal) {
+      signal.addEventListener('abort', onSignalAbort);
+    }
+
+    var timer = setTimeout(function() {
+      timeoutFired = true;
+      controller.abort();
+      giveUp();
+    }, timeoutMs);
+
     var resp;
     try {
-      resp = await fetch(url, {
-        method: 'POST',
-        headers: headers,
-        body: (payload instanceof FormData) ? payload : JSON.stringify(payload),
-        signal: controller.signal
-      });
+      resp = await Promise.race([
+        fetch(url, {
+          method: 'POST',
+          headers: headers,
+          body: (payload instanceof FormData) ? payload : JSON.stringify(payload),
+          signal: controller.signal
+        }),
+        abandonPromise
+      ]);
     } catch(e) {
       if (externalAborted) {
-        var ue = new Error('已停止生成');
+        var ue = new Error('已停止等待');
         ue.name = 'AbortError';
+        ue.imageError = { type: 'aborted', retryable: false, hint: '已停止等待——服务端请求无法中止，可能仍在生成', status: null, attempts: attempt + 1 };
         throw ue;
       }
       if (timeoutFired) {
@@ -1656,6 +1688,7 @@ function fetchWithImageRetry(opts) {
       throw ne;
     } finally {
       clearTimeout(timer);
+      if (signal) signal.removeEventListener('abort', onSignalAbort);  // v121: 防止多次重试累积监听器
     }
     var bodyText = '';
     try { bodyText = await resp.text(); } catch(e) { bodyText = ''; }
@@ -2012,17 +2045,50 @@ function scheduleExternalRefetch(ids, delayMs) {
   }, delayMs || 2500);
 }
 // F1: 清空图库
-function clearImageGallery() {
+// v121: 同步删除磁盘文件。此前只清 settings.images，落盘文件全部沦为孤儿
+//   （设备实测：main 包 7 个、maintenance 包 21 个）—— 既占空间，又永远不会被回收。
+async function clearImageGallery() {
   if (!settings.images || settings.images.length === 0) {
     showToast('图库已为空', 'info');
     return;
   }
   if (!confirm('确定清空图库？共 ' + settings.images.length + ' 张图片，此操作不可撤销。')) return;
+  var files = settings.images.map(function(x) { return x.fileName; }).filter(Boolean);
   settings.images = [];
   saveImageProviders();
   renderImageStream();
   updateImageGalleryCount();
-  showToast('图库已清空', 'info');
+  var extra = 0;
+  if (isCapacitor() && CapFilesystem) {
+    for (var i = 0; i < files.length; i++) { deleteImageFile(files[i]); }
+    // 顺手回收历史遗留的孤儿文件（目录里有、但已无任何记录指向）
+    extra = await purgeOrphanImageFiles([]);
+  }
+  showToast('图库已清空' + (extra > 0 ? '（并清理了 ' + extra + ' 个历史遗留文件）' : ''), 'info');
+}
+
+// v121: 回收孤儿文件 —— 目录里存在、却没有任何图库记录指向的文件。
+//   keepNames：需要保留的文件名数组；返回实际清理的数量。
+async function purgeOrphanImageFiles(keepNames) {
+  if (!isCapacitor() || !CapFilesystem) return 0;
+  try {
+    var keep = {};
+    (keepNames || []).forEach(function(n) { keep[n] = 1; });
+    var res = await CapFilesystem.readdir({ path: IMAGE_STORE_DIR, directory: 'DATA' });
+    var list = (res && res.files) || [];
+    var removed = 0;
+    for (var i = 0; i < list.length; i++) {
+      var f = list[i];
+      if (f.type && f.type !== 'file') continue;
+      if (keep[f.name]) continue;
+      await deleteImageFile(f.name);
+      removed++;
+    }
+    return removed;
+  } catch (e) {
+    console.warn('purgeOrphanImageFiles failed:', e);
+    return 0;
+  }
 }
 
 // F1: 生图界面事件监听初始化
@@ -2151,7 +2217,8 @@ function initImageView() {
     if (state._imageGenerating && state._imageAbortController) {
       state._imageStopRequested = true;  // v99: 标记用户主动停止（区分超时）
       state._imageAbortController.abort();
-      showToast('已停止生成', 'info');
+      // v121: 如实告知——APK 走 CapacitorHttp 原生通道，请求无法真正中止
+      showToast('已停止等待（服务端可能仍在生成）', 'info');
     } else {
       generateImage();
     }
@@ -2321,4 +2388,12 @@ async function migrateImportedImagesToFilesystem() {
     renderImageStream();
     console.log('已迁移 ' + migrated + ' 张图片到 Filesystem');
   }
+  // v121: 顺带回收孤儿文件（导入覆盖、以及早期「清空图库不删文件」留下的无主文件）。
+  //   安全阀：记录为空时绝不动手 —— 无法区分「确实没有图」与「图库尚未加载完」，
+  //   宁可漏删，不可误删；用户主动清空图库那条路径由 clearImageGallery 负责收尾。
+  if (!images.length) return;
+  var keep = [];
+  for (var j = 0; j < images.length; j++) { if (images[j].fileName) keep.push(images[j].fileName); }
+  var removedCount = await purgeOrphanImageFiles(keep);
+  if (removedCount > 0) console.log('[image-gen] 已回收孤儿文件 ' + removedCount + ' 个');
 }
