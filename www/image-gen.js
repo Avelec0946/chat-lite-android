@@ -662,6 +662,8 @@ function renderImageStream() {
     if (imgObj) {
       getImageDataUrl(imgObj).then(function(dataUrl) {
         if (dataUrl) imgEl.src = dataUrl;
+        // v120: 读不出内容 = 历史空文件残骸，明确说明，而不是留一块灰底让人猜
+        else showBrokenImageNote(imgEl, imgObj);
       });
     }
   });
@@ -714,6 +716,19 @@ function renderImageStream() {
     if (sb) { sb.classList.add('stopping'); sb.title = '点击停止生成'; }
   }
 }
+// v120: 「历史空文件残骸」的可读说明。
+//   v120 之前，外链下载失败时会把 URL 当 base64 写入，落下 0 字节文件并把地址一起丢掉 ——
+//   这些记录在磁盘上永远读不出内容。此处如实告知，并引导删除后重新生成。
+function showBrokenImageNote(imgEl, imgObj) {
+  var card = imgEl.closest ? imgEl.closest('.image-card') : null;
+  if (!card || card.querySelector('.image-external-note')) return;
+  var note = document.createElement('div');
+  note.className = 'image-external-note';
+  note.textContent = '这张图是旧版本留下的空文件：当时外链下载失败，地址被丢弃、只写入了一个 0 字节文件，无法恢复。建议删除后重新生成。';
+  card.insertBefore(note, imgEl.nextSibling);
+  if (imgObj) imgObj._broken = true;
+}
+
 // v66: 大图预览（支持双指缩放 + 拖动 + 工具栏保存/分享）
 var _previewGestureDestroy = null;
 function showImagePreview(src, imgId) {
@@ -1093,7 +1108,10 @@ async function getImageDataUrl(img) {
   // APK 模式：从 Filesystem 读取
   if (img.fileName) {
     var dataUrl = await readImageFile(img.fileName);
-    if (dataUrl) {
+    // v120: 空文件读回的是 "data:image/png;base64,"（约 22 字符），并不是有效图片。
+    //   v120 之前「外链被写成空文件」留下的残骸会落到这里 —— 不再当作有效图片返回，
+    //   交由渲染层给出明确说明，而不是让人对着一张破图猜。
+    if (dataUrl && dataUrl.length > 100) {
       img.dataUrl = dataUrl;  // 缓存到内存，避免重复 IO
       return dataUrl;
     }
