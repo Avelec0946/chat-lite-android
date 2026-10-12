@@ -511,6 +511,9 @@ body:not(.capacitor-mode) .capacitor-only{display:none !important}
 .image-card img{max-width:100%;max-height:60vh;border-radius:12px;display:block;cursor:pointer;background:var(--bg3);box-shadow:var(--shadow)}
 .image-card-meta{font-size:12px;color:var(--text2);display:flex;flex-wrap:wrap;gap:8px;align-items:center}
 .image-card-meta .meta-tag{padding:1px 6px;border-radius:4px;background:var(--bg3);font-size:11px}
+/* v120: 外链图标记 + 加载失败提示 */
+.image-card-meta .meta-tag.meta-external{background:var(--warning);color:var(--on-primary)}
+.image-external-note{font-size:12px;line-height:1.5;color:var(--text2);background:var(--bg3);border:1px solid var(--border);border-radius:8px;padding:6px 10px}
 .image-card-actions{display:flex;gap:4px;margin-top:4px}
 .image-card-actions .img-action-btn{background:none;border:none;color:var(--text2);cursor:pointer;font-size:12px;padding:2px 6px;border-radius:4px}
 .image-card-actions .img-action-btn:hover{background:var(--bg3);color:var(--text)}
