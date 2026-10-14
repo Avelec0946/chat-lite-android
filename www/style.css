@@ -250,13 +250,24 @@ html,body{height:100%;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Ro
 .settings-scroll-btn:active{transform:translateY(0)}
 .settings-header{display:flex;align-items:center;justify-content:space-between;padding:16px 20px}
 .settings-body{padding:16px 20px;display:flex;flex-direction:column;gap:16px;flex:1;min-height:0;overflow-y:auto}
-.setting-row{display:flex;align-items:center;justify-content:space-between;gap:12px}
+/* ===== 设置面板排版统一（v122）=====
+   一条规则贯穿整个面板：**一个功能项 = 「名称 + 控件」一行 + 「小字说明」一行**。
+   名称 13px / 500 / 主色；说明 11px / 400 / 次级色 / 行高 1.5；
+   项间距 12px、说明紧贴其上 3px —— 说明只作注解，不再与名称抢视觉层级。
+   （此前 .setting-hint 根本没有规则，会继承正文字号与主色，整屏被说明文字吃掉。） */
+.setting-row{display:flex;align-items:center;justify-content:space-between;gap:10px;min-height:28px;margin-top:12px}
+.setting-group-body>.setting-row:first-child{margin-top:0}
+.setting-row>span:first-child{font-size:13px;font-weight:500;color:var(--text);line-height:1.35}
 .setting-row-col{flex-direction:column;align-items:stretch;gap:6px}
-.setting-textarea,.setting-input{width:100%;padding:8px 12px;border:1px solid var(--border);border-radius:var(--radius);background:var(--bg);color:var(--text);font-size:14px;font-family:inherit;resize:vertical}
+.setting-row-col>span:first-child{font-size:13px;font-weight:500;color:var(--text)}
+.setting-hint{display:block;font-size:11px;font-weight:400;color:var(--text2);line-height:1.5;opacity:.85;margin:3px 0 0}
+.setting-textarea,.setting-input{width:100%;padding:8px 12px;border:1px solid var(--border);border-radius:var(--radius);background:var(--bg);color:var(--text);font-size:13px;font-family:inherit;resize:vertical}
 .setting-textarea:focus,.setting-input:focus,.setting-select:focus{outline:none;border-color:var(--primary)}
-.setting-select{padding:6px 10px;border:1px solid var(--border);border-radius:var(--radius);background:var(--bg);color:var(--text);font-size:14px}
-.setting-divider{border-top:1px solid var(--border);margin:4px 0}
-.setting-section-title{font-size:13px;color:var(--text2);font-weight:600}
+.setting-select{padding:5px 10px;border:1px solid var(--border);border-radius:var(--radius);background:var(--bg);color:var(--text);font-size:13px}
+/* 数字输入：固定宽度 + 右对齐 + 等宽数字，避免位数变化时宽度跳动 */
+.setting-num{width:104px;text-align:right;font-variant-numeric:tabular-nums}
+.setting-divider{border-top:1px solid var(--border);margin:14px 0 0}
+.setting-section-title{display:block;font-size:11px;font-weight:600;letter-spacing:.08em;color:var(--text2);opacity:.8;margin:12px 0 0}
 
 .card-import-row{display:flex;gap:8px;padding:8px 0}
 .btn-small{padding:5px 12px;font-size:12px;border-radius:4px;background:linear-gradient(135deg,var(--bubble-user-from) 0%,var(--bubble-user-to) 100%);color:var(--on-primary);border:none;cursor:pointer}

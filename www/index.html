@@ -7,7 +7,7 @@
 <title>chat-lite</title>
 <link rel="stylesheet" href="vendor/highlight/github-dark.min.css?v=116">
 <link rel="stylesheet" href="vendor/katex/katex.min.css?v=116">
-<link rel="stylesheet" href="style.css?v=120">
+<link rel="stylesheet" href="style.css?v=122">
   <meta name="theme-color" content="#7c3aed">
   <link rel="manifest" href="manifest.json">
 </head>
@@ -299,11 +299,11 @@
             <button id="btn-remove-bg" class="btn btn-small" style="background:var(--bg3);color:var(--text)">移除背景</button>
           </div>
           <label class="setting-row" style="margin-top:10px;gap:8px">
-            <span class="setting-hint" style="white-space:nowrap">背景遮罩</span>
+            <span style="white-space:nowrap">背景遮罩</span>
             <input type="range" id="bg-overlay-slider" min="0" max="0.8" step="0.05" value="0.3" style="flex:1">
             <span id="bg-overlay-value" style="font-size:12px;color:var(--text2);min-width:36px;text-align:right">30%</span>
           </label>
-          <span class="setting-hint" style="font-size:11px;margin-top:2px">调整背景图与文字之间的对比度，0=无遮罩，80%=强遮罩。每个会话独立设置。</span>
+          <span class="setting-hint">调整背景图与文字之间的对比度，0=无遮罩，80%=强遮罩。每个会话独立设置。</span>
           </div>
         </details>
 
@@ -313,9 +313,12 @@
           <div class="setting-group-body">
           <label class="setting-row web-only">
             <span>直连模式</span>
-            <input type="checkbox" id="direct-mode-check">
+            <label class="toggle-switch">
+              <input type="checkbox" id="direct-mode-check">
+              <span class="toggle-slider"></span>
+            </label>
           </label>
-          <span class="setting-hint web-only">启用后直接调用 DeepSeek API，无需电脑中转（仅 PWA/浏览器生效）</span>
+          <span class="setting-hint web-only">直接调用 DeepSeek API，无需电脑中转（仅浏览器 / PWA 生效）</span>
           <label class="setting-row capacitor-only">
             <span>流式模式</span>
             <select id="native-streaming-mode-select" class="setting-select">
@@ -324,12 +327,12 @@
               <option value="native">非流式（兼容）</option>
             </select>
           </label>
-          <span class="setting-hint capacitor-only">真流式：首字更快，可真正中断请求。非流式：兼容性更好。自动：优先真流式，失败回退非流式。</span>
+          <span class="setting-hint capacitor-only">真流式首字更快、可真正中断；非流式兼容性更好；自动优先真流式、失败回退。</span>
           <label class="setting-row">
             <span>等待超时（秒）</span>
-            <input type="number" id="chat-wait-input" class="setting-select" min="15" max="3600" step="15" placeholder="默认 300" style="width:110px;text-align:right" title="任意两次数据到达之间的最长等待，每收到一块数据即重新计时。默认 300 秒，范围 15~3600。改动即时生效。">
+            <input type="number" id="chat-wait-input" class="setting-select setting-num" min="15" max="3600" step="15" placeholder="默认 300" title="两次数据到达之间的最长等待，每收到一块数据即重新计时。默认 300 秒，范围 15~3600。改动即时生效。">
           </label>
-          <span class="setting-hint">任意两次数据到达之间的最长等待，每收到一块数据即重新计时。超时不会丢弃已经收到的内容，只会标记「疑似被截断」并给出「继续生成」。有些模型会先静默思考很久且不返回思维链，这里要给够。默认 300 秒，范围 15~3600 秒。<b>改动即时生效</b>。</span>
+          <span class="setting-hint">两次数据到达之间的最长等待，收到数据即重新计时；超时不会丢弃已收到的内容。长思考模型建议调大。</span>
           <label class="setting-row capacitor-only">
             <span>流式振感反馈</span>
             <label class="toggle-switch">
@@ -337,7 +340,7 @@
               <span class="toggle-slider"></span>
             </label>
           </label>
-          <span class="setting-hint capacitor-only">流式输出时振动反馈（默认开）</span>
+          <span class="setting-hint capacitor-only">流式输出时按字振动</span>
           <div class="setting-divider"></div>
           <span class="setting-section-title">渲染</span>
           <label class="setting-row">
@@ -347,7 +350,7 @@
               <span class="toggle-slider"></span>
             </label>
           </label>
-          <span class="setting-hint">默认关闭：用户消息里的 \命令 与 $公式$ 按原文显示，便于核对提示词。开启后与助手消息同管线渲染。思维链与助手正文始终渲染；代码块内的内容一律不渲染。</span>
+          <span class="setting-hint">默认关闭：用户消息按原文显示，便于核对提示词；开启后与助手消息同管线渲染。思维链与助手正文始终渲染。</span>
           <div class="setting-divider"></div>
           <span class="setting-section-title">显示</span>
           <label class="setting-row">
