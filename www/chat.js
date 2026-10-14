@@ -683,6 +683,55 @@ function buildContextForContinue(conv, targetMsg) {
   return msgs;
 }
 
+// ===== v122: 等待模型返回的统一超时 =====
+// 语义：从发出请求到「任意一块数据到达」之间的最长等待，每收到一块数据即重新计时。
+// 同时覆盖两种场景：① 模型长时间静默思考（首字之前）② 已经出内容后中途卡住。
+// 旧实现把值写死在 chat.js 内部（settings.nativeTimeoutMs，默认 120 秒）且没有任何 UI 入口，
+// 而原生插件的读超时又写死 30 秒 —— 那个 120 秒的计时器实际上永远追不上，也没人能调。
+function resolveChatWaitMs() {
+  var v = parseInt(settings.chatWaitMs, 10);
+  if (!(v > 0)) v = 300000;        // 默认 5 分钟
+  if (v < 15000) v = 15000;        // 下限 15 秒
+  if (v > 3600000) v = 3600000;    // 上限 60 分钟
+  return v;
+}
+
+// v122: 部分中转会忽略 stream:true，整段返回普通 JSON。
+// 这种响应里一个 data: 行都没有，走正常解析只会得到空回复 —— 这里兜底把正文与思维链抠出来。
+function salvageNonStreamBody(text) {
+  if (!text) return null;
+  var s = String(text).trim();
+  if (!s || (s.charAt(0) !== '{' && s.charAt(0) !== '[')) return null;
+  try {
+    var json = JSON.parse(s);
+    if (Object.prototype.toString.call(json) === '[object Array]') json = json[0];
+    if (!json || json.error) return null;
+    var choice = json.choices && json.choices[0];
+    var message = (choice && (choice.message || choice.delta)) || {};
+    var content = message.content || '';
+    var reasoning = message.reasoning_content || message.reasoning || message.thinking || '';
+    if (!content && !reasoning) return null;
+    return { content: content, reasoning: reasoning };
+  } catch(e) { return null; }
+}
+
+// v122: 非 2xx 时原生会把响应体一起带回来（形如 `HTTP 401: {"error":{"message":"..."}}`）。
+// 直接把整段 JSON 甩到界面上不好看，这里把里面的 message / detail 抠出来。
+function prettyStreamError(msg) {
+  if (!msg) return '未知错误';
+  var m = String(msg);
+  var i = m.indexOf('{');
+  if (i < 0) return m;
+  var head = m.slice(0, i).replace(/[:：]\s*$/, '');
+  try {
+    var j = JSON.parse(m.slice(i));
+    var inner = j.error || j;
+    var text = inner.message || inner.detail || (typeof inner.error === 'string' ? inner.error : '');
+    if (text) return (head ? head + '：' : '') + text;
+  } catch(e) {}
+  return m;
+}
+
 // ===== 请求执行 =====
 async function executeStreamHttp(req, assistantMsg, opts) {
   opts = opts || {};
@@ -701,8 +750,17 @@ async function executeStreamHttp(req, assistantMsg, opts) {
   let lastRenderTime = 0;
   const RENDER_INTERVAL = 100;  // markdown 渲染节流（100ms，约 10fps）
 
-  // 超时
-  const timeoutMs = settings.nativeTimeoutMs || 120000;
+  // v122: 完成度追踪 —— 只有「确认正常收尾」才算完成，否则保留内容并标记疑似截断
+  let sawDone = false;      // 收到 [DONE]
+  let finishReason = null;  // 收到 finish_reason
+  let sseEventCount = 0;    // 解出的标准 SSE 事件数（为 0 说明对端根本没按流式返回）
+  let gotData = false;      // 是否读到过原始数据
+  let rawText = '';         // 原始文本（仅用于非流式兜底解析，限长）
+  const earlyChunks = [];   // v122: streamId 返回前先到的分块，拿到 id 后回放
+  let finalize = null;      // 供 abort 覆盖调用（done 在 Promise 作用域内，这里留个引用）
+
+  // v122: 等待超时（空闲语义：每收到一块数据即重置）——由「常用偏好·等待超时」控制
+  const waitMs = resolveChatWaitMs();
   let timeoutId = null;
 
   // 设置 abort（用于停止生成）
@@ -713,6 +771,9 @@ async function executeStreamHttp(req, assistantMsg, opts) {
       try { CapStreamHttp.cancelStream({ id: streamId }); } catch(e) {}
     }
     try { origAbort(); } catch(e) {}
+    // v122: 用户主动停止必须在这里收尾 —— 原实现什么都不做，插件随后补发的 end 事件
+    // 会被当成「正常完成」，于是停止后既没有 [已停止] 标记、也没有「继续生成」按钮
+    if (finalize) finalize('stop', '用户打断');
   };
 
   // 移除 cursor-blink，显示首字后会替换
@@ -729,19 +790,20 @@ async function executeStreamHttp(req, assistantMsg, opts) {
       if (errorListener && errorListener.remove) errorListener.remove();
     }
 
-    function done(interrupted) {
+    // kind: '' 正常完成 / 'stop' 用户停止 / 'truncated' 疑似截断 / 'length' 触发输出上限
+    function done(kind, reason) {
       if (resolved) return;
       resolved = true;
       cleanup();
       state._streamingMsg = null;  // 清除流式消息标记
-      if (interrupted) {
+      if (kind) {
         assistantMsg.interrupted = true;
-        assistantMsg.errorMsg = '用户打断';
-        if (!assistantMsg.content || assistantMsg.content === existingContent) {
+        assistantMsg.errorMsg = reason || '生成中断';
+        if (kind === 'stop' && (!assistantMsg.content || assistantMsg.content === existingContent)) {
           assistantMsg.content = existingContent + '\n\n*[已停止]*';
         }
       }
-      // 最终渲染 + 保存
+      // 最终渲染 + 保存（内容一律保留 —— 绝不因为「没收全」而丢掉已经到达的部分）
       updateMessageContent(assistantMsg.id, assistantMsg.content, assistantMsg.reasoningContent || '');
       assistantMsg.versions[0] = {
         content: assistantMsg.content,
@@ -751,82 +813,139 @@ async function executeStreamHttp(req, assistantMsg, opts) {
       save();
       resolve();
     }
+    finalize = done;
+
+    // v122: 按行消费一段流式文本（行缓冲跨分包安全，分块被切断也不会丢字节）
+    function consumeChunk(text) {
+      if (!text) return;
+      gotData = true;
+      if (rawText.length < 300000) rawText += text;
+      chunkBuffer += text;
+      const lines = chunkBuffer.split('\n');
+      chunkBuffer = lines.pop() || '';
+
+      for (let rawLine of lines) {
+        if (rawLine.charCodeAt(rawLine.length - 1) === 13) rawLine = rawLine.slice(0, -1);  // 去 \r
+        if (!rawLine || rawLine.charAt(0) === ':') continue;   // 空行 / SSE 注释（心跳）
+        if (rawLine.indexOf('data:') !== 0) continue;          // v122: 兼容 "data:" 与 "data: "
+        const jsonStr = rawLine.slice(5).trim();
+        if (jsonStr === '[DONE]') { sawDone = true; continue; }
+
+        try {
+          const json = JSON.parse(jsonStr);
+          const choice = json.choices && json.choices[0];
+          if (!choice) continue;
+          sseEventCount++;
+          if (choice.finish_reason) finishReason = choice.finish_reason;
+          const delta = choice.delta;
+          if (!delta) continue;
+
+          // 思考链增量
+          const reasoningText = delta.reasoning_content || delta.thinking || delta.chain_of_thought || '';
+          if (reasoningText) {
+            assistantMsg.reasoningContent = (assistantMsg.reasoningContent || '') + reasoningText;
+          }
+
+          // 内容增量
+          if (delta.content) {
+            assistantMsg.content = (assistantMsg.content || '') + delta.content;
+            // C3: 流式振感反馈（默认关，节流 100ms）
+            triggerHapticFeedback(delta.content);
+          }
+
+          // 渲染节流：触摸滚动时暂停 DOM 更新（避免 innerHTML 重建阻塞 touchmove）
+          const now = Date.now();
+          if (!state._isTouching && now - lastRenderTime > RENDER_INTERVAL) {
+            updateMessageContent(assistantMsg.id, assistantMsg.content, assistantMsg.reasoningContent || '');
+            lastRenderTime = now;
+          }
+          if (!state._isTouching) scrollToBottom();
+        } catch(e) {}
+      }
+    }
 
     try {
       // 注册事件监听
       chunkListener = await CapStreamHttp.addListener('chunk', (data) => {
-        if (data.id !== streamId) return;
+        // v122: streamId 还没返回时先暂存 —— 此前这一段分块会被直接丢弃
+        if (streamId === null) { earlyChunks.push(data); return; }
+        if (!data || data.id !== streamId) return;
 
         // idle timeout：收到任一有效 chunk 即重置计时器
         // 长程思考时模型持续返回 reasoning_content，不会被绝对总时长截断
         resetIdleTimeout();
-
-        chunkBuffer += data.chunk;
-        const lines = chunkBuffer.split('\n');
-        chunkBuffer = lines.pop() || '';
-
-        for (const line of lines) {
-          if (!line.startsWith('data: ')) continue;
-          const jsonStr = line.slice(6).trim();
-          if (jsonStr === '[DONE]') continue;
-
-          try {
-            const json = JSON.parse(jsonStr);
-            const choice = json.choices && json.choices[0];
-            if (!choice) continue;
-            const delta = choice.delta;
-            if (!delta) continue;
-
-            // 思考链增量
-            const reasoningText = delta.reasoning_content || delta.thinking || delta.chain_of_thought || '';
-            if (reasoningText) {
-              assistantMsg.reasoningContent = (assistantMsg.reasoningContent || '') + reasoningText;
-            }
-
-            // 内容增量
-            if (delta.content) {
-              assistantMsg.content = (assistantMsg.content || '') + delta.content;
-              // C3: 流式振感反馈（默认关，节流 100ms）
-              triggerHapticFeedback(delta.content);
-            }
-
-            // 渲染节流：触摸滚动时暂停 DOM 更新（避免 innerHTML 重建阻塞 touchmove）
-            const now = Date.now();
-            if (!state._isTouching && now - lastRenderTime > RENDER_INTERVAL) {
-              updateMessageContent(assistantMsg.id, assistantMsg.content, assistantMsg.reasoningContent || '');
-              lastRenderTime = now;
-            }
-            if (!state._isTouching) scrollToBottom();
-          } catch(e) {}
-        }
+        consumeChunk(data.chunk);
       });
 
       endListener = await CapStreamHttp.addListener('end', (data) => {
-        if (data.id !== streamId) return;
-        done(false);
+        if (streamId !== null && data && data.id && data.id !== streamId) return;
+
+        // v122: 三者任一成立即视为「正常收尾」—— 原生 completed 标记 / 收到 [DONE] / 拿到 finish_reason
+        const completed = (data && data.completed === true) || sawDone || !!finishReason;
+        if (completed) {
+          if (finishReason === 'length') {
+            done('length', '已达模型单次输出上限，内容可能不完整，可点「继续生成」续写');
+          } else {
+            done('', '');
+          }
+          return;
+        }
+
+        // 一个 data: 行都没解出来 → 对端没按流式返回（部分中转会忽略 stream:true）
+        if (sseEventCount === 0) {
+          const salvaged = salvageNonStreamBody(rawText);
+          if (salvaged) {
+            if (salvaged.reasoning) assistantMsg.reasoningContent = (assistantMsg.reasoningContent || '') + salvaged.reasoning;
+            if (salvaged.content) assistantMsg.content = (assistantMsg.content || '') + salvaged.content;
+            done('', '');
+          } else if (gotData) {
+            done('truncated', '未收到标准流式数据，可点「继续生成」重试');
+          } else {
+            resolved = true;
+            cleanup();
+            reject(new Error('流式响应为空（未收到任何数据）'));
+          }
+          return;
+        }
+
+        // 有内容却没有完成标记 → 连接被提前关闭：保留内容并如实提示
+        const hasOutput = (assistantMsg.content && assistantMsg.content !== existingContent) || assistantMsg.reasoningContent;
+        if (hasOutput) {
+          const detail = (data && data.error) ? '：' + prettyStreamError(data.error) : '';
+          done('truncated', '连接被提前中断' + detail + '，回复可能不完整，可点「继续生成」续写');
+        } else {
+          done('truncated', '未收到有效内容，可点「继续生成」重试');
+        }
       });
 
       errorListener = await CapStreamHttp.addListener('error', (data) => {
-        if (data.id !== streamId) return;
+        if (streamId !== null && data && data.id && data.id !== streamId) return;
         if (resolved) return;
-        resolved = true;
-        cleanup();
-        reject(new Error(data.error || '流式请求错误'));
+        if (gotData) {
+          // v122: 已经流出一部分才失败 → 按「提前中断」收尾，保留内容、不再自动重发（避免重复计费）
+          done('truncated', '连接中断：' + prettyStreamError(data && data.error) + '，回复可能不完整，可点「继续生成」续写');
+        } else {
+          resolved = true;
+          cleanup();
+          reject(new Error(prettyStreamError(data && data.error) || '流式请求错误'));
+        }
       });
 
-      // 超时（idle 语义：流式数据持续流动时不触发，仅无数据流动超过 timeoutMs 时触发）
+      // 超时（idle 语义：流式数据持续流动时不触发，仅无数据流动超过 waitMs 时触发）
       // 长程思考时模型持续返回 reasoning_content，每次收到 chunk 重置计时器，避免被绝对总时长截断
       function resetIdleTimeout() {
         clearTimeout(timeoutId);
         timeoutId = setTimeout(() => {
+          if (resolved) return;
           if (streamId) {
             try { CapStreamHttp.cancelStream({ id: streamId }); } catch(e) {}
           }
-          if (resolved) return;
-          resolved = true;
-          cleanup();
-          reject(new Error('请求超时（' + (timeoutMs / 1000) + ' 秒无数据流动）'));
-        }, timeoutMs);
+          const secs = Math.round(waitMs / 1000);
+          // v122: 超时不再是「静默成功」也不再清空内容 —— 一律保留并交给用户决定是否续写
+          done('truncated', gotData
+            ? ('已 ' + secs + ' 秒没有新数据，回复可能不完整，可点「继续生成」续写')
+            : ('等待 ' + secs + ' 秒仍无响应，可点「继续生成」重试'));
+        }, waitMs);
       }
       resetIdleTimeout();
 
@@ -836,9 +955,23 @@ async function executeStreamHttp(req, assistantMsg, opts) {
         url: req.url,
         method: 'POST',
         headers: Object.assign({ 'Content-Type': 'application/json' }, req.headers || {}),
-        body: JSON.stringify(payload)
+        body: JSON.stringify(payload),
+        // v122: 原生读超时必须晚于 JS 侧判定，否则原生会先掐断（npm 版写死 30 秒）。
+        // 这两个键会被 npm 版插件忽略，因此两条路都安全。
+        readTimeoutMs: waitMs + 15000,
+        connectTimeoutMs: 30000
       });
       streamId = result.id;
+
+      // v122: 回放暂存下来的早期分块
+      if (earlyChunks.length) {
+        const queued = earlyChunks.splice(0, earlyChunks.length);
+        for (const c of queued) {
+          if (!c || (c.id && c.id !== streamId)) continue;
+          resetIdleTimeout();
+          consumeChunk(c.chunk);
+        }
+      }
 
     } catch(err) {
       if (!resolved) {
@@ -927,8 +1060,8 @@ async function executeNativeRequest(req, assistantMsg, opts) {
     };
   }
 
-  // 超时配置（默认 120 秒）
-  const timeoutMs = (settings.nativeTimeoutMs || 120000);
+  // v122: 超时配置 —— 与流式路径同源，统一读「常用偏好·等待超时」
+  const timeoutMs = resolveChatWaitMs();
   let timeoutId = null;
   let timeoutFired = false;
 
@@ -1019,6 +1152,13 @@ async function executeNativeRequest(req, assistantMsg, opts) {
     assistantMsg.content = fullContent;
     save();
     setStatus('ok');
+    // v122: 触顶提示 —— 因单次输出上限被截断时如实告知（这不是「抖动」，是模型自己的输出上限）
+    if (choice && choice.finish_reason === 'length') {
+      assistantMsg.interrupted = true;
+      assistantMsg.errorMsg = '已达模型单次输出上限，内容可能不完整，可点「继续生成」续写';
+      save();
+      renderMessages();
+    }
     // v67: 后台完成时缓存通知，切回前台显示
     if (state._isBackground) state._pendingTextNotify = '回复已完成';
 
@@ -1125,21 +1265,40 @@ async function sendFromMessage(context) {
     let fullContent = '';
     let fullReasoning = '';
 
+    // v122: web 流式路径此前完全没有超时 —— 请求卡住就永远等下去。
+    // 这里补上与 APK 侧同源的空闲超时 + 完成度判定（用 var，catch 里也要读）
+    var webWaitMs = resolveChatWaitMs();
+    var webIdleTimer = null;
+    var webSawDone = false;
+    var webFinishReason = null;
+    var webTimeoutReason = '';
+    var webResetIdle = function() {
+      clearTimeout(webIdleTimer);
+      webIdleTimer = setTimeout(function() {
+        webTimeoutReason = '已 ' + Math.round(webWaitMs / 1000) + ' 秒没有新数据，回复可能不完整，可点「继续生成」续写';
+        try { if (state.abortController) state.abortController.abort(); } catch(e) {}
+      }, webWaitMs);
+    };
+    webResetIdle();
+
     while (true) {
       const { done, value } = await reader.read();
       if (done) break;
+      webResetIdle();
 
       buffer += decoder.decode(value, { stream: true });
       const lines = buffer.split('\n');
       buffer = lines.pop() || '';
 
       for (const line of lines) {
-        if (!line.startsWith('data: ')) continue;
-        const data = line.slice(6).trim();
-        if (data === '[DONE]') continue;
+        if (line.indexOf('data:') !== 0) continue;   // v122: 兼容 "data:" 与 "data: "
+        const data = line.slice(5).trim();
+        if (data === '[DONE]') { webSawDone = true; continue; }
         try {
           const json = JSON.parse(data);
-          const delta = json.choices?.[0]?.delta;
+          const ch0 = json.choices && json.choices[0];
+          if (ch0 && ch0.finish_reason) webFinishReason = ch0.finish_reason;
+          const delta = ch0 && ch0.delta;
           if (delta) {
             var reasoningText = delta.reasoning_content || delta.thinking || delta.chain_of_thought || '';
             if (reasoningText) {
@@ -1159,6 +1318,25 @@ async function sendFromMessage(context) {
         }
       }
     }
+    clearTimeout(webIdleTimer);
+
+    // v122: 完成度收尾 —— ① 触顶 ② 没有完成标记就被关闭，都保留内容并如实标记
+    if (webFinishReason === 'length') {
+      assistantMsg.interrupted = true;
+      assistantMsg.errorMsg = '已达模型单次输出上限，内容可能不完整，可点「继续生成」续写';
+      save();
+      renderMessages();
+    } else if (!webSawDone && !webFinishReason && (fullContent || fullReasoning)) {
+      assistantMsg.interrupted = true;
+      assistantMsg.errorMsg = '连接被提前中断，回复可能不完整，可点「继续生成」续写';
+      assistantMsg.content = fullContent;
+      assistantMsg.reasoningContent = fullReasoning;
+      assistantMsg.versions[0] = { content: fullContent, timestamp: Date.now(), reason: 'original' };
+      save();
+      renderMessages();
+      setStatus('err');
+      return;
+    }
 
     // Update versions
     assistantMsg.versions[0] = { content: fullContent, timestamp: Date.now(), reason: 'original' };
@@ -1171,7 +1349,8 @@ async function sendFromMessage(context) {
     console.error('Send error:', err);
     // 保留已生成内容，标记为中断
     assistantMsg.interrupted = true;
-    assistantMsg.errorMsg = err.name === 'AbortError' ? '用户打断' : err.message;
+    // v122: 空闲超时触发的 abort 要如实说明是「等待超时」，不能混成「用户打断」
+    assistantMsg.errorMsg = webTimeoutReason || (err.name === 'AbortError' ? '用户打断' : err.message);
     if (!assistantMsg.content) {
       // 如果完全没有内容，才显示错误
       assistantMsg.content = `**错误：** ${escapeHtml(err.message)}`;
@@ -1264,21 +1443,39 @@ async function sendFromMessageContinue(context, assistantMsg) {
     let fullContent = existingContent;
     let fullReasoning = existingReasoning;
 
+    // v122: 与 sendFromMessage 同源的空闲超时 + 完成度判定
+    var webWaitMs = resolveChatWaitMs();
+    var webIdleTimer = null;
+    var webSawDone = false;
+    var webFinishReason = null;
+    var webTimeoutReason = '';
+    var webResetIdle = function() {
+      clearTimeout(webIdleTimer);
+      webIdleTimer = setTimeout(function() {
+        webTimeoutReason = '已 ' + Math.round(webWaitMs / 1000) + ' 秒没有新数据，回复可能不完整，可点「继续生成」续写';
+        try { if (state.abortController) state.abortController.abort(); } catch(e) {}
+      }, webWaitMs);
+    };
+    webResetIdle();
+
     while (true) {
       const { done, value } = await reader.read();
       if (done) break;
+      webResetIdle();
 
       buffer += decoder.decode(value, { stream: true });
       const lines = buffer.split('\n');
       buffer = lines.pop() || '';
 
       for (const line of lines) {
-        if (!line.startsWith('data: ')) continue;
-        const data = line.slice(6).trim();
-        if (data === '[DONE]') continue;
+        if (line.indexOf('data:') !== 0) continue;   // v122: 兼容 "data:" 与 "data: "
+        const data = line.slice(5).trim();
+        if (data === '[DONE]') { webSawDone = true; continue; }
         try {
           const json = JSON.parse(data);
-          const delta = json.choices?.[0]?.delta;
+          const ch0 = json.choices && json.choices[0];
+          if (ch0 && ch0.finish_reason) webFinishReason = ch0.finish_reason;
+          const delta = ch0 && ch0.delta;
           if (delta) {
             var reasoningText2 = delta.reasoning_content || delta.thinking || delta.chain_of_thought || '';
             if (reasoningText2) {
@@ -1295,6 +1492,26 @@ async function sendFromMessageContinue(context, assistantMsg) {
         } catch(e) {}
       }
     }
+    clearTimeout(webIdleTimer);
+
+    // v122: 完成度收尾（与 sendFromMessage 同规则）
+    if (webFinishReason === 'length') {
+      assistantMsg.interrupted = true;
+      assistantMsg.errorMsg = '已达模型单次输出上限，内容可能不完整，可点「继续生成」续写';
+      assistantMsg.content = fullContent;
+      save();
+      renderMessages();
+    } else if (!webSawDone && !webFinishReason && (fullContent !== existingContent || fullReasoning !== existingReasoning)) {
+      assistantMsg.interrupted = true;
+      assistantMsg.errorMsg = '连接被提前中断，回复可能不完整，可点「继续生成」续写';
+      assistantMsg.content = fullContent;
+      assistantMsg.reasoningContent = fullReasoning;
+      assistantMsg.versions[0] = { content: fullContent, timestamp: Date.now(), reason: 'continued' };
+      save();
+      renderMessages();
+      setStatus('err');
+      return;
+    }
 
     assistantMsg.versions[0] = { content: fullContent, timestamp: Date.now(), reason: 'continued' };
     save();
@@ -1305,7 +1522,7 @@ async function sendFromMessageContinue(context, assistantMsg) {
   } catch (err) {
     console.error('Continue error:', err);
     assistantMsg.interrupted = true;
-    assistantMsg.errorMsg = err.name === 'AbortError' ? '用户打断' : err.message;
+    assistantMsg.errorMsg = webTimeoutReason || (err.name === 'AbortError' ? '用户打断' : err.message);
     save();
     renderMessages();
     setStatus('err');

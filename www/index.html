@@ -325,6 +325,11 @@
             </select>
           </label>
           <span class="setting-hint capacitor-only">真流式：首字更快，可真正中断请求。非流式：兼容性更好。自动：优先真流式，失败回退非流式。</span>
+          <label class="setting-row">
+            <span>等待超时（秒）</span>
+            <input type="number" id="chat-wait-input" class="setting-select" min="15" max="3600" step="15" placeholder="默认 300" style="width:110px;text-align:right" title="任意两次数据到达之间的最长等待，每收到一块数据即重新计时。默认 300 秒，范围 15~3600。改动即时生效。">
+          </label>
+          <span class="setting-hint">任意两次数据到达之间的最长等待，每收到一块数据即重新计时。超时不会丢弃已经收到的内容，只会标记「疑似被截断」并给出「继续生成」。有些模型会先静默思考很久且不返回思维链，这里要给够。默认 300 秒，范围 15~3600 秒。<b>改动即时生效</b>。</span>
           <label class="setting-row capacitor-only">
             <span>流式振感反馈</span>
             <label class="toggle-switch">
@@ -561,14 +566,14 @@
 <script src="vendor/katex/katex.min.js?v=116"></script>
 <!-- LaTeX 渲染层：须在 katex.min.js 之后、chat.js 之前加载 -->
 <script src="latex.js?v=119"></script>
-<script src="db.js?v=102"></script>
+<script src="db.js?v=122"></script>
 <script src="haptics.js?v=115"></script>
 <script src="providers.js?v=102"></script>
 <script src="image-gen.js?v=121"></script>
 <script src="conversation.js?v=112"></script>
-<script src="chat.js?v=117"></script>
+<script src="chat.js?v=122"></script>
 <script src="io.js?v=102"></script>
 <script src="gesture-helpers.js?v=102"></script>
-<script src="app.js?v=117"></script>
+<script src="app.js?v=122"></script>
 </body>
 </html>

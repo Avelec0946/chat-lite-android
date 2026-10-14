@@ -117,7 +117,10 @@ function save() {
 function defaultSettings() {
   return {
     thinkingEnabled: true, apiKey: '', fontSize: '15', lineSpacing: '1.6',
-    directMode: false, hapticFeedback: true, nativeStreamingMode: 'auto', nativeTimeoutMs: 120000,
+    directMode: false, hapticFeedback: true, nativeStreamingMode: 'auto',
+    // v122: 等待模型返回的空闲超时（毫秒，默认 300s=5 分钟）
+    // 取代原 nativeTimeoutMs（120 秒、且没有任何 UI 入口）—— 那个值在原生 30 秒写死的读超时面前形同虚设
+    chatWaitMs: 300000,
     // v99: 生图专用总超时（毫秒，默认 600s=10 分钟；聊天 nativeTimeoutMs 不影响生图）
     imageNativeTimeoutMs: 600000,
     // v101: 生图 prompt 前缀体系（全局正面前缀/负面前缀/消息模板，参照酒馆思路自行实现）

@@ -11,8 +11,8 @@
 
 ## 同步后必须重新打的补丁
 
-### 1. Capacitor 文件系统 / Share / StreamHttp 相关（已有上游基础）
-关键字：`CapStreamHttp`、`CapFilesystem`、`CapShare`、`isCapacitor()`
+### 1. Capacitor 文件系统 / Share / 流式 HTTP 相关（已有上游基础）
+关键字：`CapStreamHttp`、`CapFilesystem`、`CapShare`、`isCapacitor()`、`ChatStream`（v122 自写插件）
 位置：导入导出、流式请求、停止打断
 
 ### 2. v1.3.0 批次 1 改动（commit `1c42ee2`）
@@ -376,7 +376,7 @@ settings = {
 
 #### 11.7 风险与遗留
 1. **大图存储**：base64 图片存 localStorage，5-10MB 限制。当前未生成缩略图（`thumbnailDataUrl:null`），F2/F4 优化时再补
-2. **API 超时**：默认 120s（复用 `settings.nativeTimeoutMs`），可通过设置面板「常用偏好」分组的流式超时调整
+2. **API 超时**：聊天走 `settings.chatWaitMs`（默认 300s，「常用偏好 → 等待超时」可改，v122 起；旧字段 `nativeTimeoutMs` 已废弃）；生图走独立的 `settings.imageNativeTimeoutMs`（默认 600s）
 3. **参考图大小**：压缩到 1024px 内（PNG 0.85 质量）再上传
 4. **图生图请求体**：kkaiapi 把参考图放在 `content[].image` 字段作为纯 base64（去 data URL 前缀）
 5. **滑动返回**：仅左边缘 24px 内触发，需横向 >80px、纵向 <60px、时间 <500ms，避免误触
@@ -1058,4 +1058,58 @@ image: <reference.png Blob>
 **顺带记录的坑**：Capacitor 6 的 `Directory` 枚举值必须**大写**（`'EXTERNAL_STORAGE'` / `'DATA'` / `'CACHE'` / `'DOCUMENTS'`），传小写 `'External'` / `'Documents'` 会返回 `INVALID_DIR`（CDP 实测）。
 
 > 本次改动含 Capacitor 专属 API（自写插件 + 权限声明），**不推主仓库**。
+
+### 30. v122：等待模型返回的超时与链路加固（自写原生插件 ChatStream，cache-bust chat.js v117→v122 / app.js v117→v122 / db.js v102→v122，2026-10-14）
+
+**背景**（用户反馈两点）：
+1. 有的模型思考时间很长且**不返回思维链**，等待超时太短又无处可调；
+2. 已经流出深度思考或正文后，有时会因网络抖动被截断。
+
+**先把整条链路读了一遍，找到五处会「吃掉已收到内容」的地方**（按严重程度排）：
+
+| # | 位置 | 问题 |
+|---|---|---|
+| 1 | `node_modules/capacitor-stream-http/.../StreamHttpPlugin.java` | `setReadTimeout(30000)` **写死 30 秒**。模型静默思考超 30 秒 → `SocketTimeoutException` → 流被掐断。而 JS 侧空闲超时默认 120 秒，**永远追不上原生这 30 秒**，且原生值无法从 JS 调整 |
+| 2 | 同上，读循环结束处 | 无论「读到 `[DONE]`」还是「连接被提前关闭」一律发 `end`，原生也从不识别 `[DONE]` → 优雅 EOF 被 JS 判定成「正常完成」= **静默截断** |
+| 3 | `chat.js` `executeRequest` 回退分支 | 流式失败后回退非流式前把 `content` 重置为 `existingContent`，已流出的内容被清空 |
+| 4 | `chat.js` chunk 监听 | `data.id !== streamId` 在 `startStream` 尚未返回（`streamId === null`）时判断 → **最早到达的分块被丢弃**（开头缺字） |
+| 5 | 非 2xx 响应 | npm 版把错误体当 SSE 读一遍、什么也没解出来，最后发 `end` → JS 视为「成功但空回复」，**错误被吞掉** |
+
+**方案（三层）**：
+
+**① 原生：新增自写插件 `ChatStreamPlugin`**（`android/app/src/main/java/com/avelec/chatlite/ChatStreamPlugin.java`，与 MediaSaver 同一套路 —— 放在 app 模块，`cap sync` / `npm install` 都不会覆盖）
+
+| 改动 | 说明 |
+|---|---|
+| `readTimeoutMs` 由 JS 传入 | 默认 = JS 空闲超时 + 15 秒，原生不再抢先掐断；范围钳制 10s~1h |
+| 原始文本直接透传 | 不再在原生侧拼装 SSE 事件，行缓冲交给 JS（JS 本来就有跨分包行缓冲），少一层少丢一截 |
+| `end { completed, reason, error }` | 读到 `[DONE]` → `completed:true`；**已出数据后出错** → `end{completed:false, reason:'interrupted'}`；**未出数据就失败** → `error`（区分「中途断流」与「压根没连上」） |
+| 取消时不发任何事件 | 原来 `cancelStream` 后读循环 break、却仍补发 `end` —— JS 会把它当成「正常完成」，**把停止标记吃掉** |
+| 非 2xx 直接 `error` | 带上响应体里的错误信息（限长 400 字），不再静默空回复 |
+| `MainActivity.java` | `super.onCreate()` **之前** `registerPlugin(ChatStreamPlugin.class)` |
+| `app.js` 插件初始化区 | `CapStreamHttp` 改为优先取 `Capacitor.Plugins.ChatStream`，取不到回退 npm 的 `StreamHttp`（两者 JS 调用方式一致） |
+
+> `capacitor-settings.gradle` 由 `cap update` 生成、`package.json` 的 `capacitor-stream-http` 依赖**保持不动** —— 自写插件只做「优先」，npm 版仍在，回退路径始终可用。
+
+**② JS：`chat.js` 完成度判定 + 内容保全**
+
+- 统一超时：新增 `resolveChatWaitMs()` 读 `settings.chatWaitMs`（取代没有任何 UI 入口的 `nativeTimeoutMs`），范围钳制 15s~1h，缺失时默认 300s
+- **完成条件 = 原生 `completed` / 收到 `[DONE]` / 拿到 `finish_reason`，三者任一**；不满足则**保留全部内容** + `interrupted` 标记 + 复用既有「继续生成」按钮，**绝不自动重发**（避免重复计费）
+- 早期分块缓冲（`earlyChunks`）后回放；`data:` 无空格兼容；`\r` 清理；SSE 心跳注释行忽略
+- `finish_reason === 'length'` → 如实提示「已达模型单次输出上限」（这是参数限制，不是抖动）
+- 对端忽略 `stream:true` 而整段返回 JSON → 兜底解析出正文与思维链（`salvageNonStreamBody`）
+- 非 2xx 错误体 JSON 美化（`prettyStreamError`），不把整段 JSON 甩到界面上
+- 非流式路径（`executeNativeRequest`）同源超时 + 触顶提示
+- **web 流式路径**（`sendFromMessage` / `sendFromMessageContinue`）此前**完全没有超时**（卡住就永远等）—— 补上同源空闲超时 + 完成判定
+
+**③ 设置项：常用偏好 → 等待超时（秒）**
+
+- 默认 300，范围 15~3600，数字输入，**改动即时落盘**（不必点「保存」）
+- `db.js` 新增 `chatWaitMs: 300000`；移除 `nativeTimeoutMs`（旧用户存的 120000 因字段名更换而失效，自动拿到新默认 —— 该值本来就没有 UI 让人改过）
+- 语义：**任意两次数据到达之间的最长等待**，每收到一块数据即重新计时，因此同时覆盖「首字前的长思考」与「中途卡住」
+
+**验证**：`node --check` chat.js / app.js / db.js 全通过；行为自验 **42/42**（vm 沙箱 + 假插件驱动 `executeStreamHttp`，覆盖：正常完成 / 原生 completed / 优雅 EOF 判截断 / 中途断流保留内容且不重发 / 无数据失败仍走回退 / `finish_reason=length` 触顶 / 空闲超时（有内容·无内容两种）/ 早期分块回放 / 用户停止打 `[已停止]` / 非流式兜底 / `data:` 无空格+心跳+跨分包 / 零数据 / 纯函数边界）。
+
+> 本次含 Capacitor 专属原生插件（`ChatStreamPlugin` + MainActivity 注册），**原生部分不推主仓库**；`chat.js` / `db.js` 属共享文件，`index.html` 与 `app.js` 需按 `isCapacitor()` 甄别后同步。
+
 

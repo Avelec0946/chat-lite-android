@@ -18,7 +18,9 @@ if (isCapacitor()) {
     CapFilesystem = Capacitor.Plugins && Capacitor.Plugins.Filesystem;
     CapShare = Capacitor.Plugins && Capacitor.Plugins.Share;
     CapHttp = Capacitor.Plugins && Capacitor.Plugins.CapacitorHttp;
-    CapStreamHttp = Capacitor.Plugins && Capacitor.Plugins.StreamHttp;
+    // v122: 自写 ChatStream 插件优先（读超时可配 + 能区分「正常结束」与「提前中断」）；
+    // npm 的 StreamHttp 保底，两者的 JS 调用方式一致
+    CapStreamHttp = (Capacitor.Plugins && (Capacitor.Plugins.ChatStream || Capacitor.Plugins.StreamHttp)) || null;
     CapHaptics = Capacitor.Plugins && Capacitor.Plugins.Haptics;
     CapRichHaptics = Capacitor.Plugins && (Capacitor.Plugins.RichHaptics || Capacitor.Plugins['capacitor-rich-haptics']);
     // v113: 自写插件。Capacitor.Plugins 上若还没有，用 registerPlugin 现场建代理
@@ -494,6 +496,12 @@ async function init() {
   // 初始化流式模式选择器
   const streamingModeSelect = document.getElementById('native-streaming-mode-select');
   if (streamingModeSelect) streamingModeSelect.value = settings.nativeStreamingMode || 'auto';
+  // v122: 等待超时 —— 数字输入，改动即时落盘（不用等「保存」按钮，避免改完忘了点）
+  const chatWaitInput = document.getElementById('chat-wait-input');
+  if (chatWaitInput) {
+    chatWaitInput.value = String(Math.round(resolveChatWaitMs() / 1000));
+    chatWaitInput.addEventListener('change', function() { applyChatWaitInput(false); });
+  }
   // C3: 振感开关回填（默认开；老用户 settings 无此字段时按默认开处理）
   const hapticCheck = document.getElementById('haptic-feedback-check');
   if (hapticCheck) hapticCheck.checked = (settings.hapticFeedback !== false);
@@ -1368,6 +1376,9 @@ function fillSettingsForm() {
   if (dmCheck) dmCheck.checked = settings.directMode || false;
   var smSelect = document.getElementById('native-streaming-mode-select');
   if (smSelect) smSelect.value = settings.nativeStreamingMode || 'auto';
+  // v122: 等待超时（秒）
+  var cwInput = document.getElementById('chat-wait-input');
+  if (cwInput) cwInput.value = String(Math.round(resolveChatWaitMs() / 1000));
   var hfCheck = document.getElementById('haptic-feedback-check');
   if (hfCheck) hfCheck.checked = settings.hapticFeedback !== false;
   var ulCheck = document.getElementById('render-user-latex-check');
@@ -1431,12 +1442,28 @@ function toggleSettings(open) {
   }
 }
 
+// v122: 读取「等待超时（秒）」输入框并落盘（silent=true 时不弹提示，供保存按钮顺带调用）
+function applyChatWaitInput(silent) {
+  var el = document.getElementById('chat-wait-input');
+  if (!el) return;
+  var secs = parseInt(el.value, 10);
+  if (!(secs > 0)) { el.value = String(Math.round(resolveChatWaitMs() / 1000)); return; }
+  if (secs < 15) secs = 15;
+  if (secs > 3600) secs = 3600;
+  settings.chatWaitMs = secs * 1000;
+  el.value = String(secs);
+  saveSettings();
+  if (!silent) showToast('等待超时已设为 ' + secs + ' 秒', 'success');
+}
+
 function saveSettingsHandler() {
   // 全局偏好
   settings.thinkingEnabled = thinkingToggle.checked;
   settings.directMode = document.getElementById('direct-mode-check')?.checked || false;
   const streamingModeSelect = document.getElementById('native-streaming-mode-select');
   if (streamingModeSelect) settings.nativeStreamingMode = streamingModeSelect.value;
+  // v122: 等待超时（秒 → 毫秒；保存按钮顺带落盘，静默）
+  applyChatWaitInput(true);
   const hapticCheck = document.getElementById('haptic-feedback-check');
   if (hapticCheck) settings.hapticFeedback = hapticCheck.checked;
   // v117: 用户消息公式渲染开关

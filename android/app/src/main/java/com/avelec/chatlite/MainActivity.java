@@ -13,6 +13,9 @@ public class MainActivity extends BridgeActivity {
         // v113: 注册自写插件——通过 MediaStore 把图片存入系统相册
         // （原 Filesystem EXTERNAL_STORAGE 路径在 Android 10 + targetSdk 34 下必然被拒）
         registerPlugin(MediaSaverPlugin.class);
+        // v122: 注册自写流式插件——读超时可配 + 区分「正常结束」与「提前中断」
+        // （npm 的 capacitor-stream-http 把 readTimeout 写死 30 秒，长思考模型必被掐断）
+        registerPlugin(ChatStreamPlugin.class);
         super.onCreate(savedInstanceState);
         // v71: 创建 WakeLock，用于后台期间保持 CPU 活跃
         PowerManager pm = (PowerManager) getSystemService(POWER_SERVICE);
