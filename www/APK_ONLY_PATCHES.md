@@ -1157,6 +1157,15 @@ image: <reference.png Blob>
 
 > **web 版白捡的好处**：`chat.js` 里**补上的空闲超时与完成度判定正好是 web 版走的那条路**（`executeStreamHttp` 是 Capacitor 专属，web 走 `sendFromMessage` 里的 fetch 流式循环）。此前该路径**完全没有超时**，请求卡住就永远等下去 —— 这条修复此前只在 APK 上验证过，同步后 web/PWA 一并受益。
 
+**⑦ 合并进 main + main 版 APK 装机（2026-10-14，`e3f18ae → aae261a`）**
+
+- 切分支前后各做一次**文件完整性核对**（§4.5 第 6 条）：**20/20 一致，本次未触发静默丢文件顽疾**
+- `maintenance → main` **快进合并**，8 文件 +736/−92（含新增 `ChatStreamPlugin.java`）
+- 构建 main 版 **`chat-lite-2.1-v122-debug.apk`**（4.24MB）：**文件名无分支后缀、appId `com.avelec.chatlite`**（§3.4d 分支隔离机制生效）；覆盖装机 v121 → v122
+- **装机后真机复核**：`ChatStream` 出现在 `pluginHeaders` 内且 `CapStreamHttp` 实际指向它（`usingChatStream:true`）、cache-bust 全 v122、等待超时输入框值 300、四个 helper 函数齐全、`startStream` 14ms 返回 id、说明文字计算字号全 11px
+- **数据零丢失**：会话 **122** / 接口 **8** / 图库记录 **81 = 落盘 81 文件** —— v121 的孤儿回收仍在正常工作，零残留
+- `main = maintenance = origin/main = origin/maintenance = aae261a` 四指针一致
+
 > 本次含 Capacitor 专属原生插件（`ChatStreamPlugin` + MainActivity 注册），**原生部分不推主仓库**；`chat.js` / `db.js` 属共享文件，`index.html` 与 `app.js` 需按 `isCapacitor()` 甄别后同步。
 
 
