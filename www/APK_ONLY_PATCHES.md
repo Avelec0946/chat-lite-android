@@ -1133,6 +1133,30 @@ image: <reference.png Blob>
 
 **验证**：`node --check` chat.js / app.js / db.js 全通过；行为自验 **42/42**（vm 沙箱 + 假插件驱动 `executeStreamHttp`，覆盖：正常完成 / 原生 completed / 优雅 EOF 判截断 / 中途断流保留内容且不重发 / 无数据失败仍走回退 / `finish_reason=length` 触顶 / 空闲超时（有内容·无内容两种）/ 早期分块回放 / 用户停止打 `[已停止]` / 非流式兜底 / `data:` 无空格+心跳+跨分包 / 零数据 / 纯函数边界）。
 
+**⑥ 主仓库 chat-lite 同步（2026-10-14，commit `f3d853c`）**
+
+同步前先过**安全闸**：把主仓库当前文件与「APK 仓库 v121 基线（`e3f18ae`）」逐个比对，确认主仓库只是「跟着旧版本走」而非「有独立改动」，才允许覆盖。
+
+> **⚠️ 闸门第一版踩的坑**：`git show <commit>:<path>` 输出的是 **blob（LF）**，而两个仓库工作区都是 **CRLF**（`core.autocrlf=true`、无 `.gitattributes`）。直接拿 blob 和工作区文件比哈希 → **四个文件全报「差异 3298 / 2772 / 1242 / 438 行」**，是彻底的假警报，差点误判成"主仓库有大量独立改动、不能覆盖"。
+> **修正：跨仓库比对文件必须先归一化行尾（CRLF→LF）再算哈希。** 归一化后主仓库四个文件与 v121 基线**逐字节相同**，结论才成立。
+> 这与 §4.12「尺子在说谎」同源：**量出来的差异要先质疑测量方式，再质疑被测对象。**
+
+| 文件 | 处理 |
+|---|---|
+| `chat.js` / `db.js` / `style.css` / `app.js` | `sync.ps1 -Direction apk-to-main` 自动覆盖（哈希已归一化确认无独立改动） |
+| `index.html` | merge-only，手动合并 |
+| `vendor/`（26 文件） | 哈希全一致，无需复制 |
+| 其余 10 个共享文件 | 哈希全一致，无需复制 |
+| `ChatStreamPlugin.java` / `MainActivity` 注册 | **不推**（Capacitor 专属，见 §11.11 同一套路） |
+
+`index.html` 合并时**保留的主仓库特有项**：`/favicon.png` 与 `/chat-lite/manifest.json` 绝对路径、无 `splash-screen` 块、无 BOM。
+
+**cache-bust 决策**：只升「内容真的变了」的 4 个 —— `style.css` v120→122、`chat.js` v117→122、`app.js` v117→122、`db.js` **v113→122**。`providers.js` / `conversation.js` / `io.js` / `gesture-helpers.js` **保持 v113 不动** —— 它们的号虽与 APK 仓库不同（102/112），但**内容逐字节一致且期间未变**，说明用户浏览器缓存里那份本来就是对的；按 §4.7 此时升号反而是无谓的重下。
+
+**主仓库侧验证**：`node --check` 五个 JS 全通过；本地静态服务 + 无头 Chrome **页面零 JS 报错**、marked / katex 0.16.47 / hljs 三库就绪；**15 条 `.setting-hint` 计算字号全部 11px 零例外**；等待超时 900 → `settings.chatWaitMs` 立即变 900000、填 5 → 钳到下限 15000。
+
+> **web 版白捡的好处**：`chat.js` 里**补上的空闲超时与完成度判定正好是 web 版走的那条路**（`executeStreamHttp` 是 Capacitor 专属，web 走 `sendFromMessage` 里的 fetch 流式循环）。此前该路径**完全没有超时**，请求卡住就永远等下去 —— 这条修复此前只在 APK 上验证过，同步后 web/PWA 一并受益。
+
 > 本次含 Capacitor 专属原生插件（`ChatStreamPlugin` + MainActivity 注册），**原生部分不推主仓库**；`chat.js` / `db.js` 属共享文件，`index.html` 与 `app.js` 需按 `isCapacitor()` 甄别后同步。
 
 
