@@ -2065,6 +2065,10 @@ async function generateImage() {
     clearFailStreak(state._imageProviderFailStreak, provider.id);
     state._imageLastError = null;
     saveImageProviders();
+    // v123 修：必须在渲染前清掉 generating 标记 —— 否则 renderImageStream 会按
+    //   「切回视图时恢复加载占位」的逻辑，在已经出图的结果下面再补一个「生成中…」，
+    //   真机实测出现过「图已出、下面还挂着转圈」的错误观感。
+    state._imageGenerating = false;
     renderImageStream();
     updateImageGalleryCount();
     if (indicator) indicator.className = 'image-status-indicator ok';
@@ -2100,6 +2104,8 @@ async function generateImage() {
       status: imgErr.status || null,
       retryable: imgErr.retryable !== false
     };
+    // v123 修：同样先清 generating 标记，避免错误条下面再挂一个「生成中…」
+    state._imageGenerating = false;
     renderImageStream();  // 整流重建后，错误条仍会出现在末尾（由 renderImageStream 负责渲染）
     imageHaptic('error');
     showToast(errMsg, 'warn');
@@ -2116,6 +2122,11 @@ async function generateImage() {
     state._imageAbortController = null;  // v66: 清理引用
     state._imageGenerating = false;  // 清除请求进行中标记
     state._imageStopRequested = false;  // v99: 复位停止标记
+    // v123 防御：兜底摘掉任何残留的加载占位。
+    //   成功/失败路径已在渲染前清过标记，但若将来有新的收尾分支漏了这一步，
+    //   这里保证「已经出图/已经报错，却还挂着转圈」不会再发生。
+    var staleLoading = document.getElementById('image-loading-msg');
+    if (staleLoading) staleLoading.remove();
   }
 }
 
