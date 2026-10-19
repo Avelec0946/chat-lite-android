@@ -1,4 +1,4 @@
-﻿// ===== image-gen.js : 生图功能模块（v2.0 拆分）=====
+// ===== image-gen.js : 生图功能模块（v2.0 拆分）=====
 // 模块名：image-gen.js
 // 版本：v102（cache-bust，2026-08-22：新增 zhipu 格式族——智谱 CogView paas v4 官方端点 /api/paas/v4/images/generations（原 flat 走 /v1 致 405 实锤修复），请求体不含 n、size 枚举/自定义、quality 条件传，响应 url 临时链接 30 天下载转存）
 // 迁移日期：2026-07-26
@@ -129,7 +129,8 @@ const IMAGE_FORMATS = {
     authPrefix: 'Bearer ',
     requestFormat: 'wanxiang',
     responseFormat: 'url_or_b64',
-    features: { supportsReferenceImage: true, supportsNegativePrompt: true, supportsCustomSize: true, supportsBatch: true, maxBatch: 4, supportsResolution: true, supportsAspectRatio: true },
+    // v123: prompt_extend / watermark 改由 features 声明（此前在 UI 层用 if (fmt === 'wanxiang') 硬编码）
+    features: { supportsReferenceImage: true, supportsNegativePrompt: true, supportsCustomSize: true, supportsBatch: true, maxBatch: 4, supportsResolution: true, supportsAspectRatio: true, supportsPromptExtend: true, supportsWatermark: true },
     // input.messages[].content[].text/image + parameters{prompt_extend, watermark, n, negative_prompt, size}
     buildBody: function(provider, ctx) {
       var contentParts = [{ type: 'text', text: ctx.prompt }];
@@ -267,6 +268,26 @@ function getImageFormat(name) {
   return IMAGE_FORMATS[name] || IMAGE_FORMATS.flat;
 }
 
+// v123: 模型目录归一化 —— p.models 可能是数组或逗号分隔字符串；空了用 defaultModel / 格式族默认值兜底。
+//   返回去重后的非空字符串数组，第一个视作默认模型。旧数据（只有 defaultModel）无需迁移即可读。
+function normalizeProviderModels(models, defaultModel, formatDefault) {
+  var list = [];
+  function push(v) {
+    if (typeof v !== 'string') return;
+    v = v.trim();
+    if (!v || list.indexOf(v) >= 0) return;
+    list.push(v);
+  }
+  if (Array.isArray(models)) {
+    models.forEach(push);
+  } else if (typeof models === 'string') {
+    models.split(/[,，\n]/).forEach(push);
+  }
+  push(defaultModel);
+  if (list.length === 0 && formatDefault) push(formatDefault);
+  return list;
+}
+
 function normalizeImageProvider(p) {
   if (!p || typeof p !== 'object') p = {};
   var formatName = migrateImageTemplate(p.template);
@@ -297,10 +318,13 @@ function normalizeImageProvider(p) {
     baseUrl: baseUrl,
     endpointPath: endpointPath,
     apiKey: p.apiKey || '',
+    // v123: 模型目录（第一个为默认）。只增不改：旧数据只有 defaultModel 时自动包成单元素数组。
+    models: normalizeProviderModels(p.models, p.defaultModel, format.defaultModel),
     authType: p.authType || format.authType,
     authHeader: p.authHeader || format.authHeader,
     authPrefix: p.authPrefix !== undefined ? p.authPrefix : format.authPrefix,
-    defaultModel: p.defaultModel || format.defaultModel || 'gpt-image-2',  // v103: 格式族 defaultModel 优先（minimax→image-01 等）
+    // v103: 格式族 defaultModel 兜底（minimax→image-01 等）；v123: 与 models[] 同源，保证下拉第一个就是它
+    defaultModel: normalizeProviderModels(p.models, p.defaultModel, format.defaultModel)[0] || 'gpt-image-2',
     requestFormat: format.requestFormat,
     responseFormat: format.responseFormat,
     // v106: features 一律以格式族定义为准（持久化 p.features 是旧版本派生的过期快照，
@@ -401,6 +425,9 @@ function openImageProviderEditor(idx) {
   document.getElementById('img-provider-url-input').value = p ? p.baseUrl : '';
   document.getElementById('img-provider-endpoint-input').value = p ? (p.endpointPath || '') : '';
   document.getElementById('img-provider-key-input').value = p ? p.apiKey : '';
+  // v123: 模型目录回填（数组 → 逗号分隔）
+  var modelsInput = document.getElementById('img-provider-models-input');
+  if (modelsInput) modelsInput.value = (p && Array.isArray(p.models)) ? p.models.join(', ') : '';
   document.getElementById('img-provider-default-model-input').value = p ? (p.defaultModel || '') : '';
   // 鉴权方式回填：与格式默认一致或未设则「跟随格式」
   var authSel = document.getElementById('img-provider-auth-select');
@@ -446,7 +473,10 @@ function saveImageProviderFromEditor() {
   var baseUrl = normalizeBaseUrl(document.getElementById('img-provider-url-input').value);
   var endpointPath = document.getElementById('img-provider-endpoint-input').value.trim();
   var apiKey = document.getElementById('img-provider-key-input').value.trim();
-  var defaultModel = document.getElementById('img-provider-default-model-input').value.trim();
+  var modelsInput = document.getElementById('img-provider-models-input');
+  var models = modelsInput ? modelsInput.value : '';
+  var defaultModelEl = document.getElementById('img-provider-default-model-input');
+  var defaultModel = defaultModelEl ? defaultModelEl.value.trim() : '';
   if (!name || !baseUrl || !apiKey) {
     showToast('请填写接口名称、地址和密钥', 'warn');
     return;
@@ -461,7 +491,9 @@ function saveImageProviderFromEditor() {
     baseUrl: baseUrl,
     endpointPath: endpointPath,
     apiKey: apiKey,
-    defaultModel: defaultModel || 'gpt-image-2'
+    // v123: 模型目录（逗号分隔）+ 可选默认模型；normalizeImageProvider 会归一化并保证 defaultModel = models[0]
+    models: models,
+    defaultModel: defaultModel
   };
   if (authOverride === 'bearer') {
     providerData.authType = 'bearer';
@@ -526,6 +558,9 @@ function onImageProviderPresetChange() {
     if (urlInput && !urlInput.value && preset.baseUrl) urlInput.value = preset.baseUrl;
     var modelInput = document.getElementById('img-provider-default-model-input');
     if (modelInput && !modelInput.value && preset.defaultModel) modelInput.value = preset.defaultModel;
+    // v123: 模型目录一并预填（用户已有内容时不覆盖）
+    var modelsInput = document.getElementById('img-provider-models-input');
+    if (modelsInput && !modelsInput.value && preset.defaultModel) modelsInput.value = preset.defaultModel;
     var endpointInput = document.getElementById('img-provider-endpoint-input');
     if (endpointInput && fmt.endpointPath) {
       // v104: 选预设时端点跟随格式。空值或残留 flat 通用默认时才覆盖，保留用户自定义端点
@@ -544,16 +579,61 @@ function renderImageProviderSelect() {
   var list = settings.imageProviders || [];
   if (list.length === 0) {
     sel.innerHTML = '<option disabled selected>请先在设置中添加生图接口</option>';
+    renderImageModelSelect();
     return;
   }
   sel.innerHTML = list.map(function(p) {
     return '<option value="' + escapeHtml(p.id) + '">' + escapeHtml(p.name) + '</option>';
   }).join('');
   if (settings.imageProviderId) sel.value = settings.imageProviderId;
-  // 同步模型输入框
-  var modelInput = document.getElementById('image-model-input');
-  var current = getCurrentImageProvider();
-  if (modelInput && current) modelInput.value = current.defaultModel || '';
+  renderImageModelSelect();
+}
+
+// v123: 模型下拉 —— 与对话界面 #model-select 同构（按接口分组的思想简化成「当前接口的模型目录」）。
+//   目录来自 provider.models（settings 里配的模型目录），末项固定「自定义…」切到自由输入框。
+//   记忆：settings.imageModelByProvider[providerId] 记录每个渠道上次选的模型，切渠道不覆盖用户的已选值。
+function renderImageModelSelect() {
+  var sel = document.getElementById('image-model-select');
+  var input = document.getElementById('image-model-input');
+  if (!sel) return;
+  var provider = getCurrentImageProvider();
+  var models = (provider && provider.models) ? provider.models.slice() : [];
+  var remembered = (settings.imageModelByProvider && provider) ? settings.imageModelByProvider[provider.id] : null;
+  var current = remembered || (provider ? provider.defaultModel : '') || '';
+  // 「自定义」态：当前值不在目录里，也允许（用户可能手填了未被收录的模型名）
+  var isCustom = current !== '' && models.indexOf(current) < 0;
+  var html = models.map(function(m) {
+    return '<option value="' + escapeHtml(m) + '"' + (m === current ? ' selected' : '') + '>' + escapeHtml(m) + '</option>';
+  }).join('');
+  if (models.length === 0) {
+    html = '<option value="">（未配置模型目录）</option>';
+  }
+  html += '<option value="__custom__"' + (isCustom || models.length === 0 ? ' selected' : '') + '>自定义…</option>';
+  sel.innerHTML = html;
+  // 同步自由输入框：仅自定义态显示
+  if (input) {
+    var showCustom = isCustom || models.length === 0;
+    input.style.display = showCustom ? '' : 'none';
+    input.value = showCustom ? current : '';
+  }
+}
+
+// v123: 读取当前生效的生图模型名（自定义输入框优先，其次下拉）
+function currentImageModel() {
+  var input = document.getElementById('image-model-input');
+  var sel = document.getElementById('image-model-select');
+  var provider = getCurrentImageProvider();
+  if (input && input.style.display !== 'none' && input.value.trim()) return input.value.trim();
+  if (sel && sel.value && sel.value !== '__custom__') return sel.value;
+  return (provider && provider.defaultModel) || '';
+}
+
+// v123: 记录「本渠道上次选的模型」，切换渠道时恢复而不是覆盖
+function rememberImageModel(model) {
+  var provider = getCurrentImageProvider();
+  if (!provider || !model) return;
+  if (!settings.imageModelByProvider) settings.imageModelByProvider = {};
+  settings.imageModelByProvider[provider.id] = model;
 }
 // F1: 更新图库计数显示
 function updateImageGalleryCount() {
@@ -567,17 +647,25 @@ function toggleImageView(open) {
   if (!imageView) return;
   state.imageViewOpen = !!open;
   imageView.style.display = open ? 'flex' : 'none';
-  var main = document.getElementById('main');
+  // v123: 生图打开时侧栏保留可用，用 body class 让出宽度
+  document.body.classList.toggle('image-view-open', !!open);
   var sidebarEl = document.getElementById('sidebar');
+  document.body.classList.toggle('sidebar-hidden', !!(sidebarEl && sidebarEl.classList.contains('hidden')));
+  var main = document.getElementById('main');
   if (open) {
     if (main) main.style.display = 'none';
-    if (sidebarEl) sidebarEl.classList.add('hidden');
+    // v123: 不再手动 hide 侧栏 —— 侧栏在生图界面里保持可用（可直接切会话），
+    //   层级问题由 CSS 修复（.image-view 与 .main 同层、不再低于 .sidebar）
     renderImageProviderSelect();
+    renderRecentImagePrompts();
     updateImageGalleryCount();
     renderImageStream();
     updateImageAdvancedVisibility();
+    updateImageSendButton();
+    setImageSendIcon(!!state._imageGenerating);
   } else {
     if (main) main.style.display = '';
+    closeImageCardMenu();
   }
 }
 
@@ -595,11 +683,12 @@ function updateImageAdvancedVisibility() {
   // 负面提示词：格式不支持时隐藏
   var negRow = document.getElementById('image-negative-prompt-row');
   if (negRow) negRow.style.display = (features && features.supportsNegativePrompt) ? '' : 'none';
-  // 提示词扩展/水印：仅通义万相（nested）显示
+  // v123: 提示词扩展/水印改为 features 驱动 —— 此前是 if (fmt === 'wanxiang') 硬编码，
+  //   新增厂商就得回来改这一处（v103 号称已去硬编码，实际只改了一半）。
   var promptExtendLabel = document.getElementById('image-prompt-extend-label');
-  if (promptExtendLabel) promptExtendLabel.style.display = (fmt === 'wanxiang') ? '' : 'none';
+  if (promptExtendLabel) promptExtendLabel.style.display = (features && features.supportsPromptExtend) ? '' : 'none';
   var watermarkLabel = document.getElementById('image-watermark-label');
-  if (watermarkLabel) watermarkLabel.style.display = (fmt === 'wanxiang') ? '' : 'none';
+  if (watermarkLabel) watermarkLabel.style.display = (features && features.supportsWatermark) ? '' : 'none';
   // 参考图按钮：始终显示，格式不支持时点击会提示（不再隐藏，避免用户找不到入口）
   var btnRef = document.getElementById('btn-image-ref');
   if (btnRef) btnRef.style.display = '';
@@ -610,6 +699,165 @@ function updateImageAdvancedVisibility() {
   }
 }
 
+// ===== v123: 错误条与图片菜单 =====
+
+// 结构化错误条：与对话界面 .interrupted-bar 同款（⚠ + 原因 + 下一步动作）
+//   v123 之前错误是一次性 DOM，切出视图即消失，也没有重试入口。
+function buildImageErrorBar() {
+  var err = state._imageLastError;
+  var wrap = document.createElement('div');
+  wrap.className = 'image-msg assistant';
+  var bubble = document.createElement('div');
+  bubble.className = 'img-bubble';
+  var bar = document.createElement('div');
+  bar.className = 'interrupted-bar';
+  var reason = document.createElement('span');
+  reason.className = 'interrupted-reason';
+  reason.textContent = '⚠ ' + (err && err.message ? err.message : '生成失败');
+  bar.appendChild(reason);
+  if (state._imageLastRequest) {
+    var retryBtn = document.createElement('button');
+    retryBtn.className = 'continue-btn';
+    retryBtn.textContent = '重试';
+    retryBtn.addEventListener('click', function() { retryLastImageGeneration(); });
+    bar.appendChild(retryBtn);
+  }
+  var dismissBtn = document.createElement('button');
+  dismissBtn.className = 'continue-btn image-error-dismiss';
+  dismissBtn.textContent = '知道了';
+  dismissBtn.addEventListener('click', function() {
+    state._imageLastError = null;
+    renderImageStream();
+  });
+  bar.appendChild(dismissBtn);
+  bubble.appendChild(bar);
+  wrap.appendChild(bubble);
+  return wrap;
+}
+
+// 图片卡片的「⋯」/ 长按菜单（复用对话气泡菜单的 .tree-node-menu 样式）
+function showImageCardMenu(event, imgId) {
+  closeImageCardMenu();
+  var img = (settings.images || []).find(function(x) { return x.id === imgId; });
+  if (!img) return;
+  var menu = document.createElement('div');
+  menu.id = 'image-card-menu';
+  menu.className = 'tree-node-menu bubble-context-menu';
+  function addItem(label, onClick, isDanger) {
+    var item = document.createElement('div');
+    item.className = 'tree-menu-item' + (isDanger ? ' tree-menu-danger' : '');
+    item.textContent = label;
+    item.addEventListener('click', function(e) {
+      e.stopPropagation();
+      closeImageCardMenu();
+      try { onClick(); } catch (err) { console.error('[image-gen] menu action failed:', err); }
+    });
+    menu.appendChild(item);
+  }
+  addItem('查看大图', function() { getImageDataUrl(img).then(function(d) { showImagePreview(d || img.externalUrl || '', img.id); }); });
+  addItem('保存到相册', function() { saveImageToDevice(img.id); });
+  addItem('分享', function() { shareImage(img.id); });
+  if (img.externalUrl) addItem('重新下载外链', function() { refetchExternalImage(img.id, false); });
+  addItem('复制提示词', function() {
+    var p = img.prompt || '';
+    if (!p) { showToast('这条记录没有提示词', 'info'); return; }
+    navigator.clipboard.writeText(p).then(function() { showToast('提示词已复制', 'success'); }).catch(function() { showToast('复制失败', 'warn'); });
+  });
+  addItem('以图改图', function() {
+    getImageDataUrl(img).then(function(d) {
+      var src = d || img.externalUrl;
+      if (!src) { showToast('图片数据不可用', 'warn'); return; }
+      state._imageRefDataUrls = [{ dataUrl: src, name: 'from-gallery', size: 0 }];
+      if (window.renderImageRefPreviewById) window.renderImageRefPreviewById();
+      var input = document.getElementById('image-prompt-input');
+      if (input && !input.innerText.trim() && img.prompt) { input.innerText = img.prompt; updateImageSendButton(); }
+      var refBtn = document.getElementById('btn-image-ref');
+      if (refBtn) { try { refBtn.scrollIntoView({ block: 'center', behavior: 'smooth' }); } catch (e) {} }
+      showToast('已设为参考图，改完描述后点生成', 'info');
+    });
+  });
+  addItem('再生成一张', function() {
+    // 用这条记录的提示词与模型重新提交（参数取当前控件，与对话「重试」语义一致：基于同一条输入）
+    var input = document.getElementById('image-prompt-input');
+    if (!input) return;
+    input.innerText = img.prompt || '';
+    var modelSel = document.getElementById('image-model-select');
+    var modelInput = document.getElementById('image-model-input');
+    if (img.model) {
+      if (modelSel) {
+        var has = Array.prototype.some.call(modelSel.options, function(o) { return o.value === img.model; });
+        if (has) modelSel.value = img.model;
+        else if (modelInput) { modelInput.value = img.model; modelInput.style.display = ''; modelSel.value = '__custom__'; }
+      }
+    }
+    updateImageSendButton();
+    showToast('已回填提示词，点生成即可再来一张', 'info');
+  });
+  addItem('删除', function() { deleteImageFromGallery(img.id); }, true);
+
+  var x = 0, y = 0;
+  if (event.touches && event.touches.length) { x = event.touches[0].clientX; y = event.touches[0].clientY; }
+  else if (event.changedTouches && event.changedTouches.length) { x = event.changedTouches[0].clientX; y = event.changedTouches[0].clientY; }
+  else { x = event.clientX || 0; y = event.clientY || 0; }
+  menu.style.left = x + 'px';
+  menu.style.top = y + 'px';
+  document.body.appendChild(menu);
+  requestAnimationFrame(function() {
+    var r = menu.getBoundingClientRect();
+    if (r.right > window.innerWidth - 8) menu.style.left = (window.innerWidth - r.width - 8) + 'px';
+    if (r.bottom > window.innerHeight - 8) menu.style.top = (window.innerHeight - r.height - 8) + 'px';
+    if (parseFloat(menu.style.top) < 8) menu.style.top = '8px';
+  });
+  setTimeout(function() {
+    document.addEventListener('click', closeImageCardMenu, { once: true });
+    document.addEventListener('contextmenu', closeImageCardMenu, { once: true });
+    document.addEventListener('scroll', closeImageCardMenu, { once: true, capture: true });
+  }, 50);
+}
+
+function closeImageCardMenu() {
+  var m = document.getElementById('image-card-menu');
+  if (m) m.remove();
+}
+
+// 图库菜单（顶栏「⋯」）：只做查看/清空这类整体操作，单张操作在卡片菜单里
+function showGalleryMenu(event) {
+  closeImageCardMenu();
+  var menu = document.createElement('div');
+  menu.id = 'image-card-menu';
+  menu.className = 'tree-node-menu bubble-context-menu';
+  var count = (settings.images || []).length;
+  function addItem(label, onClick, isDanger, disabled) {
+    var item = document.createElement('div');
+    item.className = 'tree-menu-item' + (isDanger ? ' tree-menu-danger' : '');
+    item.textContent = label;
+    if (disabled) { item.style.opacity = '.4'; item.style.pointerEvents = 'none'; }
+    item.addEventListener('click', function(e) {
+      e.stopPropagation();
+      closeImageCardMenu();
+      try { onClick(); } catch (err) { console.error('[image-gen] gallery action failed:', err); }
+    });
+    menu.appendChild(item);
+  }
+  addItem('共 ' + count + ' 张图片', function() {}, false, true);
+  addItem('清空图库', function() { clearImageGallery(); }, true, count === 0);
+  var x = 0, y = 0;
+  if (event.touches && event.touches.length) { x = event.touches[0].clientX; y = event.touches[0].clientY; }
+  else { x = event.clientX || 0; y = event.clientY || 0; }
+  menu.style.left = x + 'px';
+  menu.style.top = y + 'px';
+  document.body.appendChild(menu);
+  requestAnimationFrame(function() {
+    var r = menu.getBoundingClientRect();
+    if (r.right > window.innerWidth - 8) menu.style.left = (window.innerWidth - r.width - 8) + 'px';
+    if (r.bottom > window.innerHeight - 8) menu.style.top = (window.innerHeight - r.height - 8) + 'px';
+  });
+  setTimeout(function() {
+    document.addEventListener('click', closeImageCardMenu, { once: true });
+    document.addEventListener('scroll', closeImageCardMenu, { once: true, capture: true });
+  }, 50);
+}
+
 // F1: 渲染图片流（从 settings.images 全局图库读取，按时间倒序）
 function renderImageStream() {
   var stream = document.getElementById('image-stream');
@@ -618,17 +866,42 @@ function renderImageStream() {
   if (images.length === 0) {
     stream.innerHTML = '<div class="image-empty" id="image-empty">' +
       '<svg width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" opacity="0.4"><rect x="3" y="3" width="18" height="18" rx="2"/><circle cx="8.5" cy="8.5" r="1.5"/><polyline points="21 15 16 10 5 21"/></svg>' +
-      '<h2>生图</h2><p>输入提示词，生成图片</p></div>';
+      '<h2>生图</h2><p>输入提示词，生成图片</p>' +
+      // v123: 没有渠道时，空态直接给出去配置的入口（此前只能自己 back→设置→滚动→添加，共 7 步）
+      ((settings.imageProviders || []).length === 0
+        ? '<button type="button" class="img-action-btn image-empty-cta" id="btn-image-empty-setup">先去添加一个生图接口</button>'
+        : '') +
+      '</div>';
+    // v123: 图库为空但刚失败过时，错误条仍要出现（否则「失败」看起来像「什么都没发生」）
+    if (state._imageLastError) stream.appendChild(buildImageErrorBar());
+    var setupBtn = document.getElementById('btn-image-empty-setup');
+    if (setupBtn) setupBtn.addEventListener('click', function() {
+      // 打开设置并滚动到「生图 API」分组
+      toggleSettings(true);
+      setTimeout(function() {
+        var grp = document.querySelector('#settings-body details[data-group-key="image-provider"]');
+        if (grp) { grp.open = true; grp.scrollIntoView({ block: 'start', behavior: 'smooth' }); }
+      }, 80);
+    });
     return;
   }
   // 时间倒序展示（最新在最底部，因为渲染时按数组顺序，新图 push 到末尾）
+  // v123: 默认只渲染最近 PAGE_SIZE 条，「显示更早」按钮逐页展开 —— 避免一次重建几百个 <img>。
+  var PAGE_SIZE = 30;
+  var shown = Math.min(images.length, state._imagePageSize || PAGE_SIZE);
+  var startIdx = Math.max(0, images.length - shown);
   var html = '';
-  for (var i = 0; i < images.length; i++) {
+  if (startIdx > 0) {
+    html += '<div class="image-load-earlier"><button type="button" class="img-action-btn" id="btn-image-load-earlier">显示更早的 ' + startIdx + ' 条</button></div>';
+  }
+  for (var i = startIdx; i < images.length; i++) {
     var img = images[i];
-    // 优先用内存缓存的 dataUrl；APK 模式下 fileName 非空但 dataUrl 为空时先占位，异步加载
-    var imgSrc = img.dataUrl || '';
-    var needAsync = !imgSrc && !!img.fileName;
+    // v123: 优先缩略图（列表只加载小图），没有缩略图才回退全尺寸 / 异步读文件
+    var imgSrc = img.thumbDataUrl || '';
+    var needThumb = !imgSrc && !!(img.thumbName || img.fileName);
+    var needAsync = !imgSrc && !needThumb && !!img.fileName;
     var isExt = !!img.externalUrl;  // v120: 尚未落地的外链图
+    if (!imgSrc && !needThumb && !needAsync && isExt) imgSrc = img.externalUrl;
     // v69: 参考图缩略图示意（从 img.referenceImages 读取，不可点击）
     var refThumbsHtml = '';
     if (img.referenceImages && img.referenceImages.length > 0) {
@@ -640,7 +913,7 @@ function renderImageStream() {
     }
     html += '<div class="image-msg user"><div class="img-bubble"><p>' + escapeHtml(img.prompt || '(无提示词)') + '</p>' + refThumbsHtml + '</div></div>';
     html += '<div class="image-msg assistant"><div class="img-bubble"><div class="image-card">' +
-      '<img src="' + imgSrc + '" alt="生成的图片" data-image-id="' + img.id + '"' + (needAsync ? ' data-need-async="1"' : '') + (isExt ? ' data-external="1"' : '') + '>' +
+      '<img src="' + imgSrc + '" alt="生成的图片" loading="lazy" data-image-id="' + img.id + '"' + (needAsync ? ' data-need-async="1"' : '') + (needThumb ? ' data-need-thumb="1"' : '') + (isExt ? ' data-external="1"' : '') + '>' +
       '<div class="image-card-meta">' +
         '<span class="meta-tag">' + escapeHtml(img.model || '-') + '</span>' +
         '<span class="meta-tag">' + escapeHtml(img.actualSize || img.size || '-') + '</span>' +
@@ -650,12 +923,35 @@ function renderImageStream() {
       '<div class="image-card-actions">' +
         (isExt ? '<button class="img-action-btn" data-action="refetch" data-id="' + img.id + '">重新下载</button>' : '') +
         '<button class="img-action-btn" data-action="save" data-id="' + img.id + '">保存到相册</button>' +
-        '<button class="img-action-btn" data-action="delete" data-id="' + img.id + '">删除</button>' +
+        '<button class="img-action-btn" data-action="more" data-id="' + img.id + '">⋯</button>' +
       '</div>' +
     '</div></div></div>';
   }
   stream.innerHTML = html;
-  // 异步加载 Filesystem 中的图片（APK 模式）
+  // v123: 上一次失败的错误条（结构化留存，重渲染后仍在）
+  if (state._imageLastError) stream.appendChild(buildImageErrorBar());
+  // v123: 「显示更早」——逐页展开（每次再加载 30 条）
+  var loadEarlierBtn = document.getElementById('btn-image-load-earlier');
+  if (loadEarlierBtn) {
+    loadEarlierBtn.addEventListener('click', function() {
+      state._imagePageSize = (state._imagePageSize || 30) + 30;
+      renderImageStream();
+    });
+  }
+  // v123: 缩略图异步加载（列表主路径）—— 只读 96px 小图，不碰全尺寸原图
+  stream.querySelectorAll('img[data-need-thumb="1"]').forEach(function(imgEl) {
+    var imageId = imgEl.dataset.imageId;
+    var imgObj = (settings.images || []).find(function(x) { return x.id === imageId; });
+    if (!imgObj) return;
+    getImageThumbUrl(imgObj).then(function(thumbUrl) {
+      if (thumbUrl) { imgEl.src = thumbUrl; imgEl.removeAttribute('data-need-thumb'); return; }
+      // 没有缩略图（旧数据）→ 回退原图
+      getImageDataUrl(imgObj).then(function(dataUrl) {
+        if (dataUrl) imgEl.src = dataUrl; else showBrokenImageNote(imgEl, imgObj);
+      });
+    });
+  });
+  // 异步加载 Filesystem 中的图片（APK 模式，无缩略图的旧数据）
   stream.querySelectorAll('img[data-need-async="1"]').forEach(function(imgEl) {
     var imageId = imgEl.dataset.imageId;
     var imgObj = (settings.images || []).find(function(x) { return x.id === imageId; });
@@ -692,13 +988,40 @@ function renderImageStream() {
   });
   // 绑定操作按钮
   stream.querySelectorAll('.img-action-btn').forEach(function(btn) {
-    btn.addEventListener('click', function() {
+    btn.addEventListener('click', function(ev) {
       var action = btn.dataset.action;
       var id = btn.dataset.id;
-      if (action === 'delete') deleteImageFromGallery(id);
+      if (action === 'more') { ev.stopPropagation(); showImageCardMenu(ev, id); }
       else if (action === 'save') saveImageToDevice(id);
       else if (action === 'refetch') refetchExternalImage(id, false);
     });
+  });
+
+  // v123: 长按图片卡片出菜单（与对话气泡菜单一致：600ms、移动 >15px 取消）
+  stream.querySelectorAll('img[data-image-id]').forEach(function(imgEl) {
+    var timer = null, startX = 0, startY = 0, fired = false;
+    var cancel = function() { if (timer) { clearTimeout(timer); timer = null; } };
+    imgEl.addEventListener('touchstart', function(e) {
+      if (e.touches.length !== 1) { cancel(); return; }
+      startX = e.touches[0].clientX; startY = e.touches[0].clientY; fired = false;
+      cancel();
+      timer = setTimeout(function() {
+        timer = null; fired = true;
+        showImageCardMenu({ clientX: startX, clientY: startY, preventDefault: function() {} }, imgEl.dataset.imageId);
+      }, 600);
+    }, { passive: true });
+    imgEl.addEventListener('touchmove', function(e) {
+      if (!e.touches || !e.touches.length) return;
+      if (Math.abs(e.touches[0].clientX - startX) > 15 || Math.abs(e.touches[0].clientY - startY) > 15) cancel();
+    }, { passive: true });
+    imgEl.addEventListener('touchend', function(e) {
+      cancel();
+      // 长按已出菜单：阻止随后的 click 触发大图预览
+      if (fired) { fired = false; e.preventDefault(); }
+    });
+    imgEl.addEventListener('touchcancel', cancel);
+    // 桌面端：右键同样出菜单
+    imgEl.addEventListener('contextmenu', function(e) { e.preventDefault(); showImageCardMenu(e, imgEl.dataset.imageId); });
   });
   // 滚到底部（最新内容）
   setTimeout(function() { stream.scrollTop = stream.scrollHeight; }, 0);
@@ -713,7 +1036,8 @@ function renderImageStream() {
     var ind = document.getElementById('image-status-indicator');
     if (ind) ind.className = 'image-status-indicator loading';
     var sb = document.getElementById('btn-image-send');
-    if (sb) { sb.classList.add('stopping'); sb.title = '点击停止生成'; }
+    if (sb) { sb.classList.add('stopping'); sb.title = '停止等待'; }
+    setImageSendIcon(true);
   }
 }
 // v120: 「历史空文件残骸」的可读说明。
@@ -946,8 +1270,9 @@ function deleteImageFromGallery(id) {
   var idx = settings.images.findIndex(function(x) { return x.id === id; });
   if (idx < 0) return;
   var img = settings.images[idx];
-  // 同步删除 Filesystem 中的图片文件（APK 模式）
+  // 同步删除 Filesystem 中的图片文件（APK 模式）；v123: 缩略图一并删
   if (img.fileName) deleteImageFile(img.fileName);
+  if (img.thumbName) deleteImageFile(img.thumbName);
   settings.images.splice(idx, 1);
   saveImageProviders(); // 持久化 settings
   renderImageStream();
@@ -985,11 +1310,80 @@ function compressImageForGeneration(file) {
 // settings.images 只存元数据 + fileName；dataUrl 在 APK 模式下存到 Filesystem，浏览器模式仍存 dataUrl
 var IMAGE_STORE_DIR = 'chatlite_images';  // Filesystem 目录名（DATA）
 
+// v123: 生成缩略图（最长边 96px，JPEG 0.72）。图库列表用它，避免每次渲染都塞全尺寸 dataUrl —— 这是 OOM 的直接止血。
+//   返回 { thumbDataUrl, w, h }；失败返回 null（调用方回退到原图，不阻断主流程）。
+function buildImageThumbnail(dataUrl) {
+  return new Promise(function(resolve) {
+    try {
+      var probe = new Image();
+      probe.onload = function() {
+        try {
+          var maxSide = 96;
+          var scale = Math.min(1, maxSide / Math.max(probe.naturalWidth || 1, probe.naturalHeight || 1));
+          var tw = Math.max(1, Math.round((probe.naturalWidth || 1) * scale));
+          var th = Math.max(1, Math.round((probe.naturalHeight || 1) * scale));
+          var canvas = document.createElement('canvas');
+          canvas.width = tw;
+          canvas.height = th;
+          var ctx = canvas.getContext('2d');
+          ctx.drawImage(probe, 0, 0, tw, th);
+          resolve({
+            thumbDataUrl: canvas.toDataURL('image/jpeg', 0.72),
+            w: probe.naturalWidth || 0,
+            h: probe.naturalHeight || 0
+          });
+        } catch (e) { resolve(null); }
+      };
+      probe.onerror = function() { resolve(null); };
+      probe.src = dataUrl;
+    } catch (e) { resolve(null); }
+  });
+}
+
 // 把 dataUrl 写入 Filesystem，返回文件名（不含路径）
 // v120 守卫：此前对入参毫无校验，当外链 URL 被当作 dataUrl 传进来时，
 //   split(',') 取不到 base64 → data 写入空串 → 落下一个 0 字节文件，却返回文件名，
 //   调用方据此把 imgObj.dataUrl 置空、原始 URL 永久丢失（2026-10-12 实锤 9 张空文件）。
 //   现在：非 data URL 一律拒绝；base64 内容空或过短一律拒绝。
+// v123: 缩略图落盘（同目录，_thumb 后缀），返回文件名或 null
+async function writeThumbFile(thumbDataUrl, imgId) {
+  if (!isCapacitor() || !CapFilesystem) return null;
+  if (typeof thumbDataUrl !== 'string' || thumbDataUrl.slice(0, 5) !== 'data:') return null;
+  try {
+    var b64 = thumbDataUrl.split(',')[1] || '';
+    if (b64.length < 16) return null;
+    var fileName = imgId + '_thumb.jpg';
+    await CapFilesystem.writeFile({
+      path: IMAGE_STORE_DIR + '/' + fileName,
+      data: b64,
+      directory: 'DATA',
+      recursive: true,
+      encoding: 'utf8'
+    });
+    return fileName;
+  } catch (e) {
+    console.warn('writeThumbFile failed:', e);
+    return null;
+  }
+}
+
+// v123: 读缩略图（优先文件，其次内存字段，最后回退原图）
+async function getImageThumbUrl(img) {
+  if (!img) return null;
+  if (img.thumbDataUrl) return img.thumbDataUrl;
+  if (img.thumbName && isCapacitor() && CapFilesystem) {
+    try {
+      var res = await CapFilesystem.readFile({ path: IMAGE_STORE_DIR + '/' + img.thumbName, directory: 'DATA', encoding: 'utf8' });
+      if (res && res.data) {
+        var url = 'data:image/jpeg;base64,' + res.data;
+        img.thumbDataUrl = url;
+        return url;
+      }
+    } catch (e) { /* 回退到原图 */ }
+  }
+  return null;
+}
+
 async function writeImageFile(dataUrl, imgId) {
   if (!isCapacitor() || !CapFilesystem) return null;
   if (typeof dataUrl !== 'string' || dataUrl.slice(0, 5) !== 'data:') {
@@ -1248,6 +1642,133 @@ function base64ToBytes(b64) {
   for (var i = 0; i < len; i++) bytes[i] = binary.charCodeAt(i);
   return bytes;
 }
+// ===== v123: 交互一致性辅助 =====
+
+// 生图反馈振感：start / success / error 三种节拍。
+//   独立开关 settings.imageHaptic（默认开）+ 沿用 settings.hapticFeedback 总开关；
+//   降级链由 haptics.js 的 _fallbackHaptic 负责（rich-haptics → CapHaptics → navigator.vibrate）。
+function imageHaptic(kind) {
+  if (settings.imageHaptic === false) return;
+  if (settings.hapticFeedback === false) return;
+  try {
+    if (typeof triggerHapticFeedback === 'function') {
+      // 借用现有五档节奏里的字符/句末节拍，三类事件用不同内容触发不同质感
+      if (kind === 'success') triggerHapticFeedback('。');
+      else if (kind === 'error') triggerHapticFeedback('！');
+      else triggerHapticFeedback('a');
+    } else if (typeof _fallbackHaptic === 'function') {
+      _fallbackHaptic(kind === 'success' ? 'CLICK' : 'TICK');
+    }
+  } catch (e) { /* 振感失败绝不影响生图主流程 */ }
+}
+
+// 发送键同坑位双语义：空闲 ▶ / 生成中 ■（与对话界面 #btn-send ↔ #btn-stop 一致）
+function setImageSendIcon(generating) {
+  var btn = document.getElementById('btn-image-send');
+  if (!btn) return;
+  var send = btn.querySelector('.icon-send');
+  var stop = btn.querySelector('.icon-stop');
+  if (send) send.style.display = generating ? 'none' : '';
+  if (stop) stop.style.display = generating ? '' : 'none';
+  btn.title = generating ? '停止等待' : '生成';
+}
+
+// 发送键可用性：与对话 updateSendButton 同构（有文字才可点，生成中仍可点=停止）
+function updateImageSendButton() {
+  var input = document.getElementById('image-prompt-input');
+  var btn = document.getElementById('btn-image-send');
+  if (!input || !btn) return;
+  var hasText = input.innerText.trim().length > 0;
+  if (state._imageGenerating) { btn.disabled = false; return; }
+  btn.disabled = !hasText;
+}
+
+// 最近提示词：发送即记录（失败也算用过），最多 20 条、去重、最新在前
+function pushRecentImagePrompt(prompt) {
+  if (!prompt || !prompt.trim()) return;
+  var list = Array.isArray(settings.imageRecentPrompts) ? settings.imageRecentPrompts.slice() : [];
+  var text = prompt.trim();
+  var idx = list.indexOf(text);
+  if (idx >= 0) list.splice(idx, 1);
+  list.unshift(text);
+  if (list.length > 20) list = list.slice(0, 20);
+  settings.imageRecentPrompts = list;
+  saveSettings();
+  renderRecentImagePrompts();
+}
+
+// 渲染最近提示词胶囊（输入框上方一行，点击回填）
+function renderRecentImagePrompts() {
+  var el = document.getElementById('image-recent-prompts');
+  if (!el) return;
+  var list = Array.isArray(settings.imageRecentPrompts) ? settings.imageRecentPrompts : [];
+  if (list.length === 0) { el.style.display = 'none'; el.innerHTML = ''; return; }
+  el.style.display = 'flex';
+  el.innerHTML = list.slice(0, 5).map(function(p, i) {
+    var label = p.length > 24 ? p.slice(0, 24) + '…' : p;
+    return '<button type="button" class="image-recent-pill" data-idx="' + i + '" title="' + escapeHtml(p) + '">' + escapeHtml(label) + '</button>';
+  }).join('');
+  el.querySelectorAll('.image-recent-pill').forEach(function(btn) {
+    btn.addEventListener('click', function() {
+      var p = list[parseInt(btn.dataset.idx, 10)];
+      var input = document.getElementById('image-prompt-input');
+      if (!input || !p) return;
+      input.innerText = p;
+      input.focus();
+      updateImageSendButton();
+      // 光标移到末尾，方便继续编辑
+      try {
+        var range = document.createRange();
+        range.selectNodeContents(input);
+        range.collapse(false);
+        var sel = window.getSelection();
+        sel.removeAllRanges();
+        sel.addRange(range);
+      } catch (e) { /* 忽略选区失败 */ }
+    });
+  });
+}
+
+// 重试上一次请求：用留存快照重新提交（不改原记录，等价于对话界面的「重新生成」）
+function retryLastImageGeneration() {
+  var last = state._imageLastRequest;
+  if (!last) { showToast('没有可重试的请求', 'warn'); return; }
+  var input = document.getElementById('image-prompt-input');
+  if (!input) return;
+  input.innerText = last.promptRaw || '';
+  // 参考图恢复
+  state._imageRefDataUrls = (last.refDataUrls || []).map(function(d, i) {
+    return { dataUrl: d, name: 'ref' + (i + 1), size: 0 };
+  });
+  if (typeof window.renderImageRefPreviewById === 'function') window.renderImageRefPreviewById();
+  // 参数恢复（只恢复能安全映射回控件的部分）
+  var r = last.request || {};
+  var resSel = document.getElementById('image-resolution-select');
+  if (resSel && r.resolution) resSel.value = r.resolution;
+  var aspectSel = document.getElementById('image-aspect-select');
+  if (aspectSel && r.aspect) aspectSel.value = r.aspect;
+  var qualitySel = document.getElementById('image-quality-select');
+  if (qualitySel && r.quality) qualitySel.value = r.quality;
+  var batchEl = document.getElementById('image-batch-n');
+  if (batchEl && r.n) batchEl.value = String(r.n);
+  // 渠道与模型恢复
+  if (last.providerId && settings.imageProviderId !== last.providerId) {
+    settings.imageProviderId = last.providerId;
+    renderImageProviderSelect();
+  }
+  if (last.model) {
+    var modelSel = document.getElementById('image-model-select');
+    var modelInput = document.getElementById('image-model-input');
+    if (modelSel) {
+      var has = Array.prototype.some.call(modelSel.options, function(o) { return o.value === last.model; });
+      if (has) { modelSel.value = last.model; }
+      else if (modelInput) { modelInput.value = last.model; modelInput.style.display = ''; if (modelSel) modelSel.value = '__custom__'; }
+    }
+  }
+  updateImageSendButton();
+  showToast('已恢复上次的提示词与参数，确认后点生成', 'info');
+}
+
 // F1: 核心生图函数 —— 调用 API、处理响应、存入图库
 async function generateImage() {
   var promptInput = document.getElementById('image-prompt-input');
@@ -1256,16 +1777,25 @@ async function generateImage() {
     showToast('请输入提示词', 'warn');
     return;
   }
+  // v123: 保留用户原话，供「最近提示词」回填与「查看实际发送内容」使用
+  var rawPrompt = prompt;
   // v101: prompt 前缀体系（全局前缀 + 消息模板 {prompt} 占位）
   prompt = combineImagePrefixes(settings.imagePromptPrefix || '', prompt, settings.imagePromptTemplate || '');
   var provider = getCurrentImageProvider();
   if (!provider) {
-    showToast('请先在设置中添加生图接口', 'warn');
+    // v123: 光提示不够 —— 直接把用户送到该去的地方
+    showToast('还没有生图接口，先去设置里添加一个', 'warn');
+    toggleSettings(true);
+    setTimeout(function() {
+      var grp = document.querySelector('#settings-body details[data-group-key="image-provider"]');
+      if (grp) { grp.open = true; grp.scrollIntoView({ block: 'start', behavior: 'smooth' }); }
+    }, 80);
     return;
   }
-  var modelInput = document.getElementById('image-model-input');
-  var model = modelInput ? modelInput.value.trim() : '';
-  if (!model) model = provider.defaultModel || 'dall-e-3';
+  // v123: 模型来自「渠道 + 模型」两级下拉（自定义时读输入框），不再直接读裸文本框
+  var model = currentImageModel();
+  if (!model) model = provider.defaultModel || 'gpt-image-2';
+  rememberImageModel(model);
   // v101: 模型特定提示词截断（dall-e-2/3、gpt-image 有字符上限）
   prompt = adaptPromptForModel(model, prompt);
 
@@ -1288,10 +1818,6 @@ async function generateImage() {
   var qualitySel = document.getElementById('image-quality-select');
   // v101: 负面前缀合并（全局负面前缀 + 输入框负面词）
   var negativePrompt = combineImagePrefixes(settings.imageNegativePrefix || '', negPromptEl ? negPromptEl.value.trim() : '', '');
-  var n = Math.max(1, Math.min(4, parseInt(batchNEl ? batchNEl.value : '1') || 1));
-  if (provider.features && provider.features.maxBatch) {
-    n = Math.min(n, provider.features.maxBatch);
-  }
   var promptExtend = promptExtendEl ? promptExtendEl.checked : true;
   var watermark = watermarkEl ? watermarkEl.checked : false;
   var quality = qualitySel ? qualitySel.value : 'auto';
@@ -1306,6 +1832,23 @@ async function generateImage() {
   if (refDataUrls.length > 0 && provider.features && !provider.features.supportsReferenceImage) {
     showToast('当前接口格式不支持参考图，已忽略', 'warn');
     refDataUrls = [];
+  }
+
+  // v123: 生成数量的钳制不再静默 —— 带上参考图时多数格式只收单张，明确告诉用户
+  var nWanted = Math.max(1, Math.min(4, parseInt(batchNEl ? batchNEl.value : '1') || 1));
+  var n = nWanted;
+  var maxBatch = (provider.features && provider.features.maxBatch) ? provider.features.maxBatch : 4;
+  if (refDataUrls.length > 0 && maxBatch > 1) maxBatch = 1;
+  if (nWanted > maxBatch) {
+    n = maxBatch;
+    showToast(
+      refDataUrls.length > 0
+        ? '带参考图时该接口只生成 1 张，已按 1 张提交'
+        : '该模型一次最多 ' + maxBatch + ' 张，已按 ' + maxBatch + ' 张提交',
+      'info'
+    );
+  } else {
+    n = Math.min(n, maxBatch);
   }
 
   // 构建请求体：按格式注册表分发（requestFormat → buildBody），主流程无模板名硬编码
@@ -1324,11 +1867,39 @@ async function generateImage() {
 
   var req = buildImageRequestPayload(provider, reqBody);
 
+  // v123: 「上一次请求」结构化留存 —— 失败后可直接重试，不再需要用户从头重填。
+  //   与对话界面的「重新生成」同源：参数来自这一次提交的快照，而不是当前控件。
+  state._imageLastRequest = {
+    promptRaw: rawPrompt,
+    promptFinal: prompt,
+    negativePrompt: negativePrompt,
+    model: model,
+    providerId: provider.id,
+    providerName: provider.name,
+    request: {
+      resolution: resolution, aspect: aspect, quality: quality, n: n,
+      size: sizeConfig.size || '', promptExtend: promptExtend, watermark: watermark
+    },
+    refDataUrls: refDataUrls.slice(),
+    createdAt: Date.now()
+  };
+  // v123: 记入最近提示词（发送即记，失败也算用过）；清空输入框（对齐对话界面「发完即清空」）
+  pushRecentImagePrompt(rawPrompt);
+  if (promptInput) promptInput.innerText = '';
+  updateImageSendButton();
+
   // 设置状态指示器
   var indicator = document.getElementById('image-status-indicator');
   if (indicator) { indicator.className = 'image-status-indicator loading'; }
   var sendBtn = document.getElementById('btn-image-send');
-  if (sendBtn) { sendBtn.disabled = false; sendBtn.classList.add('stopping'); sendBtn.title = '点击停止生成'; }
+  if (sendBtn) {
+    sendBtn.disabled = false;
+    sendBtn.classList.add('stopping');
+    sendBtn.title = '停止等待';
+    setImageSendIcon(true);
+  }
+  // v123: 生图反馈（与对话流式振感同一套降级链）
+  imageHaptic('start');
 
   // 显示用户消息气泡
   var stream = document.getElementById('image-stream');
@@ -1347,7 +1918,12 @@ async function generateImage() {
       }
       refThumbsHtml += '<span class="img-ref-count">' + refDataUrls.length + ' 张参考图</span></div>';
     }
-    userMsg.innerHTML = '<div class="img-bubble"><p>' + escapeHtml(prompt) + '</p>' + refThumbsHtml + '</div>';
+    // v123: 气泡显示**用户原话**（不是拼接后的最终串）；前缀/模板造成的差异用一行小字提示，点开可看实际发送内容
+    var prefixDiff = (rawPrompt !== prompt);
+    var finalHint = prefixDiff
+      ? '<details class="img-prompt-final"><summary>已套用前缀 / 模板，点开看实际发送内容</summary><pre>' + escapeHtml(prompt) + '</pre></details>'
+      : '';
+    userMsg.innerHTML = '<div class="img-bubble"><p>' + escapeHtml(rawPrompt) + '</p>' + refThumbsHtml + finalHint + '</div>';
     stream.appendChild(userMsg);
     // 加载占位
     var loadingMsg = document.createElement('div');
@@ -1428,15 +2004,29 @@ async function generateImage() {
         fileName = await writeImageFile(dataUrl, newImgId);
       }
       if (externalUrl) pendingExternalIds.push(newImgId);
+      // v123: 缩略图 —— 列表只加载小图，全尺寸图只在预览时读。这是 OOM 的直接止血。
+      var thumbMeta = null;
+      var thumbName = null;
+      if (!externalUrl) {
+        thumbMeta = await buildImageThumbnail(dataUrl);
+        if (thumbMeta && thumbMeta.thumbDataUrl) {
+          if (isCapacitor() && CapFilesystem) {
+            thumbName = await writeThumbFile(thumbMeta.thumbDataUrl, newImgId);
+          }
+        }
+      }
       var imgObj = {
         id: newImgId,
         // APK 模式 fileName 非空时不存 dataUrl（从 Filesystem 读）；浏览器模式或写入失败时仍存 dataUrl
         dataUrl: fileName ? null : dataUrl,
         fileName: fileName,
+        // v123: 缩略图（APK 落文件、浏览器留内存）；渲染列表优先用它
+        thumbName: thumbName,
+        thumbDataUrl: (thumbName || !thumbMeta) ? null : thumbMeta.thumbDataUrl,
         // v120: 外链地址永久保留，供「重新下载」与「打开链接」使用
         externalUrl: externalUrl,
-        thumbnailDataUrl: null,  // TODO: F2/F4 优化时再生成缩略图
-        prompt: prompt,
+        prompt: rawPrompt,   // v123: 存用户原话（不是拼接后的最终串），回填/复制才符合直觉
+        promptFinal: prompt, // v123: 实际发送的最终串，供「查看实际发送」
         negativePrompt: negativePrompt,
         referenceImageId: null,
         referenceImages: (refDataUrls && refDataUrls.length > 0) ? refDataUrls.slice() : null,  // v69: 保存参考图 dataUrl（已压缩）用于消息流缩略图展示
@@ -1459,14 +2049,16 @@ async function generateImage() {
     // v120: 外链静默落地——隔 2.5s 再试一次下载（图床瞬时打嗝多半已恢复），
     //   成功则替换为本地文件，用户无感；失败则保留外链（仍可直接显示，可手动「重新下载」）
     if (pendingExternalIds.length > 0) scheduleExternalRefetch(pendingExternalIds, 2500);
-    // v99: 成功后熔断清零
+    // v99: 成功后熔断清零；v123: 旧错误条一并清掉
     clearFailStreak(state._imageProviderFailStreak, provider.id);
+    state._imageLastError = null;
     saveImageProviders();
     renderImageStream();
     updateImageGalleryCount();
     if (indicator) indicator.className = 'image-status-indicator ok';
     var doneMsg = '生成完成，共 ' + savedCount + ' 张' + (fallbackCount > 0 ? '（其中 ' + fallbackCount + ' 张暂以外链显示，后台会自动重试下载）' : '');
     showToast(doneMsg, 'success');
+    imageHaptic('success');
     // v70: 无论前后台都发系统通知（前台 toast + 通知栏，后台仅通知栏）
     notifyImageComplete(savedCount);
   } catch(e) {
@@ -1487,20 +2079,28 @@ async function generateImage() {
       var bs = bumpFailStreak(state._imageProviderFailStreak, provider.id, 3);
       if (bs.tripped) errMsg += ' ——该接口连续失败 ' + bs.count + ' 次，建议检查接口配置';
     }
-    // 在图片流中显示错误消息
-    if (stream) {
-      var errEl = document.createElement('div');
-      errEl.className = 'image-msg assistant';
-      errEl.innerHTML = '<div class="img-bubble"><div class="image-error">' + escapeHtml(errMsg) + '</div></div>';
-      stream.appendChild(errEl);
-      stream.scrollTop = stream.scrollHeight;
-    }
+    // v123: 错误改为「结构化留存 + 对话同款 interrupted-bar」——
+    //   旧版是直接 append 的一次性 DOM，切出视图就没了，也没法重试。
+    state._imageLastError = {
+      at: Date.now(),
+      message: errMsg,
+      type: imgErr.type || 'unknown',
+      status: imgErr.status || null,
+      retryable: imgErr.retryable !== false
+    };
+    renderImageStream();  // 整流重建后，错误条仍会出现在末尾（由 renderImageStream 负责渲染）
+    imageHaptic('error');
     showToast(errMsg, 'warn');
     console.error('generateImage failed:', e);
   } finally {
     clearInterval(progressTimer);
     state._imageProgress = null;  // v99: 清理进度状态
-    if (sendBtn) { sendBtn.disabled = false; sendBtn.classList.remove('stopping'); sendBtn.title = ''; }
+    if (sendBtn) {
+      sendBtn.disabled = false;
+      sendBtn.classList.remove('stopping');
+      sendBtn.title = '';
+      setImageSendIcon(false);
+    }
     state._imageAbortController = null;  // v66: 清理引用
     state._imageGenerating = false;  // 清除请求进行中标记
     state._imageStopRequested = false;  // v99: 复位停止标记
@@ -1861,6 +2461,57 @@ function updateImageProgress() {
   textEl.textContent = label + detail + '（已等待 ' + min + ' 分 ' + sec + ' 秒）';
 }
 
+// v123: 探测上游 /models（不花钱）。
+//   成功则把模型 id 填进「模型目录」输入框（仅当该框为空时，不覆盖用户手填），
+//   返回 { count, autoFilled }。失败抛错由调用方决定是否继续。
+async function probeImageProviderModels() {
+  var urlInput = document.getElementById('img-provider-url-input');
+  var keyInput = document.getElementById('img-provider-key-input');
+  var endpointInput = document.getElementById('img-provider-endpoint-input');
+  var formatSel = document.getElementById('img-provider-format-select');
+  if (!urlInput || !urlInput.value.trim()) throw new Error('no url');
+  var baseUrl = normalizeBaseUrl(urlInput.value);
+  var fmtName = (formatSel && formatSel.value) || 'flat';
+  var fmtName2 = migrateImageTemplate(fmtName);
+  var modelsPath = '/v1/models';
+  if (fmtName2 === 'gemini_image') modelsPath = '/v1beta/models';
+  else if (fmtName2 === 'wanxiang') modelsPath = '/api/v1/models';
+  // 显式 endpointPath 里若已带版本段，沿用它；否则用格式默认
+  var ep = (endpointInput && endpointInput.value.trim()) || '';
+  if (ep) {
+    var m = ep.match(/^(\/[^:]*\/)?(v\w+)?/);
+    if (m && m[0]) modelsPath = m[0].replace(/\/$/, '') + '/models';
+  }
+  var url = new URL(modelsPath, baseUrl).toString();
+  var headers = {};
+  var key = keyInput ? keyInput.value.trim() : '';
+  if (key) {
+    if (fmtName2 === 'gemini_image') headers['x-goog-api-key'] = key;
+    else headers['Authorization'] = 'Bearer ' + key;
+  }
+  var controller = new AbortController();
+  var timer = setTimeout(function() { controller.abort(); }, 8000);
+  var resp;
+  try {
+    resp = await fetch(url, { headers: headers, signal: controller.signal });
+  } finally {
+    clearTimeout(timer);
+  }
+  if (!resp.ok) throw new Error('HTTP ' + resp.status);
+  var data = await resp.json();
+  var ids = [];
+  if (data && Array.isArray(data.data)) ids = data.data.map(function(m) { return m.id || m.name; }).filter(Boolean);
+  else if (data && Array.isArray(data.models)) ids = data.models.map(function(m) { return (m.name || '').replace(/^models\//, '') || m.id; }).filter(Boolean);
+  if (ids.length === 0) throw new Error('no models');
+  var modelsInput = document.getElementById('img-provider-models-input');
+  var autoFilled = false;
+  if (modelsInput && !modelsInput.value.trim()) {
+    modelsInput.value = ids.slice(0, 30).join(', ');
+    autoFilled = true;
+  }
+  return { count: ids.length, autoFilled: autoFilled };
+}
+
 // v99: 测试连接——用表单当前值（未保存）发最小请求验证 baseUrl/端点/鉴权
 async function testImageProviderConnection() {
   var btn = document.getElementById('btn-test-image-provider');
@@ -1874,7 +2525,12 @@ async function testImageProviderConnection() {
   }
   btn.disabled = true;
   resultEl.className = 'image-provider-test-result';
-  resultEl.textContent = '测试中（将发送 1 张最小生成请求）...';
+  resultEl.textContent = '检测中...';
+  try {
+    // v123: 先探 /models —— 不花钱，能确认地址/密钥/鉴权三件事；只有它不通才考虑发真实生图请求。
+    var probeOk = await probeImageProviderModels();
+    if (probeOk.autoFilled) resultEl.textContent = '已发现 ' + probeOk.count + ' 个模型，正在验证生图端点...';
+  } catch (e0) { /* 探测失败不阻断，继续走真实请求 */ }
   try {
     var nameInput = document.getElementById('img-provider-name-input');
     var endpointInput = document.getElementById('img-provider-endpoint-input');
@@ -1906,12 +2562,12 @@ async function testImageProviderConnection() {
     var controller = new AbortController();
     var resp = await fetchWithImageRetry({
       url: req.url, headers: req.headers, payload: req.payload,
-      isFormData: false, timeoutMs: 10000, signal: controller.signal, maxRetries: 0
+      timeoutMs: 10000, signal: controller.signal, maxRetries: 0
     });
     var data = await resp.json();
     var results = fmt.parseResponse(data) || [];
     resultEl.className = 'image-provider-test-result ok';
-    resultEl.textContent = '连接成功 ✓（端点响应正常，' + (results.length > 0 ? '返回 ' + results.length + ' 张图片数据' : '请求已受理') + '）';
+    resultEl.textContent = '连接成功 ✓（端点响应正常，' + (results.length > 0 ? '返回 ' + results.length + ' 张图片数据' : '请求已受理') + '）——本次测试发出 1 次真实生图请求';
   } catch(e) {
     var cls = e.imageError || classifyImageError(null, '', e);
     resultEl.className = 'image-provider-test-result err';
@@ -2054,6 +2710,7 @@ async function clearImageGallery() {
   }
   if (!confirm('确定清空图库？共 ' + settings.images.length + ' 张图片，此操作不可撤销。')) return;
   var files = settings.images.map(function(x) { return x.fileName; }).filter(Boolean);
+  var thumbFiles = settings.images.map(function(x) { return x.thumbName; }).filter(Boolean);
   settings.images = [];
   saveImageProviders();
   renderImageStream();
@@ -2061,6 +2718,7 @@ async function clearImageGallery() {
   var extra = 0;
   if (isCapacitor() && CapFilesystem) {
     for (var i = 0; i < files.length; i++) { deleteImageFile(files[i]); }
+    for (var ti = 0; ti < thumbFiles.length; ti++) { deleteImageFile(thumbFiles[ti]); }
     // 顺手回收历史遗留的孤儿文件（目录里有、但已无任何记录指向）
     extra = await purgeOrphanImageFiles([]);
   }
@@ -2095,21 +2753,46 @@ async function purgeOrphanImageFiles(keepNames) {
 function initImageView() {
   var btnOpen = document.getElementById('btn-open-image-view');
   if (btnOpen) btnOpen.addEventListener('click', function() { toggleImageView(true); });
+  // v123: 顶栏入口（与分支/导出/导入/设置同排，对齐对话界面的功能入口直觉）
+  var btnOpenTop = document.getElementById('btn-open-image-view-top');
+  if (btnOpenTop) btnOpenTop.addEventListener('click', function() { toggleImageView(true); });
+  // v123: 图库菜单
+  var btnGalleryMenu = document.getElementById('btn-image-gallery-menu');
+  if (btnGalleryMenu) btnGalleryMenu.addEventListener('click', function(ev) { ev.stopPropagation(); showGalleryMenu(ev); });
 
   var btnBack = document.getElementById('btn-image-back');
   if (btnBack) btnBack.addEventListener('click', function() { toggleImageView(false); });
 
   // 接口选择切换
+  // v123: 不再把用户已选模型静默覆盖成 defaultModel —— 改为「恢复该渠道上次选的模型」，
+  //       只有该渠道从没选过时才落到 defaultModel（并在下拉里显式可见，用户能自己改）。
   var imgProvSel = document.getElementById('image-provider-select');
   if (imgProvSel) imgProvSel.addEventListener('change', function() {
     settings.imageProviderId = imgProvSel.value;
     saveImageProviders();
-    var modelInput = document.getElementById('image-model-input');
-    var current = getCurrentImageProvider();
-    if (modelInput && current) modelInput.value = current.defaultModel || '';
+    renderImageModelSelect();
     updateImageAdvancedVisibility();
     refreshImageModelSuggestions();  // v101: 切接口后刷新模型建议
   });
+
+  // v123: 模型下拉切换 —— 选「自定义…」时露出自由输入框
+  var imgModelSel = document.getElementById('image-model-select');
+  if (imgModelSel) imgModelSel.addEventListener('change', function() {
+    var customInput = document.getElementById('image-model-input');
+    if (imgModelSel.value === '__custom__') {
+      if (customInput) { customInput.style.display = ''; customInput.focus(); }
+      return;
+    }
+    if (customInput) { customInput.style.display = 'none'; customInput.value = ''; }
+    rememberImageModel(imgModelSel.value);
+    saveSettings();
+  });
+  var imgModelInput = document.getElementById('image-model-input');
+  if (imgModelInput) {
+    imgModelInput.addEventListener('change', function() {
+      if (imgModelInput.value.trim()) { rememberImageModel(imgModelInput.value.trim()); saveSettings(); }
+    });
+  }
 
   // 参考图选择
   var btnRef = document.getElementById('btn-image-ref');
@@ -2148,6 +2831,7 @@ function initImageView() {
   }
 
   // 渲染参考图预览（多张）
+  // v123: 挂到全局，供「重试上次请求」等外部逻辑复用（它需要改 state 后重绘缩略图）
   function renderImageRefPreview() {
     var preview = document.getElementById('image-ref-preview');
     if (!preview) return;
@@ -2194,6 +2878,13 @@ function initImageView() {
     });
   }
 
+  // v123: 供外部（重试上次请求）重绘参考图；同时同步按钮高亮
+  window.renderImageRefPreviewById = function() {
+    renderImageRefPreview();
+    var btnRef = document.getElementById('btn-image-ref');
+    if (btnRef) btnRef.classList.toggle('has-ref', (state._imageRefDataUrls || []).length > 0);
+  };
+
   // 宽高比自定义切换
   var aspectSel = document.getElementById('image-aspect-select');
   var aspectCustom = document.getElementById('image-aspect-custom');
@@ -2203,14 +2894,24 @@ function initImageView() {
     });
   }
 
+  // v123: 侧栏开合时同步 body class（生图视图靠它决定是否让出侧栏宽度）—— 所有平台都要
+  (function() {
+    var sidebarEl = document.getElementById('sidebar');
+    if (!sidebarEl) return;
+    var syncSidebarClass = function() {
+      document.body.classList.toggle('sidebar-hidden', sidebarEl.classList.contains('hidden'));
+    };
+    syncSidebarClass();
+    var sidebarBtn = document.getElementById('btn-sidebar-toggle');
+    if (sidebarBtn) sidebarBtn.addEventListener('click', function() { setTimeout(syncSidebarClass, 0); });
+    try { new MutationObserver(syncSidebarClass).observe(sidebarEl, { attributes: true, attributeFilter: ['class'] }); } catch (e) {}
+  })();
+
   // v90: 提示词输入回车仅换行（contenteditable 默认），生成走生成按钮
   var promptInput = document.getElementById('image-prompt-input');
   var sendBtn = document.getElementById('btn-image-send');
   if (promptInput) {
-    promptInput.addEventListener('input', function() {
-      var hasText = promptInput.innerText.trim().length > 0;
-      if (sendBtn) sendBtn.disabled = !hasText;
-    });
+    promptInput.addEventListener('input', function() { updateImageSendButton(); });
   }
   if (sendBtn) sendBtn.addEventListener('click', function() {
     // v66: 生成中点击则停止，否则触发生成
@@ -2223,6 +2924,9 @@ function initImageView() {
       generateImage();
     }
   });
+  // v123: 初始态（清空输入框后按钮要立刻回到 disabled）
+  updateImageSendButton();
+  renderRecentImagePrompts();
 
   // v99: 测试连接按钮
   var testBtn = document.getElementById('btn-test-image-provider');
@@ -2271,8 +2975,6 @@ function initImageView() {
   if (btnSaveImgProv) btnSaveImgProv.addEventListener('click', saveImageProviderFromEditor);
   var btnCloseImgProv = document.getElementById('btn-close-image-provider-editor');
   if (btnCloseImgProv) btnCloseImgProv.addEventListener('click', closeImageProviderEditor);
-  var btnClearGallery = document.getElementById('btn-clear-image-gallery');
-  if (btnClearGallery) btnClearGallery.addEventListener('click', clearImageGallery);
 
   // 边缘滑动返回（从左边缘 24px 内向右滑动 >80px 触发）
   var imageView = document.getElementById('image-view');
@@ -2306,7 +3008,12 @@ function initImageView() {
   // Android 物理返回键拦截（ Capacitor 平台用 BackButton 事件）
   if (isCapacitor() && Capacitor.Plugins && Capacitor.Plugins.App) {
     var App = Capacitor.Plugins.App;
+    // v123: 返回键改成「层栈」——谁在最上层就关谁（此前菜单/预览不在这条链上，按返回键会直接跳出去）
     App.addListener('backButton', function() {
+      var menu = document.getElementById('image-card-menu');
+      if (menu) { closeImageCardMenu(); return; }
+      var preview = document.querySelector('.image-preview-overlay');
+      if (preview) { closeImagePreview(); return; }
       if (state.imageViewOpen) {
         toggleImageView(false);
       } else if (state.settingsOpen) {
@@ -2316,6 +3023,7 @@ function initImageView() {
         App.exitApp();
       }
     });
+
     // F1: 监听前后台切换，生图请求进行中时切后台不报错（请求继续在原生层等待，切回前台后正常处理）
     App.addListener('appStateChange', function(info) {
       var isActive = info.isActive;
@@ -2393,7 +3101,10 @@ async function migrateImportedImagesToFilesystem() {
   //   宁可漏删，不可误删；用户主动清空图库那条路径由 clearImageGallery 负责收尾。
   if (!images.length) return;
   var keep = [];
-  for (var j = 0; j < images.length; j++) { if (images[j].fileName) keep.push(images[j].fileName); }
+  for (var j = 0; j < images.length; j++) {
+    if (images[j].fileName) keep.push(images[j].fileName);
+    if (images[j].thumbName) keep.push(images[j].thumbName);  // v123: 缩略图也是「有主文件」
+  }
   var removedCount = await purgeOrphanImageFiles(keep);
   if (removedCount > 0) console.log('[image-gen] 已回收孤儿文件 ' + removedCount + ' 个');
 }

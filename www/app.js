@@ -1,4 +1,4 @@
-﻿// ===== Capacitor Environment Detection =====
+// ===== Capacitor Environment Detection =====
 // 在 Capacitor APK 环境下返回 true，浏览器/PWA 环境下返回 false
 // 所有 APK 特有逻辑都用 isCapacitor() 分支隔离，主仓库同步时一眼能识别
 function isCapacitor() {
@@ -58,6 +58,16 @@ const state = {
   _imageProviderFailStreak: {},
   // v99: 生图——进度状态（阶段/已等待秒数/重试信息/下载进度）
   _imageProgress: null,
+  // v123: 生图——视图开关（此前未声明，靠运行时动态挂，容易和 TDZ 类问题混淆）
+  imageViewOpen: false,
+  // v123: 生图——参考图（内存态，属于「当前草稿」；发送后清空、切视图不清）
+  _imageRefDataUrls: [],
+  // v123: 生图——上一次请求的结构化快照（失败后可原样重试）
+  _imageLastRequest: null,
+  // v123: 生图——上一次失败的结构化记录（重渲染后仍显示，切走再回来也在）
+  _imageLastError: null,
+  // v123: 生图列表当前渲染条数（点「显示更早」每次 +30）
+  _imagePageSize: 30,
 };
 
 // STORAGE_KEY / SETTINGS_KEY 已迁移到 db.js
@@ -505,6 +515,9 @@ async function init() {
   // C3: 振感开关回填（默认开；老用户 settings 无此字段时按默认开处理）
   const hapticCheck = document.getElementById('haptic-feedback-check');
   if (hapticCheck) hapticCheck.checked = (settings.hapticFeedback !== false);
+  // v123: 生图反馈（生成开始/完成/失败轻振，默认开）
+  const imageHapticCheck = document.getElementById('image-haptic-check');
+  if (imageHapticCheck) imageHapticCheck.checked = (settings.imageHaptic !== false);
   // v117: 用户消息公式渲染开关（默认关——用户提示词里的 \命令 按原文显示）
   const userLatexCheck = document.getElementById('render-user-latex-check');
   if (userLatexCheck) userLatexCheck.checked = (settings.renderUserLatex === true);
@@ -1381,6 +1394,8 @@ function fillSettingsForm() {
   if (cwInput) cwInput.value = String(Math.round(resolveChatWaitMs() / 1000));
   var hfCheck = document.getElementById('haptic-feedback-check');
   if (hfCheck) hfCheck.checked = settings.hapticFeedback !== false;
+  var ihCheck = document.getElementById('image-haptic-check');
+  if (ihCheck) ihCheck.checked = settings.imageHaptic !== false;
   var ulCheck = document.getElementById('render-user-latex-check');
   if (ulCheck) ulCheck.checked = settings.renderUserLatex === true;
   var fsSelect = document.getElementById('font-size-select');
@@ -1439,6 +1454,12 @@ function toggleSettings(open) {
     fillSettingsForm();
     // 刷新回顶/底按钮状态（等 DOM 布局完成）
     setTimeout(function() { if (state._updateSettingsScrollBtn) state._updateSettingsScrollBtn(); }, 0);
+  } else {
+    // v123: 每次关设置都刷新一遍生图 UI —— 模型目录 / 渠道名 / 提示词前缀都可能刚被改过，
+    //   否则用户会以为「改了没生效」，非要切走再切回。
+    if (typeof renderImageProviderSelect === 'function') renderImageProviderSelect();
+    if (typeof renderRecentImagePrompts === 'function') renderRecentImagePrompts();
+    if (typeof updateImageGalleryCount === 'function') updateImageGalleryCount();
   }
 }
 
@@ -1466,6 +1487,9 @@ function saveSettingsHandler() {
   applyChatWaitInput(true);
   const hapticCheck = document.getElementById('haptic-feedback-check');
   if (hapticCheck) settings.hapticFeedback = hapticCheck.checked;
+  // v123: 生图反馈开关（与流式振感分开，互不影响）
+  const imageHapticCheck = document.getElementById('image-haptic-check');
+  if (imageHapticCheck) settings.imageHaptic = imageHapticCheck.checked;
   // v117: 用户消息公式渲染开关
   const userLatexCheck = document.getElementById('render-user-latex-check');
   if (userLatexCheck) settings.renderUserLatex = userLatexCheck.checked;

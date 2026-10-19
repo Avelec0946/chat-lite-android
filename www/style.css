@@ -1,4 +1,4 @@
-﻿/* ===== Reset & Base ===== */
+/* ===== Reset & Base ===== */
 *,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
 
 /* ===== Splash Screen（开屏动画）===== */
@@ -485,7 +485,17 @@ body:not(.capacitor-mode) .capacitor-only{display:none !important}
 .setting-group-collapsible > .setting-group-body{padding:12px}
 
 /* ===== F1: 生图界面（image-view）===== */
-.image-view{position:fixed;top:0;left:0;right:0;bottom:0;display:flex;flex-direction:column;overflow:hidden;z-index:40;background:var(--bg);animation:fadeIn .2s}
+/* v123: 生图从「覆盖层」改为「主视图」——与 .main 同层并排在 #app 里，
+   不再低于 .sidebar(50)，也就不必靠 JS 手动隐藏侧栏来补层级缺陷。
+   position:fixed 保留（改动面最小），z-index 抬到 45：高于内容、低于侧栏之外的弹层。 */
+.image-view{position:fixed;top:0;left:0;right:0;bottom:0;display:flex;flex-direction:column;overflow:hidden;z-index:45;background:var(--bg);animation:fadeIn .2s}
+/* 生图打开时侧栏仍可用：给它让出侧栏宽度（仅当侧栏未收起时） */
+body.image-view-open .image-view{left:var(--sidebar)}
+body.image-view-open.sidebar-hidden .image-view{left:0}
+@media (max-width: 768px) {
+  /* 窄屏侧栏是抽屉，不再让宽度 */
+  body.image-view-open .image-view{left:0}
+}
 .image-bar{display:flex;align-items:center;gap:8px;padding:8px 16px;background:var(--glass-bg);backdrop-filter:var(--glass-blur);-webkit-backdrop-filter:var(--glass-blur);box-shadow:var(--shadow);position:relative;z-index:1}
 .image-bar .btn-icon{flex-shrink:0}
 .image-bar .model-select{flex:1;max-width:none;min-width:0}
@@ -599,10 +609,45 @@ body:not(.capacitor-mode) .capacitor-only{display:none !important}
 .image-preview-toolbar button:active{background:rgba(255,255,255,.3)}
 .image-preview-hint{position:absolute;top:16px;left:50%;transform:translateX(-50%);color:rgba(255,255,255,.6);font-size:12px;z-index:201;pointer-events:none}
 
+/* ===== v123: 生图交互一致性 ===== */
+
+/* 模型下拉（与接口下拉并排；窄屏下允许收缩） */
+.image-model-select{flex:1;max-width:none;min-width:0;max-width:180px}
+
+/* 最近提示词胶囊（输入框上方一行，可横向滚动） */
+.image-recent-prompts{display:flex;gap:6px;align-items:center;margin-bottom:8px;overflow-x:auto;scrollbar-width:none;-webkit-overflow-scrolling:touch;padding-bottom:2px}
+.image-recent-prompts::-webkit-scrollbar{display:none}
+.image-recent-pill{flex-shrink:0;max-width:180px;padding:4px 10px;border:1px solid var(--border);border-radius:999px;background:var(--bg2);color:var(--text2);font-size:12px;cursor:pointer;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;transition:color .15s,border-color .15s}
+.image-recent-pill:hover,.image-recent-pill:active{color:var(--primary);border-color:var(--primary)}
+
+/* 用户气泡里「实际发送内容」的折叠块（前缀/模板造成的差异，默认收起） */
+.img-prompt-final{margin-top:6px;font-size:12px;opacity:.85}
+.img-prompt-final summary{cursor:pointer;color:inherit;opacity:.75}
+.img-prompt-final pre{margin:6px 0 0;padding:6px 8px;border-radius:6px;background:rgba(0,0,0,.18);white-space:pre-wrap;word-break:break-word;font-size:11px;line-height:1.5;max-height:140px;overflow-y:auto}
+
+/* 错误条上的按钮（复用 .continue-btn，去掉渐变以区别于「继续生成」） */
+.image-error-dismiss{background:transparent;color:inherit;border-color:currentColor;opacity:.7}
+.image-error-dismiss:hover{opacity:1;filter:none}
+
+/* 空态里的「去配置」引导按钮 */
+.image-empty-cta{margin-top:14px;padding:8px 18px;border:1px solid var(--primary);border-radius:999px;background:transparent;color:var(--primary);font-size:13px;cursor:pointer;transition:background .15s,color .15s}
+.image-empty-cta:hover,.image-empty-cta:active{background:var(--primary);color:var(--on-primary)}
+
+/* 「显示更早」 */
+.image-load-earlier{display:flex;justify-content:center;padding:8px 0 12px}
+.image-load-earlier .img-action-btn{border:1px solid var(--border);background:var(--bg2);color:var(--text2);font-size:12px;padding:6px 14px;border-radius:999px}
+.image-load-earlier .img-action-btn:hover{color:var(--primary);border-color:var(--primary)}
+
+/* 缩略图加载中的占位底色（避免列表在图片到达前是一片空白方块） */
+.image-card img{background:var(--bg3)}
+
 /* v66: 生图停止按钮（生成中 sendBtn 变停止按钮） */
 .image-send-btn.stopping{background:var(--danger);animation:pulseStop 1s ease-in-out infinite}
+/* v123: 同坑位双图标 —— 空闲 ▶ / 生成中 ■（与对话界面 btn-send ↔ btn-stop 同构） */
+.image-send-btn .icon-stop{display:none}
+.image-send-btn.stopping .icon-send{display:none}
+.image-send-btn.stopping .icon-stop{display:block}
 @keyframes pulseStop{0%,100%{opacity:1}50%{opacity:.6}}
-.image-stop-hint{position:absolute;top:8px;left:50%;transform:translateX(-50%);background:var(--danger);color:var(--on-primary);padding:4px 12px;border-radius:12px;font-size:11px;z-index:10;animation:fadeIn .2s}
 
 /* ===== v116: LaTeX (KaTeX) 渲染适配 ===== */
 /* KaTeX 不声明 color，公式色继承所在消息文本色 —— 明暗主题自动适配，无需分别维护 */
