@@ -209,7 +209,9 @@ const IMAGE_FORMATS = {
       var ratio = ctx.sizeConfig && ctx.sizeConfig.imageConfig && ctx.sizeConfig.imageConfig.aspectRatio || (ctx.sizeConfig && ctx.sizeConfig.aspectRatio);
       if (ratio && ratio !== 'auto') body.aspect_ratio = ratio;
       body.response_format = 'url';
-      // v105: 参考图 → subject_reference（仅首图作为主体参考，官方当前仅支持 character/人像）
+      // v105: 参考图 → subject_reference（官方仅支持单个 character 主体参考）
+      // v123: 上游限制 1 张已由 imageRefLimitForFormat / generateImage 前置截断并告知用户，
+      //         走到这里时 refDataUrls.length 必然 ≤ 1，取 [0] 不再构成静默丢弃。
       if (ctx.refDataUrls && ctx.refDataUrls.length > 0) {
         body.subject_reference = [{ type: 'character', image_file: ctx.refDataUrls[0] }];
       }
@@ -1723,6 +1725,23 @@ function base64ToBytes(b64) {
   for (var i = 0; i < len; i++) bytes[i] = binary.charCodeAt(i);
   return bytes;
 }
+// ===== v123: 参考图上限的「渠道差异」 =====
+// 界面允许 16 张（上游 images/edits 实测上限：4/8/12/16 张的 input_tokens 严格线性，
+// 20 张反而下降 —— 说明超过 16 后上游会静默截断）。但**不是每个格式族都收多图**：
+//   minimax 走 subject_reference，官方只支持单个主体参考 → 实际只用第 1 张。
+//   此前这种情况是静默丢弃（选 5 张只发 1 张、界面毫无提示），这里补上判定与告知。
+function imageRefLimitForFormat(fmt) {
+  if (fmt === 'minimax') return 1;
+  return 16;
+}
+
+// 当前渠道能收几张参考图
+function currentImageRefLimit() {
+  var provider = getCurrentImageProvider();
+  if (!provider) return 16;
+  return imageRefLimitForFormat(provider.requestFormat || provider.template);
+}
+
 // ===== v123: 交互一致性辅助 =====
 
 // 生图反馈振感：start / success / error 三种节拍。
@@ -1913,6 +1932,15 @@ async function generateImage() {
   if (refDataUrls.length > 0 && provider.features && !provider.features.supportsReferenceImage) {
     showToast('当前接口格式不支持参考图，已忽略', 'warn');
     refDataUrls = [];
+  }
+  // v123: 兜底 —— 用户可能先选了多张、再切到只收单图的渠道（如 minimax）。
+  //   这种情况必须在这里截断并如实告知，否则就是「选了 5 张、只发了 1 张」的静默丢弃。
+  if (refDataUrls.length > 0) {
+    var refLimit = imageRefLimitForFormat(provider.requestFormat || provider.template);
+    if (refDataUrls.length > refLimit) {
+      refDataUrls = refDataUrls.slice(0, refLimit);
+      showToast('该渠道最多 ' + refLimit + ' 张参考图，已只使用前 ' + refLimit + ' 张', 'warn');
+    }
   }
 
   // v123: 生成数量的钳制不再静默 —— 带上参考图时多数格式只收单张，明确告诉用户
@@ -2865,6 +2893,16 @@ function initImageView() {
     renderImageModelSelect();
     updateImageAdvancedVisibility();
     refreshImageModelSuggestions();  // v101: 切接口后刷新模型建议
+    // v123: 渠道变了，参考图上限也可能变 —— 重绘「已选 / 上限」，并提示超出部分会被截断
+    if (typeof window.renderImageRefPreviewById === 'function') {
+      var refCount = (state._imageRefDataUrls || []).length;
+      var newLimit = currentImageRefLimit();
+      if (refCount > newLimit) {
+        state._imageRefDataUrls = state._imageRefDataUrls.slice(0, newLimit);
+        showToast('该渠道最多 ' + newLimit + ' 张参考图，已只保留前 ' + newLimit + ' 张', 'warn');
+      }
+      window.renderImageRefPreviewById();
+    }
   });
 
   // v123: 模型下拉切换 —— 选「自定义…」时露出自由输入框
@@ -2902,10 +2940,18 @@ function initImageView() {
     refFileInput.addEventListener('change', async function(e) {
       var files = e.target.files;
       if (!files || files.length === 0) return;
-      // 多选：最多 16 张（OpenAI 上限）
       if (!state._imageRefDataUrls) state._imageRefDataUrls = [];
-      var maxAdd = 16 - state._imageRefDataUrls.length;
-      if (maxAdd <= 0) { showToast('最多 16 张参考图', 'warn'); e.target.value = ''; return; }
+      // v123: 上限随渠道走 —— 多数格式 16 张，minimax 只能 1 张（subject_reference 单主体）。
+      //   此前一律按 16 收，选多张后只发第 1 张且不提示，属于静默丢弃。
+      var limit = currentImageRefLimit();
+      var maxAdd = limit - state._imageRefDataUrls.length;
+      if (maxAdd <= 0) {
+        showToast(limit === 1
+          ? '这个渠道只支持 1 张参考图，已有一张了'
+          : '最多 ' + limit + ' 张参考图', 'warn');
+        e.target.value = '';
+        return;
+      }
       var toAdd = Array.from(files).slice(0, maxAdd);
       try {
         for (var i = 0; i < toAdd.length; i++) {
@@ -2914,7 +2960,11 @@ function initImageView() {
         }
         renderImageRefPreview();
         if (btnRef) btnRef.classList.add('has-ref');
-        if (toAdd.length < files.length) showToast('已达 16 张上限，部分图片未添加', 'warn');
+        if (toAdd.length < files.length) {
+          showToast(limit === 1
+            ? '这个渠道只支持 1 张参考图，已只保留第 1 张'
+            : '已达 ' + limit + ' 张上限，部分图片未添加', 'warn');
+        }
       } catch(err) {
         showToast('参考图加载失败: ' + (err.message || err), 'warn');
       }
@@ -2943,7 +2993,10 @@ function initImageView() {
         '<button class="ref-item-clear" data-idx="' + idx + '" title="移除此图">×</button>' +
       '</div>';
     });
-    html += '<span class="ref-info">' + refs.length + ' 张参考图</span>';
+    // v123: 显示「已选 / 上限」—— 上限随渠道变（大多数 16，minimax 只有 1），
+    //   让用户在选图之前就知道能放几张，而不是选完才被截断。
+    var refLimit = currentImageRefLimit();
+    html += '<span class="ref-info">' + refs.length + ' / ' + refLimit + ' 张参考图</span>';
     html += '<button class="ref-clear" id="image-ref-clear" title="移除全部">清空</button>';
     preview.innerHTML = html;
     bindRefClear();
