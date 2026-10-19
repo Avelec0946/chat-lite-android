@@ -68,6 +68,8 @@ const state = {
   _imageLastError: null,
   // v123: 生图列表当前渲染条数（点「显示更早」每次 +30）
   _imagePageSize: 30,
+  // v123: 窄屏打开生图时自动收起了侧栏，关闭时要还原（只还原自己收的那次）
+  _imageSidebarAutoHidden: false,
 };
 
 // STORAGE_KEY / SETTINGS_KEY 已迁移到 db.js

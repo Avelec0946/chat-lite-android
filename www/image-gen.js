@@ -650,6 +650,18 @@ function toggleImageView(open) {
   // v123: 生图打开时侧栏保留可用，用 body class 让出宽度
   document.body.classList.toggle('image-view-open', !!open);
   var sidebarEl = document.getElementById('sidebar');
+  // v123: 窄屏（≤768px）侧栏是 80vw 的固定抽屉，会盖住生图视图 —— 打开生图时必须先收起，
+  //        关闭生图时再还原（只还原「自己收起的那次」，不覆盖用户的手动选择）。
+  var isNarrow = window.innerWidth <= 768;
+  if (sidebarEl) {
+    if (open && isNarrow && !sidebarEl.classList.contains('hidden')) {
+      sidebarEl.classList.add('hidden');
+      state._imageSidebarAutoHidden = true;
+    } else if (!open && state._imageSidebarAutoHidden) {
+      sidebarEl.classList.remove('hidden');
+      state._imageSidebarAutoHidden = false;
+    }
+  }
   document.body.classList.toggle('sidebar-hidden', !!(sidebarEl && sidebarEl.classList.contains('hidden')));
   var main = document.getElementById('main');
   if (open) {

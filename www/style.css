@@ -493,8 +493,9 @@ body:not(.capacitor-mode) .capacitor-only{display:none !important}
 body.image-view-open .image-view{left:var(--sidebar)}
 body.image-view-open.sidebar-hidden .image-view{left:0}
 @media (max-width: 768px) {
-  /* 窄屏侧栏是抽屉，不再让宽度 */
-  body.image-view-open .image-view{left:0}
+  /* 窄屏侧栏是 80vw 固定抽屉，不再让宽度；且必须压在生图视图之上（否则抽屉打开时被盖住） */
+  body.image-view-open .image-view{left:0;z-index:55}
+  body.image-view-open .sidebar{z-index:60}
 }
 .image-bar{display:flex;align-items:center;gap:8px;padding:8px 16px;background:var(--glass-bg);backdrop-filter:var(--glass-blur);-webkit-backdrop-filter:var(--glass-blur);box-shadow:var(--shadow);position:relative;z-index:1}
 .image-bar .btn-icon{flex-shrink:0}
