@@ -747,6 +747,43 @@ function buildImageErrorBar() {
   return wrap;
 }
 
+// v123: 复制文本，Async Clipboard 失败时回退到 execCommand。
+//   真机验证：WebView 里 navigator.clipboard 在「无用户手势」的调用下会 reject
+//   （No user gesture / 文档未聚焦），而 execCommand('copy') 在同一环境下可用 ——
+//   两条都试一次，比只写一条更稳。
+function copyTextWithFallback(text) {
+  return new Promise(function(resolve) {
+    var done = false;
+    function finish(ok) { if (!done) { done = true; resolve(ok); } }
+    try {
+      if (navigator.clipboard && navigator.clipboard.writeText) {
+        navigator.clipboard.writeText(text).then(function() { finish(true); }).catch(function() { finish(legacyCopy(text)); });
+        // 兜底超时：某些 WebView 的 clipboard Promise 偶发不 settle
+        setTimeout(function() { finish(legacyCopy(text)); }, 800);
+        return;
+      }
+    } catch (e) { /* 落到兜底 */ }
+    finish(legacyCopy(text));
+  });
+}
+
+function legacyCopy(text) {
+  try {
+    var ta = document.createElement('textarea');
+    ta.value = text;
+    ta.setAttribute('readonly', '');
+    ta.style.position = 'fixed';
+    ta.style.top = '-9999px';
+    ta.style.opacity = '0';
+    document.body.appendChild(ta);
+    ta.select();
+    ta.setSelectionRange(0, text.length);
+    var ok = document.execCommand('copy');
+    document.body.removeChild(ta);
+    return ok;
+  } catch (e) { return false; }
+}
+
 // 图片卡片的「⋯」/ 长按菜单（复用对话气泡菜单的 .tree-node-menu 样式）
 function showImageCardMenu(event, imgId) {
   closeImageCardMenu();
@@ -773,7 +810,9 @@ function showImageCardMenu(event, imgId) {
   addItem('复制提示词', function() {
     var p = img.prompt || '';
     if (!p) { showToast('这条记录没有提示词', 'info'); return; }
-    navigator.clipboard.writeText(p).then(function() { showToast('提示词已复制', 'success'); }).catch(function() { showToast('复制失败', 'warn'); });
+    copyTextWithFallback(p).then(function(ok) {
+      showToast(ok ? '提示词已复制' : '复制失败', ok ? 'success' : 'warn');
+    });
   });
   addItem('以图改图', function() {
     getImageDataUrl(img).then(function(d) {
