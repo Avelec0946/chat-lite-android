@@ -1015,6 +1015,9 @@ function renderImageStream() {
     }
   });
   // 绑定图片点击预览
+  // v123 修：列表里 img 的 src 是**缩略图**（96px），此前直接把 imgEl.src 传给预览，
+  //   结果点开看到的是模糊小图。改为只把 id 传进去，由 showImagePreview 自己取原图，
+  //   缩略图仅作为「打开前的一帧占位」，原图读回来后再替换。
   stream.querySelectorAll('img[data-image-id]').forEach(function(imgEl) {
     imgEl.addEventListener('click', function() {
       showImagePreview(imgEl.src, imgEl.dataset.imageId);
@@ -1110,6 +1113,9 @@ function showImagePreview(src, imgId) {
   if (_previewGestureDestroy) { _previewGestureDestroy(); _previewGestureDestroy = null; }
   var existing = document.querySelector('.image-preview-overlay');
   if (existing) existing.remove();
+  // v123 修：调用方可能传来的是**缩略图**（列表为了省内存只加载小图）。
+  //   先用它立即占位，随后按 id 取原图替换 —— 不能让用户对着 96px 的图去缩放。
+  var _previewFullLoaded = false;
   var overlay = document.createElement('div');
   overlay.className = 'image-preview-overlay';
   var toolbarHtml = imgId
@@ -1126,6 +1132,19 @@ function showImagePreview(src, imgId) {
   var imgEl = overlay.querySelector('img');
   if (imgEl && window.GestureHelpers) {
     _previewGestureDestroy = window.GestureHelpers.enableGestures(imgEl, { minScale: 1, maxScale: 5, doubleTapScale: 2 });
+  }
+  // v123 修：按 id 换成原图（列表里的 src 是缩略图）。占位先在，原图到了再替换，无闪烁。
+  if (imgEl && imgId) {
+    var previewImgObj = (settings.images || []).find(function(x) { return x.id === imgId; });
+    if (previewImgObj && !previewImgObj.externalUrl) {
+      getImageDataUrl(previewImgObj).then(function(fullUrl) {
+        if (!fullUrl) return;
+        var cur = document.querySelector('.image-preview-overlay img');
+        if (!cur || !cur.isConnected) return;
+        cur.src = fullUrl;
+        _previewFullLoaded = true;
+      });
+    }
   }
 
   // v73: 单击退出 + 双击缩放
@@ -1628,12 +1647,23 @@ function buildImageSizeConfig(provider, resolution, aspect, customSize) {
     return result;
   }
   // OpenAI 系（dall-e/gpt-image/xAI 等）：size = "WxH" 或 "auto"
-  if (resolution === 'auto' || aspect === 'auto') {
-    // 一边 auto 一边具体：交给模型决定，返回 auto
-    return result;
+  //
+  // v123 修：旧逻辑是「只要 resolution 或 aspect 有一个是 auto 就整体返回 auto」——
+  //   而界面默认就是「2K + 自由」，于是用户选的 2K 永远不生效，实际一直发 size:'auto'
+  //   （模型自己决定，常常返回 1:1 的 1024 级尺寸）。分辨率控件形同虚设。
+  //   现在的语义：两个都 auto 才真正交给模型；只要有一个是具体值，就据此算出 WxH。
+  //     · 选了分辨率、比例自由 → 用该分辨率的 1:1 正方形
+  //     · 比例自由以外的具体比例、分辨率自由 → 用 1K 档里的对应尺寸（保证比例生效）
+  var sizeTable = _IMAGE_SIZE_MAP[resolution] || _IMAGE_SIZE_MAP['2K'];
+  if (resolution === 'auto' && aspect === 'auto') {
+    return result;  // 真正「都交给模型」
   }
-  var sizeTable = _IMAGE_SIZE_MAP[resolution] || {};
-  result.size = sizeTable[aspect] || '1024x1024';
+  if (aspect === 'auto') {
+    result.size = sizeTable['1:1'] || '1024x1024';   // 分辨率优先
+  } else {
+    var base = (resolution === 'auto') ? _IMAGE_SIZE_MAP['1K'] : sizeTable;
+    result.size = base[aspect] || sizeTable['1:1'] || '1024x1024';
+  }
   return result;
 }
 
