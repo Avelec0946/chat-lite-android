@@ -3246,6 +3246,15 @@
       }).then(function () {
         var rest = extractor.flush();
         for (var i = 0; i < rest.length; i++) pushSentence(rest[i]);
+        // 取证：把这一轮大脑的原始返回与解析结果留下来。
+        //   "AI 只会说兜底句"这类问题，光看 metrics 看不出是没解析出来还是压根没返回。
+        _vc.lastBrain = {
+          mode: 'stream',
+          raw: strOf(extractor.raw()).slice(0, 1200),
+          rawLen: strOf(extractor.raw()).length,
+          speechSeen: strOf(fullSpeechSeen),
+          firstTokenMs: firstTokenMs
+        };
         return { json: extractor.raw(), firstTokenMs: firstTokenMs };
       });
     }
@@ -4516,6 +4525,7 @@
           sensitivity: effectiveTuning('sensitivity', 0.5)
         },
         rate: { value: _vc.player ? _vc.player.rate : clampRate(voiceCfg().rate), mode: _vc.player ? _vc.player.rateMode : (strOf(voiceCfg().rateMode) === 'pitch' ? 'pitch' : 'natural') },
+        lastBrain: _vc.lastBrain || null,
         leakRms: Math.round((_vc.leakRms || 0) * 10000) / 10000,
         fillers: _vc.fillerBuffers.filter(Boolean).length,
         // 采集链路取证：VAD 进 speech 却攒不到样本时，靠这四个数定位断在哪一步
