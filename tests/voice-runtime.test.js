@@ -531,6 +531,113 @@ console.log('\n[10] 内置自检 __selfTest()');
   ok('__selfTest 覆盖 ≥ 6 项', r.cases.length >= 6, String(r.cases.length));
 })();
 
+
+// =====================================================================================
+console.log('\n[16] VAD 真人语音触发（v127 真机致命缺陷回归）');
+// =====================================================================================
+// 用户实测「说了几句话，AI 完全没反应、会话也没有新消息」。查出两个真 bug：
+//   ① speechOnMs 要求「连续」180ms 超过阈值，但真人音节之间必然有气口，
+//      实测真机最长连续只有 ~107ms → aboveMs 反复归零 → VAD 永远进不了 speech。
+//   ② confirmEnd() 读完统计就 resetSegment()，而调用方是先读统计再决定 wait；
+//      走 wait 分支时 st 已被清空，continueWait() 只能等一个空段 → 这句话永远不提交、也不报错。
+// 这两条都必须在单测里钉死，否则「主路径能跑通」会再次掩盖它们。
+(function () {
+  var DT = 1024 / 48000 * 1000;   // 真机 AudioContext 块间隔 ≈ 21.33ms
+
+  function syllableFrames(n) {
+    var out = [];
+    var i = 0;
+    while (i < n) {
+      for (var k = 0; k < 3 && i < n; k++, i++) out.push(0.12);
+      if (i < n) { out.push(0.003); i++; }
+    }
+    return out;
+  }
+
+  function freshVad(over) {
+    var o = { calibrateMs: 300, speechOnMs: 180, speechHangMs: 260,
+      endpointSilenceMs: 700, minUtteranceMs: 400, sensitivity: 0.85 };
+    if (over) { for (var k in over) o[k] = over[k]; }
+    return T.createVad(o);
+  }
+
+  (function () {
+    var vad = freshVad();
+    for (var i = 0; i < 15; i++) vad.feed(0.001, DT);
+    var frames = syllableFrames(150);
+    var entered = false;
+    for (var j = 0; j < frames.length; j++) {
+      if (vad.feed(frames[j], DT) === 'speech-start') { entered = true; break; }
+    }
+    ok('音节抖动的真人语音能进入 speech（旧实现永远进不去）', entered, 'phase=' + vad.phase());
+  })();
+
+  (function () {
+    var vad = freshVad();
+    var hit = false;
+    for (var i = 0; i < 300; i++) if (vad.feed(0.001, DT) === 'speech-start') { hit = true; break; }
+    ok('纯静音不误触发', !hit);
+  })();
+
+  (function () {
+    var vad = freshVad();
+    for (var i = 0; i < 15; i++) vad.feed(0.001, DT);
+    var started = false;
+    for (var j = 0; j < 8; j++) if (vad.feed(0.15, DT) === 'speech-start') started = true;
+    ok('170ms 短噪声不触发 speech-start', !started);
+  })();
+
+  (function () {
+    var vad = freshVad();
+    for (var i = 0; i < 15; i++) vad.feed(0.001, DT);
+    for (var j = 0; j < 90; j++) vad.feed(0.15, DT);
+    var before = Math.round(vad.state.speechMs);
+    var snap = vad.snapshot();
+    var afterSnap = Math.round(vad.state.speechMs);
+    ok('snapshot() 不改状态', before === afterSnap && before > 0, before + ' vs ' + afterSnap);
+    ok('snapshot() 返回正确统计', snap.speechMs > 0 && snap.speechMs === before, String(snap.speechMs));
+    vad.confirmEnd();
+    ok('confirmEnd() 才重置', Math.round(vad.state.speechMs) === 0, String(Math.round(vad.state.speechMs)));
+  })();
+
+  (function () {
+    var vad = freshVad();
+    for (var i = 0; i < 15; i++) vad.feed(0.001, DT);
+    for (var j = 0; j < 90; j++) vad.feed(0.15, DT);
+    var round = 0, accepted = null;
+    for (var k = 0; k < 200; k++) {
+      var e = vad.feed(0.001, DT);
+      if (e !== 'endpoint-candidate') continue;
+      round++;
+      var snap = vad.snapshot();
+      if (round === 1) {
+        vad.continueWait(400);
+        ok('wait 分支后 speechMs 仍在（旧实现被清成 0）', snap.speechMs > 0, String(snap.speechMs));
+      } else {
+        accepted = snap;
+        vad.confirmEnd();
+        break;
+      }
+    }
+    ok('wait 之后还能再次触发 endpoint', round >= 2, 'round=' + round);
+    ok('第二轮仍能收下这句话（不被当成 tooShort 丢弃）',
+      !!accepted && accepted.speechMs >= 400 && accepted.tooShort === false,
+      JSON.stringify(accepted));
+  })();
+
+  (function () {
+    var vad = freshVad();
+    for (var i = 0; i < 15; i++) vad.feed(0.001, DT);
+    for (var j = 0; j < 90; j++) vad.feed(0.15, DT);
+    var got = null;
+    for (var k = 0; k < 80; k++) {
+      if (vad.feed(0.001, DT) === 'endpoint-candidate') { got = vad.confirmEnd(); break; }
+    }
+    ok('不 wait 直接收下也能拿到完整统计',
+      !!got && got.speechMs >= 400 && got.tooShort === false, JSON.stringify(got));
+  })();
+})();
+
 // =====================================================================================
 console.log('\n[11] 对外 API 形状（契约 §3.4）');
 // =====================================================================================

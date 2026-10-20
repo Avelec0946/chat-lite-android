@@ -82,7 +82,10 @@
   // VAD 默认参数（可被 settings.voice 覆盖）
   var VAD_DEFAULTS = {
     calibrateMs: 300,          // 开头这么久用于估底噪
-    speechOnMs: 180,           // 连续超过阈值这么久才算开口
+    speechOnMs: 180,           // 累计超过阈值这么久才算开口
+    speechHangMs: 260,         // 允许的"回落"时长：真人说话音节之间必有间隙，
+                               //   低于阈值不超过这么久就不算断，aboveMs 继续保留
+                               //   （v127 修：原来要求"连续"，导致 VAD 永远不触发）
     endpointSilenceMs: 700,    // 说完之后的静音判定
     minUtteranceMs: 400,       // 太短的片段直接丢弃（不送 ASR）
     maxUtteranceMs: 30000,     // 最长话语上限，超了强制切
@@ -543,6 +546,7 @@
     var cfg = {
       calibrateMs: num(opts && opts.calibrateMs, VAD_DEFAULTS.calibrateMs),
       speechOnMs: num(opts && opts.speechOnMs, VAD_DEFAULTS.speechOnMs),
+      speechHangMs: num(opts && opts.speechHangMs, VAD_DEFAULTS.speechHangMs),
       endpointSilenceMs: num(opts && opts.endpointSilenceMs, VAD_DEFAULTS.endpointSilenceMs),
       minUtteranceMs: num(opts && opts.minUtteranceMs, VAD_DEFAULTS.minUtteranceMs),
       maxUtteranceMs: num(opts && opts.maxUtteranceMs, VAD_DEFAULTS.maxUtteranceMs),
@@ -559,6 +563,7 @@
       noiseFloor: cfg.absFloor,
       thr: cfg.absFloor * 3,
       aboveMs: 0,
+      belowRunMs: 0,     // 当前这段连续低于阈值的时长（用于 speechHangMs 判定）
       speechMs: 0,
       silenceMs: 0,
       frames: [],           // {t, rms, voiced}
@@ -655,13 +660,25 @@
           }
           if (rms > st.thr) {
             st.aboveMs += dt;
+            st.belowRunMs = 0;
             if (st.aboveMs >= cfg.speechOnMs) {
               startSegment();
               pushFrame(rms, true);
               return 'speech-start';
             }
           } else {
-            st.aboveMs = 0;
+            // v127 修（真机致命缺陷）：原来这里直接把 aboveMs 清零，
+            //   要求「**连续** 180ms 超过阈值」才算开口。
+            //   但真人说话音节之间必然有低于阈值的间隙（气口、辅音、音节边界），
+            //   实测真机最长连续超阈值只有 ~107ms，于是 aboveMs 反复归零，
+            //   **VAD 永远进不了 speech —— 用户说了几句话，AI 完全没反应**。
+            //   改法：允许短暂的「回落」，只要连续低于阈值的时长不超过 speechHangMs，
+            //   就保留已累积的 aboveMs。这才是语音活动检测的常规做法。
+            st.belowRunMs = (st.belowRunMs || 0) + dt;
+            if (st.belowRunMs > cfg.speechHangMs) {
+              st.aboveMs = 0;
+              st.belowRunMs = 0;
+            }
           }
           return null;
         }
@@ -689,10 +706,15 @@
         return null;
       },
 
-      // 确认"说完了"：返回本段统计
-      confirmEnd: function () {
+      // 读取本段统计（**不重置状态**）。
+      //   v127 修（真机致命缺陷）：原来 confirmEnd() 读完统计就 resetSegment()，
+      //   而调用方 onEndpointCandidate 是「先读统计 → 再判断要不要继续等」。
+      //   于是走到 wait 分支时 st 已经被清空，continueWait() 只能等一个空段 ——
+      //   这句话永远不会再被提交，也不会报错，表现就是「说了几句话，AI 毫无反应」。
+      //   现在拆开：snapshot() 只读，endSegment() 才重置，谁决定丢弃谁负责重置。
+      snapshot: function () {
         var total = st.speechMs + st.silenceMs;
-        var out = {
+        return {
           speechMs: Math.round(st.speechMs),
           totalMs: Math.round(total),
           silenceMs: Math.round(st.silenceMs),
@@ -704,6 +726,11 @@
           voicedFrames: st.voicedFrames,
           tooShort: st.speechMs < cfg.minUtteranceMs
         };
+      },
+
+      // 真正结束这一段（读取统计 + 重置）。给确定要收下这句话的调用方用。
+      confirmEnd: function () {
+        var out = api.snapshot();
         resetSegment();
         return out;
       },
@@ -2295,6 +2322,16 @@
     var rs = _vc.resampler;
     var res = rs ? rs.process(block) : null;
     var i16 = (res && res.length) ? floatToInt16(res) : null;
+    // 诊断计数器：麦克风链路是否真的产出样本（__debug().capture 可读）
+    //   为什么需要：VAD 能进 speech 但 segChunks 一直是空的话，说明问题在
+    //   "重采样→Int16" 这一步，而不是 VAD 判定。没有这个计数器只能靠猜。
+    _vc.diag = _vc.diag || { blocks: 0, resSamples: 0, i16Samples: 0, segPushes: 0, lastRms: 0 };
+    _vc.diag.blocks++;
+    _vc.diag.lastRms = rms;
+    _vc.diag.lastDt = dtMs;
+    if (!isFinite(dtMs) || dtMs <= 0) _vc.diag.badDt = (_vc.diag.badDt || 0) + 1;
+    if (res) _vc.diag.resSamples += res.length;
+    if (i16) _vc.diag.i16Samples += i16.length;
 
     // ---- 前摇缓冲（speech-start 之前的声音也要留下，否则会吞第一个字）----
     if (i16 && i16.length) {
@@ -2364,11 +2401,13 @@
     if (_vc.vad.phase() === 'speech' && i16 && i16.length) {
       _vc.segChunks.push(i16);
       _vc.segSamples += i16.length;
+      if (_vc.diag) _vc.diag.segPushes++;
     }
 
     if (evt === 'endpoint-candidate') {
       onEndpointCandidate();
     } else if (evt === 'force-end') {
+      _vc.vad.confirmEnd();
       finishUtterance('force');
     } else if (evt === 'discard') {
       // 太短：丢弃，回到等下一句（绝不送 ASR，否则静音会被幻觉成文字）
@@ -2380,7 +2419,9 @@
 
   // 端点候选：交给 VoiceDirector.turnPolicy 决定"真说完"还是"再等等"
   function onEndpointCandidate() {
-    var stats = _vc.vad.confirmEnd();
+    // 先只读快照，**不要**在这里重置 VAD 状态：
+    //   下面可能决定"再等等"（wait），一旦提前 reset，这句话就再也不会被提交了。
+    var stats = _vc.vad.snapshot();
     var text = '';
     try {
       var conv = currentConvSafe();
@@ -2404,9 +2445,12 @@
 
     var action = decision && decision.action ? decision.action : suggestion;
     if (action === 'wait' || action === 'continue') {
+      // 只延长等待，不动 st —— 段还在，下一轮 endpoint 还能读到完整统计
       _vc.vad.continueWait(num(decision && decision.waitMs, suggestion === 'wait' ? 600 : 400));
       return;
     }
+    // 确定收下：现在才重置
+    _vc.vad.confirmEnd();
     finishUtterance('policy');
   }
 
@@ -4447,7 +4491,20 @@
       return {
         state: _vc.state, running: _vc.running, open: _vc.open, muted: _vc.muted,
         captureRate: _vc.audioCtx ? _vc.audioCtx.sampleRate : 0,
-        vad: _vc.vad ? { phase: _vc.vad.phase(), thr: _vc.vad.threshold(), noise: _vc.vad.noiseFloor() } : null,
+        vad: _vc.vad ? {
+          phase: _vc.vad.phase(), thr: _vc.vad.threshold(), noise: _vc.vad.noiseFloor(),
+          // v127 诊断：把 VAD 真实生效的配置和内部计时暴露出来。
+          //   「说了话没反应」这类问题，光看 phase 看不出是阈值不对还是计时不对。
+          cfg: _vc.vad.cfg,
+          st: _vc.vad.state ? {
+            speechMs: Math.round(_vc.vad.state.speechMs || 0),
+            silenceMs: Math.round(_vc.vad.state.silenceMs || 0),
+            aboveMs: Math.round(_vc.vad.state.aboveMs || 0),
+            belowRunMs: Math.round(_vc.vad.state.belowRunMs || 0),
+            endAtMs: _vc.vad.state.endAtMs,
+            awaiting: !!_vc.vad.state.awaiting
+          } : null
+        } : null,
         route: currentRoute(),
         tuning: {
           echoGuardMs: effectiveTuning('echoGuardMs', ECHO_GUARD_MS),
@@ -4461,6 +4518,15 @@
         rate: { value: _vc.player ? _vc.player.rate : clampRate(voiceCfg().rate), mode: _vc.player ? _vc.player.rateMode : (strOf(voiceCfg().rateMode) === 'pitch' ? 'pitch' : 'natural') },
         leakRms: Math.round((_vc.leakRms || 0) * 10000) / 10000,
         fillers: _vc.fillerBuffers.filter(Boolean).length,
+        // 采集链路取证：VAD 进 speech 却攒不到样本时，靠这四个数定位断在哪一步
+        capture: _vc.diag ? {
+          blocks: _vc.diag.blocks, resSamples: _vc.diag.resSamples,
+          i16Samples: _vc.diag.i16Samples, segPushes: _vc.diag.segPushes,
+          lastRms: Math.round((_vc.diag.lastRms || 0) * 10000) / 10000,
+          lastDt: _vc.diag.lastDt, badDt: _vc.diag.badDt || 0
+        } : null,
+        seg: { chunks: (_vc.segChunks || []).length, samples: _vc.segSamples || 0 },
+        preroll: { chunks: (_vc.preroll || []).length, samples: _vc.prerollSamples || 0 },
         metrics: API.getMetrics()
       };
     },
@@ -4508,6 +4574,10 @@
     jsonUnescape: jsonUnescape,
     extractJsonString: extractJsonString,
     createSpeechExtractor: createSpeechExtractor,
+    // v127 诊断：把采集块处理函数暴露出来，便于用合成音频走**真实** VAD 路径做验证。
+    //   为什么需要：自动化测试没法真的对着麦克风说话，而 __injectUtterance 绕过了 VAD ——
+    //   那条路径永远测不出「VAD 判了 speech 却攒不到样本」这类问题。
+    feedCaptureBlock: function (block, dtMs) { handleCaptureBlock(block, dtMs); },
     // 语速 & 路由
     makeTimeStretcher: makeTimeStretcher,
     clampRate: clampRate,
