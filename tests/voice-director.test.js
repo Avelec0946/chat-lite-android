@@ -793,6 +793,295 @@ describe('端到端串起来', function () {
   eq(decision.action, 'yield', '静音够久 → 该我说话了');
 });
 
+
+// ============================================================
+// 15. v126 describeClock（时间感知）
+// ============================================================
+// 时间戳全部用本地时间构造：测试在哪个时区跑都得到同一个"几点"，
+//   否则 CI 换个 TZ 这里就红。
+function vmTs(y, mo, d, h, mi, s) {
+  return new Date(y, mo - 1, d, h, mi || 0, s || 0).getTime();
+}
+
+describe('describeClock', function () {
+  // 关闭 / 非法入参：一律空串，调用方据此不往 prompt 里塞
+  eq(VD.describeClock({ enabled: false, now: vmTs(2026, 10, 20, 22, 30) }), '', 'enabled=false 返回空串');
+  eq(VD.describeClock({ now: '不是时间' }), '', 'now 非法字符串返回空串');
+  eq(VD.describeClock({ now: NaN }), '', 'now=NaN 返回空串');
+  eq(VD.describeClock({ now: 0 }), '', 'now=0 视为非法');
+  eq(VD.describeClock(null), '', 'null 不崩且返回空串');
+  noThrow(function () { VD.describeClock(); }, 'describeClock() 无参不崩');
+
+  // 首轮：几月几日 + 星期几 + 几点（口语化，不能出现 ISO 或裸时间戳）
+  var first = VD.describeClock({
+    enabled: true, now: vmTs(2026, 10, 20, 22, 30),
+    callStartedAt: vmTs(2026, 10, 20, 22, 30), lastTurnAt: 0, turnIndex: 0
+  });
+  includes(first, '10月20日', '首轮应说出几月几日');
+  includes(first, '星期二', '首轮应说出星期几');
+  includes(first, '晚上十点半', '首轮应把 22:30 说成人话');
+  notIncludes(first, '2026-', '不许出现 ISO 日期');
+  notIncludes(first, String(vmTs(2026, 10, 20, 22, 30)), '不许出现裸时间戳数字');
+  // 时段与分钟的口语化
+  includes(VD.describeClock({ now: vmTs(2026, 3, 5, 15, 15) }), '下午三点一刻', '15:15 → 下午三点一刻');
+  includes(VD.describeClock({ now: vmTs(2026, 3, 5, 9, 5) }), '上午九点零五分', '09:05 → 上午九点零五分');
+  includes(VD.describeClock({ now: vmTs(2026, 3, 5, 0, 0) }), '凌晨十二点整', '00:00 → 凌晨十二点整');
+  includes(VD.describeClock({ now: vmTs(2026, 3, 5, 12, 5) }), '中午十二点零五分', '12:05 → 中午十二点零五分');
+
+  // 后续轮：距上一句多久 + 通话已进行多久
+  var later = VD.describeClock({
+    enabled: true, now: vmTs(2026, 10, 20, 22, 36, 10),
+    callStartedAt: vmTs(2026, 10, 20, 22, 31, 0),
+    lastTurnAt: vmTs(2026, 10, 20, 22, 34, 0), turnIndex: 3
+  });
+  eq(later, '距对方上一句已经过了 2 分钟，这通电话已经打了 5 分钟。',
+    '后续轮：间隔 + 通话时长，都用口语');
+  includes(later, '距对方上一句', '必须说清距上一句多久');
+  includes(later, '这通电话已经打了', '必须说清通话已进行多久');
+  notIncludes(later, '10月20日', '后续轮不重复报日期');
+
+  // 刚说完（几秒）不该报成"0 分钟"
+  var quick = VD.describeClock({
+    enabled: true, now: vmTs(2026, 10, 20, 22, 34, 2),
+    callStartedAt: vmTs(2026, 10, 20, 22, 30, 0),
+    lastTurnAt: vmTs(2026, 10, 20, 22, 34, 0), turnIndex: 2
+  });
+  includes(quick, '只隔了几秒', '几秒的间隔说「只隔了几秒」');
+
+  // >10 分钟：必须明确说出"过了 X 分钟"
+  var longGap = VD.describeClock({
+    enabled: true, now: vmTs(2026, 10, 20, 22, 55, 0),
+    callStartedAt: vmTs(2026, 10, 20, 22, 20, 0),
+    lastTurnAt: vmTs(2026, 10, 20, 22, 32, 0), turnIndex: 9
+  });
+  includes(longGap, '过了 23 分钟', '>10 分钟要说「过了 23 分钟」');
+  includes(longGap, '35 分钟', '通话时长用分钟');
+
+  // >1 小时：小时 + 分钟
+  var longHour = VD.describeClock({
+    enabled: true, now: vmTs(2026, 10, 20, 23, 40, 0),
+    callStartedAt: vmTs(2026, 10, 20, 22, 10, 0),
+    lastTurnAt: vmTs(2026, 10, 20, 22, 30, 0), turnIndex: 12
+  });
+  includes(longHour, '1 小时 10 分钟', '>1 小时的间隔要说「X 小时 Y 分钟」');
+  includes(longHour, '1 小时 30 分钟', '>1 小时的通话时长要说「X 小时 Y 分钟」');
+
+  // 跨天：聊过零点必须点明
+  var cross = VD.describeClock({
+    enabled: true, now: vmTs(2026, 10, 21, 0, 10, 0),
+    callStartedAt: vmTs(2026, 10, 20, 23, 50, 0),
+    lastTurnAt: vmTs(2026, 10, 20, 23, 59, 0), turnIndex: 5
+  });
+  includes(cross, '已经到第二天了', '跨天必须说「已经到第二天了」');
+  notIncludes(cross, '2026-', '跨天输出里也不许有 ISO 字符串');
+});
+
+// ============================================================
+// 16. v126 buildCallLayer（通话层）
+// ============================================================
+describe('buildCallLayer', function () {
+  var layer = VD.buildCallLayer({ personaId: 'tease', brevity: 'normal' });
+
+  includes(layer, '你正在和对方打电话，你说的每句话会被直接念出来，对方看不到文字',
+    '必须说明这是打电话、对方看不到文字');
+  includes(layer, '短句', '硬规则必须有「短句」');
+  includes(layer, '口语', '硬规则必须有「口语」');
+  includes(layer, 'Markdown', '必须禁止 Markdown');
+  includes(layer, 'emoji', '必须禁止 emoji');
+  includes(layer, '括号', '必须禁止念出括号里的动作');
+  includes(layer, '2~3 句', 'brevity=normal 应带上句数上限');
+  includes(layer, '俏皮损友', '人设名应注入');
+  includes(layer, VD.getPersona('tease').systemFlavor.slice(0, 12), '人设 systemFlavor 应注入');
+  includes(layer, '默认说话感觉', '应给出该人设的默认语气/语速/音量');
+
+  // 通话层只管信道，不管输出协议：JSON 与状态栏都留在 voice.js
+  notIncludes(layer, 'JSON', '通话层不许再写一遍 JSON 输出格式');
+  notIncludes(layer, 'speech 必须排第一个', '通话层不许重复字段顺序要求');
+  notIncludes(layer, '<status>', '通话层不许出现状态栏相关内容');
+
+  // 默认档位 + 无额外设定
+  var plain = VD.buildCallLayer({});
+  includes(plain, '1~2 句', '默认 brevity=short 应为 1~2 句');
+  notIncludes(plain, '额外设定', '没有 customPersona 时不该出现额外设定小节');
+
+  var custom = VD.buildCallLayer({ personaId: 'warm', customPersona: '说话带一点南方口音' });
+  includes(custom, '额外设定', 'customPersona 非空应追加额外设定小节');
+  includes(custom, '说话带一点南方口音', 'customPersona 内容应注入');
+
+  // 声音状态：字符串入口
+  var sig = { speechMs: 5000, speechRateCps: 5.4, loudness: '高', pitchRangeSemitone: 6.2, speechRatio: 0.95 };
+  var withSigText = VD.buildCallLayer({ signalsText: '对方说得又快又冲。', signals: sig });
+  includes(withSigText, '对方这一段的声音状态', 'signalsText 非空应注入声音状态小节');
+  includes(withSigText, '对方说得又快又冲。', 'signalsText 原文应保留');
+  includes(withSigText, '这一轮请这样处理', '应带上 signalHints 的处理建议');
+  // 对象入口
+  includes(VD.buildCallLayer({ signals: sig }), '语速偏快', 'signals 对象入口应翻译成中文');
+
+  // 时间感知：开 / 关
+  var clock = { enabled: true, now: vmTs(2026, 10, 20, 22, 30), callStartedAt: vmTs(2026, 10, 20, 22, 30), lastTurnAt: 0, turnIndex: 0 };
+  var withClock = VD.buildCallLayer({ clock: clock });
+  includes(withClock, '现在的时间和通话进度', 'clock.enabled 时应插入时间小节');
+  includes(withClock, '晚上十点半', '时间小节应使用 describeClock 的口语化结果');
+
+  var noClock = VD.buildCallLayer({ clock: { enabled: false, now: vmTs(2026, 10, 20, 22, 30) } });
+  notIncludes(noClock, '现在的时间和通话进度', 'clock 关闭时不该出现时间小节');
+  notIncludes(noClock, '晚上十点半', 'clock 关闭时不该出现具体时间');
+
+  noThrow(function () { VD.buildCallLayer(); }, 'buildCallLayer() 无参不崩');
+  noThrow(function () { VD.buildCallLayer(null); }, 'buildCallLayer(null) 不崩');
+  eq(VD.buildCallLayer({ personaId: 'warm' }), VD.buildCallLayer({ personaId: 'warm' }),
+    '同参数两次调用结果一致（纯函数，无残留状态）');
+});
+
+// ============================================================
+// 17. v126 buildCallMarker（开始 / 结束标记）
+// ============================================================
+describe('buildCallMarker', function () {
+  var start = VD.buildCallMarker({ kind: 'start', at: vmTs(2026, 10, 20, 22, 30) });
+  eq(start.role, 'system', '开始标记是 system 消息');
+  eq(start.marker, 'call', '开始标记 marker=call');
+  eq(start.content, '【语音通话开始 · 10月20日 22:30】', '开始标记文案');
+
+  var end = VD.buildCallMarker({
+    kind: 'end', at: vmTs(2026, 10, 20, 22, 42, 34),
+    startedAt: vmTs(2026, 10, 20, 22, 30, 0), turns: 18
+  });
+  eq(end.role, 'system', '结束标记是 system 消息');
+  eq(end.marker, 'call', '结束标记 marker=call');
+  eq(end.content, '【语音通话结束 · 22:42 · 通话 12 分 34 秒 · 18 轮】', '结束标记文案');
+
+  // 时长三档：不足 1 分钟用秒 / 超过 1 分钟用分秒 / 超过 1 小时用小时分
+  var shortEnd = VD.buildCallMarker({
+    kind: 'end', at: vmTs(2026, 10, 20, 22, 30, 34),
+    startedAt: vmTs(2026, 10, 20, 22, 30, 0), turns: 2
+  });
+  eq(shortEnd.content, '【语音通话结束 · 22:30 · 通话 34 秒 · 2 轮】', '不足 1 分钟按秒算');
+
+  var hourEnd = VD.buildCallMarker({
+    kind: 'end', at: vmTs(2026, 10, 20, 23, 40, 0),
+    startedAt: vmTs(2026, 10, 20, 22, 30, 0), turns: 40
+  });
+  eq(hourEnd.content, '【语音通话结束 · 23:40 · 通话 1 小时 10 分 · 40 轮】', '超过 1 小时按小时+分算');
+
+  // 非法入参兜底：不抛、能省掉的片段就省掉
+  var noArg = VD.buildCallMarker();
+  eq(noArg.content, '【语音通话开始】', '无参时只有裸标记，不抛');
+  eq(noArg.marker, 'call', '无参也带 marker');
+  var bareEnd = VD.buildCallMarker({ kind: 'end' });
+  eq(bareEnd.content, '【语音通话结束】', '结束标记无时间时只剩裸标记');
+  var zeroTurns = VD.buildCallMarker({
+    kind: 'end', at: vmTs(2026, 10, 20, 22, 30, 34),
+    startedAt: vmTs(2026, 10, 20, 22, 30, 0), turns: 0
+  });
+  eq(zeroTurns.content, '【语音通话结束 · 22:30 · 通话 34 秒】', '0 轮时省略轮数');
+  noThrow(function () { VD.buildCallMarker({ kind: 'end', at: 'x', startedAt: {}, turns: 'y' }); },
+    '脏入参不抛');
+  eq(VD.buildCallMarker({ kind: 'end', at: vmTs(2026, 10, 20, 22, 30, 0), startedAt: vmTs(2026, 10, 20, 23, 30, 0) }).content,
+    '【语音通话结束 · 22:30】', 'at 早于 startedAt 时不硬算负时长');
+});
+
+// ============================================================
+// 18. v126 resolveTuning（双套微调预设）
+// ============================================================
+describe('resolveTuning', function () {
+  var base = { echoGuardMs: 250, bargeInHoldMs: 180, sensitivity: 0.5 };
+  var preset = { echoGuardMs: 350, sensitivity: 0.8, 未知键: 1 };
+  var merged = VD.resolveTuning(base, preset);
+
+  eq(merged.echoGuardMs, 350, 'preset 合法数字应覆盖 base');
+  eq(merged.sensitivity, 0.8, 'preset 合法小数应覆盖 base');
+  eq(merged.bargeInHoldMs, 180, 'preset 没给的键保留 base');
+  eq(merged['未知键'], undefined, '未知键应丢弃');
+  eq(base.echoGuardMs, 250, '不许改入参 base');
+  eq(base.sensitivity, 0.5, '不许改入参（小数）');
+  ok(merged !== base, '必须返回新对象');
+
+  // 非法值忽略：NaN / 非数字 / 超范围
+  var bad = VD.resolveTuning(base, {
+    echoGuardMs: 'abc', bargeInHoldMs: NaN, sensitivity: 2,
+    endpointSilenceMs: 99999, leakFloor: -1
+  });
+  eq(bad.echoGuardMs, 250, '非数字忽略');
+  eq(bad.bargeInHoldMs, 180, 'NaN 忽略');
+  eq(bad.sensitivity, 0.5, '超上限忽略');
+  eq(bad.endpointSilenceMs, undefined, '超范围且 base 没有 → 不新增');
+  eq(bad.leakFloor, undefined, '低于下限忽略');
+
+  // 空 / 脏 preset
+  var empty = VD.resolveTuning(base, {});
+  eq(JSON.stringify(empty), JSON.stringify(base), '空 preset 等于 base 的副本');
+  eq(JSON.stringify(VD.resolveTuning(base)), JSON.stringify(base), 'preset 缺省时等于 base 的副本');
+  eq(JSON.stringify(VD.resolveTuning(base, null)), JSON.stringify(base), 'preset=null 等于 base 的副本');
+  noThrow(function () { VD.resolveTuning(); }, 'resolveTuning() 无参不崩');
+  noThrow(function () { VD.resolveTuning(null, null); }, 'resolveTuning(null,null) 不崩');
+
+  // 表单回填是字符串，也要认
+  eq(VD.resolveTuning({}, { echoGuardMs: '300' }).echoGuardMs, 300, '数字字符串应被接受');
+  eq(VD.resolveTuning({}, { echoGuardMs: '' }).echoGuardMs, undefined, '空字符串不算数字');
+  eq(VD.resolveTuning({}, { echoGuardMs: true }).echoGuardMs, undefined, '布尔值不算数字');
+
+  // 边界值算合法
+  eq(VD.resolveTuning({}, { echoGuardMs: 0 }).echoGuardMs, 0, '下边界 0 合法');
+  eq(VD.resolveTuning({}, { endpointSilenceMs: 3000 }).endpointSilenceMs, 3000, '上边界 3000 合法');
+  eq(VD.resolveTuning({}, { endpointSilenceMs: 3001 }).endpointSilenceMs, undefined, '刚过上边界就忽略');
+  eq(VD.resolveTuning({}, { endpointSilenceMs: 199 }).endpointSilenceMs, undefined, '低于下边界忽略');
+
+  // 常量面
+  ok(Array.isArray(VD.TUNING_KEYS), 'TUNING_KEYS 是数组');
+  eq(VD.TUNING_KEYS.length, 7, 'TUNING_KEYS 共 7 个键');
+  ['echoGuardMs', 'bargeInHoldMs', 'bargeInLeakFactor', 'leakFloor',
+    'endpointSilenceMs', 'minUtteranceMs', 'sensitivity'].forEach(function (k) {
+    ok(VD.TUNING_KEYS.indexOf(k) >= 0, 'TUNING_KEYS 必须含 ' + k);
+    ok(!!VD.TUNING_RANGES[k], 'TUNING_RANGES 必须含 ' + k);
+  });
+  eq(VD.TUNING_RANGES.echoGuardMs.min, 0, 'echoGuardMs 下限 0');
+  eq(VD.TUNING_RANGES.echoGuardMs.max, 1200, 'echoGuardMs 上限 1200');
+  eq(VD.TUNING_RANGES.bargeInHoldMs.min, 80, 'bargeInHoldMs 下限 80');
+  eq(VD.TUNING_RANGES.bargeInHoldMs.max, 800, 'bargeInHoldMs 上限 800');
+  eq(VD.TUNING_RANGES.bargeInLeakFactor.min, 1.5, 'bargeInLeakFactor 下限 1.5');
+  eq(VD.TUNING_RANGES.bargeInLeakFactor.max, 10, 'bargeInLeakFactor 上限 10');
+  eq(VD.TUNING_RANGES.leakFloor.min, 0, 'leakFloor 下限 0');
+  eq(VD.TUNING_RANGES.leakFloor.max, 1, 'leakFloor 上限 1');
+});
+
+// ============================================================
+// 19. v126 describeRate（语速描述）
+// ============================================================
+describe('describeRate', function () {
+  eq(VD.RATE_MIN, 0.6, 'RATE_MIN=0.6');
+  eq(VD.RATE_MAX, 1.6, 'RATE_MAX=1.6');
+  eq(VD.RATE_DEFAULT, 1.0, 'RATE_DEFAULT=1.0');
+
+  eq(VD.describeRate(1.0), '正常语速', '1.0× 是正常语速');
+  eq(VD.describeRate(1.2), '偏快（1.2×）', '1.2× 偏快');
+  eq(VD.describeRate(0.8), '偏慢（0.8×）', '0.8× 偏慢');
+
+  eq(VD.describeRate(1.04), '正常语速', '1.04× 仍算正常');
+  eq(VD.describeRate(1.05), '偏快（1.05×）', '1.05× 起算偏快');
+  eq(VD.describeRate(0.96), '正常语速', '0.96× 仍算正常');
+  eq(VD.describeRate(0.95), '偏慢（0.95×）', '0.95× 起算偏慢');
+
+  eq(VD.describeRate(undefined), '正常语速', '缺省语速按正常');
+  eq(VD.describeRate('乱写'), '正常语速', '非法语速按正常');
+  eq(VD.describeRate(2), '偏快（1.6×）', '超出上限按 1.6 描述');
+  eq(VD.describeRate(0.1), '偏慢（0.6×）', '低于下限按 0.6 描述');
+});
+
+// ============================================================
+// 20. v126 新 API 面
+// ============================================================
+describe('v126 API 面', function () {
+  ['buildCallLayer', 'describeClock', 'buildCallMarker', 'resolveTuning', 'describeRate']
+    .forEach(function (k) {
+      eq(typeof VD[k], 'function', 'API 必须提供 ' + k);
+    });
+  ok(Array.isArray(VD.TUNING_KEYS), 'API 必须提供 TUNING_KEYS');
+  ok(!!VD.TUNING_RANGES && VD.TUNING_RANGES.echoGuardMs, 'API 必须提供 TUNING_RANGES');
+  eq(typeof VD.RATE_MIN, 'number', 'API 必须提供 RATE_MIN');
+  eq(typeof VD.RATE_MAX, 'number', 'API 必须提供 RATE_MAX');
+  eq(typeof VD.RATE_DEFAULT, 'number', 'API 必须提供 RATE_DEFAULT');
+});
+
 // ============================================================
 // 结果
 // ============================================================

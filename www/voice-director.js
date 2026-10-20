@@ -14,6 +14,11 @@
 //  10) sanitizeForTTS      朗读前清洗（markdown / emoji / URL / 多余空白）
 //  11) turnPolicy          轮次判定纯函数（yield / wait / continue）
 //  12) buildFillerPlan     冷场补白色候选
+//  13) buildCallLayer      通话层提示词（会话人设之上的「电话信道」约束）
+//  14) describeClock       时间感知（几点 / 隔了多久 / 通话多久）
+//  15) buildCallMarker     通话开始 / 结束的系统标记
+//  16) resolveTuning       双套微调预设的合并（覆盖 + 非法忽略）
+//  17) describeRate        语速倍率 → 中文描述
 //
 // 设计约束：
 //   · 全部纯函数：无 DOM、无网络、无定时器 —— 所以能在 node 里直接 eval 出来跑单测
@@ -1374,7 +1379,363 @@
   }
 
   // ============================================================
-  // 13. 导出
+  // 13. v126 通话层：时间描述 / 通话层提示词 / 通话标记
+  //   为什么单独一层：PERSONAS 回答的是「你是谁」，这一层回答的是「电话这个信道」。
+  //   两件事混在一段里，改人设就会牵动通话规则；而且 JSON 输出格式说明只留在
+  //   voice.js 的 JSON_DIRECTIVE 一处，这里绝不重复，免得两边要求互相打架。
+  // ============================================================
+
+  var CN_DIGITS = ['零', '一', '二', '三', '四', '五', '六', '七', '八', '九'];
+  var CN_WEEK = ['日', '一', '二', '三', '四', '五', '六'];
+
+  function pad2(n) {
+    var v = Math.floor(num(n, 0));
+    if (v < 0) v = 0;
+    return v < 10 ? '0' + v : String(v);
+  }
+
+  // 统一成毫秒时间戳。跨 vm realm 时 instanceof Date 会失效，所以按 getTime 判断；
+  //   非法输入一律 NaN —— 调用方据此走兜底，而不是拿 Invalid Date 去算。
+  function toMs(x) {
+    if (x === null || x === undefined || x === '') return NaN;
+    if (typeof x === 'number') return (isFinite(x) && x > 0) ? x : NaN;
+    if (typeof x === 'string') {
+      var s = x.replace(/^\s+|\s+$/g, '');
+      if (!s) return NaN;
+      if (/^\d{1,15}$/.test(s)) {
+        var n = Number(s);
+        return (isFinite(n) && n > 0) ? n : NaN;
+      }
+      var parsed = Date.parse(s);
+      return isFinite(parsed) ? parsed : NaN;
+    }
+    if (isObj(x) && typeof x.getTime === 'function') {
+      try {
+        var t = x.getTime();
+        return isFinite(t) ? t : NaN;
+      } catch (e) { return NaN; }
+    }
+    return NaN;
+  }
+
+  function dateParts(ms) {
+    var m = num(ms, NaN);
+    if (!isFinite(m)) return null;
+    var d = new Date(m);
+    if (!isFinite(d.getTime())) return null;
+    return {
+      y: d.getFullYear(), mo: d.getMonth() + 1, d: d.getDate(),
+      wd: d.getDay(), h: d.getHours(), mi: d.getMinutes(), s: d.getSeconds()
+    };
+  }
+
+  // 0~59 的中文说法：时间要给人听，模型嘴里不能冒出「22:30」这种写法
+  function cnNumber(n) {
+    var v = Math.floor(num(n, 0));
+    if (v < 0) v = 0;
+    if (v > 59) v = 59;
+    if (v < 10) return CN_DIGITS[v];
+    var ten = Math.floor(v / 10);
+    var one = v % 10;
+    if (ten === 1) return '十' + (one ? CN_DIGITS[one] : '');
+    return CN_DIGITS[ten] + '十' + (one ? CN_DIGITS[one] : '');
+  }
+
+  // 时段按中文口语习惯切：凌晨 / 早上 / 上午 / 中午 / 下午 / 晚上 / 深夜
+  function clockPeriod(h) {
+    var v = Math.floor(num(h, 0));
+    if (v < 5) return '凌晨';
+    if (v < 8) return '早上';
+    if (v < 11) return '上午';
+    if (v < 13) return '中午';
+    if (v < 18) return '下午';
+    if (v < 23) return '晚上';
+    return '深夜';
+  }
+
+  // 「晚上十点半」「下午三点一刻」「上午九点零五分」
+  function speakClockTime(h, mi) {
+    var hh = Math.floor(num(h, 0));
+    if (hh < 0) hh = 0;
+    if (hh > 23) hh = 23;
+    var mm = Math.floor(num(mi, 0));
+    if (mm < 0) mm = 0;
+    if (mm > 59) mm = 59;
+    var h12 = hh % 12;
+    if (h12 === 0) h12 = 12;
+    var tail;
+    if (mm === 0) tail = '整';
+    else if (mm === 15) tail = '一刻';
+    else if (mm === 30) tail = '半';
+    else if (mm === 45) tail = '三刻';
+    else if (mm < 10) tail = '零' + CN_DIGITS[mm] + '分';
+    else tail = cnNumber(mm) + '分';
+    return clockPeriod(hh) + cnNumber(h12) + '点' + tail;
+  }
+
+  // 给人听的时长。exact=true 保留秒（通话时长要精确），否则只给量级（进度够了）
+  function fmtDurationCN(ms, exact) {
+    var total = num(ms, NaN);
+    if (!isFinite(total) || total < 0) total = 0;
+    var sec = Math.round(total / 1000);
+    if (sec < 60) return sec + ' 秒';
+    var min = Math.floor(sec / 60);
+    var remSec = sec % 60;
+    if (min < 60) {
+      if (!exact) return min + ' 分钟';
+      return min + ' 分' + (remSec ? ' ' + remSec + ' 秒' : '');
+    }
+    var hour = Math.floor(min / 60);
+    var remMin = min % 60;
+    if (exact) return hour + ' 小时' + (remMin ? ' ' + remMin + ' 分' : '');
+    return hour + ' 小时' + (remMin ? ' ' + remMin + ' 分钟' : '');
+  }
+
+  // 本地当天零点：跨天判断不能用 24 小时整除，否则 23:50→00:10 只算 20 分钟
+  function dayStartMs(ms) {
+    var m = num(ms, NaN);
+    if (!isFinite(m)) return NaN;
+    var d = new Date(m);
+    if (!isFinite(d.getTime())) return NaN;
+    var t = new Date(d.getFullYear(), d.getMonth(), d.getDate()).getTime();
+    return isFinite(t) ? t : NaN;
+  }
+
+  // 时间感知：时间一律由调用方传入（本模块不读 Date.now），否则单测无法稳定复现
+  function describeClock(clock) {
+    var c = isObj(clock) ? clock : {};
+    if (!boolish(c.enabled, true)) return '';
+
+    var nowMs = toMs(c.now);
+    var np = dateParts(nowMs);
+    if (!np) return '';
+
+    var startMs = toMs(c.callStartedAt);
+    var lastMs = toMs(c.lastTurnAt);
+    var idx = num(c.turnIndex, NaN);
+
+    var durMs = isFinite(startMs) ? (nowMs - startMs) : NaN;
+    var gapMs = isFinite(lastMs) ? (nowMs - lastMs) : NaN;
+    // 时钟回拨或收到未来时间：宁可说 0，也不能出现「负了 3 分钟」
+    if (isFinite(durMs) && durMs < 0) durMs = 0;
+    if (isFinite(gapMs) && gapMs < 0) gapMs = 0;
+
+    // 首轮只说「现在是什么时候」。没有任何通话进度可讲时也走这一支，
+    //   否则会产出一句残缺的「距上一句过了 0 秒」。
+    var isFirst = (isFinite(idx) && idx <= 0) || (!isFinite(gapMs) && !isFinite(durMs));
+    if (isFirst) {
+      return '现在是' + np.mo + '月' + np.d + '日，星期' + CN_WEEK[np.wd] + '，' +
+        speakClockTime(np.h, np.mi) + '。';
+    }
+
+    var parts = [];
+    if (isFinite(gapMs)) {
+      if (gapMs < 5000) parts.push('距对方上一句只隔了几秒');
+      else parts.push('距对方上一句已经过了 ' + fmtDurationCN(gapMs));
+    }
+    if (isFinite(durMs)) {
+      if (durMs < 60000) parts.push('这通电话才刚开始');
+      else parts.push('这通电话已经打了 ' + fmtDurationCN(durMs));
+    }
+
+    // 聊过零点要明说：不然模型仍以为「今天晚上」，会说出「你早点睡」这种错话
+    if (isFinite(startMs)) {
+      var d0 = dayStartMs(startMs);
+      var d1 = dayStartMs(nowMs);
+      if (isFinite(d0) && isFinite(d1) && d1 > d0) {
+        var days = Math.round((d1 - d0) / 86400000);
+        parts.push(days <= 1 ? '已经到第二天了' : '已经过了 ' + days + ' 天');
+      }
+    }
+
+    if (!parts.length) return '';
+    return parts.join('，') + '。';
+  }
+
+  // 通话层：叠在会话人设之上的一段约束，只讲电话这个信道 + 当前人格 + 这一轮线索
+  function buildCallLayer(opts) {
+    var o = isObj(opts) ? opts : {};
+    var pref = (o.personaId !== undefined && o.personaId !== null && o.personaId !== '')
+      ? o.personaId
+      : (o.persona || 'warm');
+    var persona = getPersona(pref);
+    var brevity = normalizeBrevity(o.brevity);
+    var b = BREVITY_MODES[brevity] || BREVITY_MODES.short;
+    var L = [];
+
+    L.push('你正在和对方打电话，你说的每句话会被直接念出来，对方看不到文字。');
+
+    L.push('');
+    L.push('【说话方式的硬规则（每一条都要守）】');
+    L.push('1. 短句：一次只说 ' + b.sentences + '，一共 ' + b.chars + '，说完就停，把话头交回给对方。');
+    L.push('2. 口语：用日常说话的短句，可以用语气词开头（嗯、唉、啊、我说、那个），可以说一半改口。');
+    L.push('3. 不 Markdown：不要加粗、不要标题、不要反引号代码、不要列表、不要编号、不要表格、不要分隔线。');
+    L.push('4. 不 emoji：不要表情符号、不要颜文字、不要 ASCII 表情（:) 这种）。');
+    L.push('5. 不要念出括号里的动作：不要在话里写（停顿）（叹气）*笑* 这类舞台说明；情绪靠语气表达，不靠文字描述。');
+    L.push('6. 不书面语：不要「首先 / 其次 / 最后」「总的来说」「综上所述」「值得一提的是」这些套话；不要分点讲道理、不要总结要点。');
+    L.push('7. ' + b.note);
+
+    L.push('');
+    L.push('【你的人格：' + (str(persona.name) || str(persona.id) || '温暖陪伴') + '】');
+    if (str(persona.systemFlavor)) L.push(str(persona.systemFlavor));
+    L.push('默认说话感觉：' + (str(persona.tone) || '自然') +
+      '，语速' + PACE_CN[normalizePace(persona.pace, 'normal')] +
+      '，音量' + VOLUME_CN[normalizeVolume(persona.volume, '中')] + '。');
+    L.push('除非这一句的情绪明显不同，否则就照这个默认感觉说。');
+
+    var custom = str(o.customPersona);
+    if (custom) {
+      L.push('');
+      L.push('【额外设定（优先于上面的人格描述，但不能违反上面的硬规则）】');
+      L.push(custom);
+    }
+
+    // 声音状态：字符串和对象两种入口都认，和 buildSystemPrompt 保持同一口径
+    var sigText = str(o.signalsText);
+    if (!sigText && isObj(o.signals)) sigText = describeSignals(o.signals, o.signalOpts);
+    if (sigText) {
+      L.push('');
+      L.push('【对方这一段的声音状态】');
+      L.push(sigText);
+      var hints = signalHints(o.signals);
+      if (hints.length) {
+        L.push('这一轮请这样处理：');
+        for (var h = 0; h < hints.length; h++) L.push('· ' + hints[h]);
+      }
+      L.push('不要把这些特征说出来（别说「你刚才语速很快」），把它变成你说话的方式和长度。');
+    }
+
+    // 时间感知：关着的时候一个字都不加，别拿默认值污染 prompt
+    var clock = isObj(o.clock) ? o.clock : null;
+    if (clock && boolish(clock.enabled, false)) {
+      var clockText = describeClock(clock);
+      if (clockText) {
+        L.push('');
+        L.push('【现在的时间和通话进度】');
+        L.push(clockText);
+        L.push('这些只是给你自己判断用的：可以顺着时间说话（比如「都这么晚了」），但不要把几点几分原样念出来。');
+      }
+    }
+
+    return L.join('\n');
+  }
+
+  // 通话开始 / 结束的系统标记。落进会话历史后，回看时能一眼分出「哪段是打电话聊的」
+  function buildCallMarker(opts) {
+    var o = isObj(opts) ? opts : {};
+    var kind = str(o.kind).toLowerCase();
+    var isEnd = (kind === 'end' || kind === 'stop' || kind === 'hangup' || kind === 'over');
+
+    var atMs = toMs(o.at);
+    var startMs = toMs(o.startedAt);
+    var body = [];
+
+    if (isEnd) {
+      var p = dateParts(atMs);
+      if (p) body.push(pad2(p.h) + ':' + pad2(p.mi));
+      if (isFinite(atMs) && isFinite(startMs) && atMs >= startMs) {
+        body.push('通话 ' + fmtDurationCN(atMs - startMs, true));
+      }
+      var turns = Math.floor(num(o.turns, NaN));
+      if (isFinite(turns) && turns > 0) body.push(turns + ' 轮');
+      return {
+        role: 'system',
+        content: '【语音通话结束' + (body.length ? ' · ' + body.join(' · ') : '') + '】',
+        marker: 'call'
+      };
+    }
+
+    var sp = dateParts(isFinite(atMs) ? atMs : startMs);
+    if (sp) body.push(sp.mo + '月' + sp.d + '日 ' + pad2(sp.h) + ':' + pad2(sp.mi));
+    return {
+      role: 'system',
+      content: '【语音通话开始' + (body.length ? ' · ' + body.join(' · ') : '') + '】',
+      marker: 'call'
+    };
+  }
+
+  // ============================================================
+  // 14. v126 真机微调预设与语速
+  //   预设里只存「用户改过的项」，所以合并只能是「覆盖 + 非法忽略」：
+  //   整对象替换会让以后调整内置默认值时老用户永远收不到。
+  // ============================================================
+
+  var TUNING_RANGES = {
+    echoGuardMs: { min: 0, max: 1200 },
+    bargeInHoldMs: { min: 80, max: 800 },
+    bargeInLeakFactor: { min: 1.5, max: 10 },
+    leakFloor: { min: 0, max: 1 },
+    endpointSilenceMs: { min: 200, max: 3000 },
+    minUtteranceMs: { min: 100, max: 2000 },
+    sensitivity: { min: 0, max: 1 }
+  };
+
+  var TUNING_KEYS = ['echoGuardMs', 'bargeInHoldMs', 'bargeInLeakFactor', 'leakFloor',
+    'endpointSilenceMs', 'minUtteranceMs', 'sensitivity'];
+
+  // 预设可能来自表单（数字字符串）、也可能被脏数据写坏，统一在这里收敛成数字
+  function toTuningNumber(raw) {
+    if (raw === null || raw === undefined || raw === true || raw === false) return NaN;
+    if (typeof raw === 'number') return isFinite(raw) ? raw : NaN;
+    if (typeof raw === 'string') {
+      var s = raw.replace(/^\s+|\s+$/g, '');
+      if (!s) return NaN;
+      var n = Number(s);
+      return isFinite(n) ? n : NaN;
+    }
+    return NaN;   // 对象 / 数组 / Date：预设里不该出现，一律当非法
+  }
+
+  function resolveTuning(base, preset) {
+    var out = {};
+    if (isObj(base)) {
+      for (var k in base) {
+        if (!Object.prototype.hasOwnProperty.call(base, k)) continue;
+        out[k] = base[k];
+      }
+    }
+    var p = preset;
+    if (typeof p === 'string') {
+      var parsed = safeParse(p);
+      if (isObj(parsed)) p = parsed;
+    }
+    if (!isObj(p)) return out;
+
+    for (var i = 0; i < TUNING_KEYS.length; i++) {
+      var key = TUNING_KEYS[i];
+      if (!Object.prototype.hasOwnProperty.call(p, key)) continue;
+      var n = toTuningNumber(p[key]);
+      if (!isFinite(n)) continue;
+      var r = TUNING_RANGES[key];
+      if (!r) continue;
+      if (n < r.min || n > r.max) continue;   // 超范围的值写进去只会把功能调死
+      out[key] = n;
+    }
+    return out;
+  }
+
+  var RATE_MIN = 0.6;
+  var RATE_MAX = 1.6;
+  var RATE_DEFAULT = 1.0;
+
+  function fmtRateValue(n) {
+    var r = Math.round(num(n, RATE_DEFAULT) * 100) / 100;
+    return String(r);
+  }
+
+  // 语速描述给设置面板和提示词共用：同一处阈值，避免两边各写一套
+  function describeRate(rate) {
+    var n = num(rate, NaN);
+    if (!isFinite(n) || n <= 0) n = RATE_DEFAULT;
+    if (n < RATE_MIN) n = RATE_MIN;
+    if (n > RATE_MAX) n = RATE_MAX;
+    if (n >= 1.05) return '偏快（' + fmtRateValue(n) + '×）';
+    if (n <= 0.95) return '偏慢（' + fmtRateValue(n) + '×）';
+    return '正常语速';
+  }
+
+  // ============================================================
+  // 15. 导出
   // ============================================================
 
   var API = {
@@ -1386,6 +1747,13 @@
     BREVITY_MODES: BREVITY_MODES,
     TURN_DEFAULTS: TURN_DEFAULTS,
     DEFAULT_FILLERS: DEFAULT_FILLERS,
+    // v126：真机微调的键与范围由本模块统一定义，voice.js 的设置面板直接引用，
+    //   避免「面板能填 5000、运行时只认 3000」这种两套阈值。
+    TUNING_KEYS: TUNING_KEYS,
+    TUNING_RANGES: TUNING_RANGES,
+    RATE_MIN: RATE_MIN,
+    RATE_MAX: RATE_MAX,
+    RATE_DEFAULT: RATE_DEFAULT,
 
     getPersona: getPersona,
     normalizePace: normalizePace,
@@ -1403,7 +1771,14 @@
     firstSentences: firstSentences,
     sanitizeForTTS: sanitizeForTTS,
     turnPolicy: turnPolicy,
-    buildFillerPlan: buildFillerPlan
+    buildFillerPlan: buildFillerPlan,
+
+    // v126 增量：通话层 / 时间 / 标记 / 微调 / 语速
+    buildCallLayer: buildCallLayer,
+    describeClock: describeClock,
+    buildCallMarker: buildCallMarker,
+    resolveTuning: resolveTuning,
+    describeRate: describeRate
   };
 
   root.VoiceDirector = API;

@@ -427,10 +427,12 @@ module.exports = async (ctx) => {
     const r = await ev([
       '(function(){',
       '  var def = defaultVoiceSettings();',
-      '  var contract = ["enabled","asrProviderId","asrModel","ttsProviderId","ttsModel","brainProviderId",',
-      '    "brainModel","voiceId","voiceDesign","cloneRefName","personaId","customPersona","sensitivity",',
+      // v126：brainProviderId/brainModel 已删除（大脑跟随会话），新增时间感知/语速/路由/双预设
+      '  var contract = ["enabled","asrProviderId","asrModel","ttsProviderId","ttsModel",',
+      '    "voiceId","voiceDesign","cloneRefName","personaId","customPersona","sensitivity",',
       '    "endpointSilenceMs","minUtteranceMs","bargeIn","bargeInThreshold","showTranscript","showSignals",',
-      '    "autoHangupSilenceMs","ttsFormat","rate","haptics"];',
+      '    "autoHangupSilenceMs","ttsFormat","rate","haptics",',
+      '    "timestamps","rateMode","routeMode","tuningPresets"];',
       '  var inDefaults = contract.filter(function(k){ return Object.prototype.hasOwnProperty.call(def,k); });',
       '  var missing = contract.filter(function(k){ return !Object.prototype.hasOwnProperty.call(def,k); });',
       '  // 模拟用户手改一个「不在默认值里」的字段，走一遍迁移看会不会被丢掉',

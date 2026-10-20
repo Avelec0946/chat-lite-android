@@ -93,10 +93,10 @@ async function main() {
     const msg = c.stateText || '';
     const toast = (c.toasts || []).join(' / ');
     add('B1.1 没配渠道时 start 不崩（有返回）', c.startOk !== undefined, 'startOk=' + c.startOk + ' state=' + c.state);
-    // ★ 记录一条真实行为：产品是懒校验 —— start() 会成功进 listening，错误要等第一次真正发请求才暴露。
-    //   这本身不是缺陷（用户点了通话才知道没配，符合"先接通再说"），但会让人以为"没配也能用"。
-    add('B1.2 [行为记录] start() 未校验渠道，直接进了 listening',
-        c.stateAtStart === 'listening', 'stateAtStart=' + c.stateAtStart + ' 文案=' + mk(c.textAtStart));
+    // v125 起 start() 先做配置预检：没配渠道时直接进 error 并给出可读原因，
+    //   不再"假装接通、等第一次说话才炸"。这条断言从"记录懒校验"改成"钉住快速失败"。
+    add('B1.2 没配渠道时 start() 快速失败（不假装接通）',
+        c.stateAtStart === 'error', 'stateAtStart=' + c.stateAtStart + ' 文案=' + mk(c.textAtStart));
     add('B1.3 注入一句后不卡在 thinking/speaking', c.state !== 'thinking' && c.state !== 'speaking',
         'state=' + c.state + ' 轨迹=' + mk(c.states));
     add('B1.4 状态文案可读（中文）', readable(msg), 'stateText=' + mk(msg));
@@ -195,7 +195,8 @@ async function main() {
     add('B8.1 反复开 5 次：#voice-advanced-details 恒为 1', counts.length === 5 && counts.every(function (v) { return v === 1; }), mk(counts));
     add('B8.2 语音分组不重复', (c.groupCounts || []).every(function (v) { return v === 1; }), mk(c.groupCounts));
     add('B8.3 第 6 次（点设置按钮）仍为 1', c.afterBtn === 1, 'afterBtn=' + c.afterBtn);
-    add('B8.4 微调输入框不重复', c.tuneInputs === 5, 'tuneInputs=' + c.tuneInputs);
+    // v126：全局 5 个 + 外放预设 5 个 + 耳机预设 5 个 = 15。断言"恰好 15"仍能抓重复注入。
+    add('B8.4 微调输入框不重复（5 全局 + 5 外放 + 5 耳机）', c.tuneInputs === 15, 'tuneInputs=' + c.tuneInputs);
     add('B8.5 恢复默认按钮不重复', c.resetBtns === 1, 'resetBtns=' + c.resetBtns);
   }
 
@@ -269,8 +270,9 @@ async function main() {
          aft.moduleTypes && aft.moduleTypes.VoiceCall === 'object' && aft.moduleTypes.VoiceDirector === 'object' &&
          aft.moduleTypes.VoiceSettings === 'object', mk(aft.moduleTypes));
     add9('B9.2 重载后 #voice-view 仍在 DOM', aft.viewExists === true, 'viewExists=' + aft.viewExists);
-    // 实测是 22 个：契约 §3.1 列了 24 个，实现少了 rate（播放倍速）与 haptics（实为 haptic，单复数不同）。
-    add9('B9.3 voice 字段被迁移补全（22 个）', aft.fieldCount === 22, 'fieldCount=' + aft.fieldCount);
+    // v126：字段数会随版本增长，钉死具体数字只会让每次加字段都误报。
+    //   这里只要求「至少覆盖契约里的全部字段」，缺字段才是真问题。
+    add9('B9.3 voice 字段被迁移补全（≥ 契约字段数）', aft.fieldCount >= 24, 'fieldCount=' + aft.fieldCount);
     const dflt = aft.defaults || {};
     const okDflt = dflt.asrModel === 'mimo-v2.5-asr' && dflt.ttsModel === 'mimo-v2.5-tts' &&
       dflt.voiceId === 'Mia' && dflt.personaId === 'warm' && dflt.enabled === true &&
@@ -278,7 +280,10 @@ async function main() {
       dflt.showTranscript === true && dflt.showSignals === true &&
       dflt.autoHangupSilenceMs === 45000 && dflt.ttsFormat === 'pcm16';
     add9('B9.4 迁移出的是契约 §3.1 的默认值', okDflt, mk(dflt));
-    add9('B9.5 迁移后 start() 仍可用', use.start === true, mk(use));
+    // v126：迁移后 start() 不再"无脑成功"。没配语音渠道时它必须返回 false 并说明原因，
+    //   而不是进 listening 让用户以为接通了。这里钉住"失败要有可读理由"。
+    add9('B9.5 迁移后 start() 行为正确（有密钥则接通，否则明确报错）',
+         use.start === true || (use.state === 'error' && !!use.text && use.text.length > 0), mk(use));
   }
   B9.forEach(function (r) {
     console.log((r.pass ? 'PASS ' : 'FAIL ') + r.name + (r.detail ? '   << ' + r.detail : ''));

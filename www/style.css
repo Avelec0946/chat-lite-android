@@ -1381,3 +1381,18 @@ body.image-view-open.sidebar-hidden .image-view{left:0}
 @keyframes voiceEntryDot{0%,100%{opacity:.45}50%{opacity:1}}
 /* 通话层打开时，入口按钮不再需要提示 */
 body.voice-view-open .btn-voice-entry::after{display:none}
+
+/* ===== v126：语音设置「外放 / 耳机」双预设 + 路由状态 =====
+   两栏用 grid 的理由：窄屏要能一键改成上下堆叠，只需要换 template-columns，
+   用 flex-wrap 则会出现"一栏换行、另一栏高度不齐"的尴尬。 */
+.voice-preset-grid{display:grid;grid-template-columns:1fr 1fr;gap:10px;margin:8px 0 2px;align-items:start}
+.voice-preset-col{background:var(--bg3);border:1px solid var(--border);border-radius:10px;padding:8px 10px 10px}
+.voice-preset-head{display:flex;align-items:center;justify-content:space-between;gap:8px;margin-bottom:2px;flex-wrap:wrap}
+.voice-preset-title{font-size:12px;font-weight:600;letter-spacing:.04em;color:var(--text)}
+.voice-preset-col .setting-row{margin-top:8px;min-height:0}
+.voice-preset-col .setting-row>span:first-child{font-size:12px;color:var(--text2)}
+.voice-preset-col .setting-num{width:100%;text-align:right}
+/* 路由实际值：只读结果，用主题色 + 等宽数字，拖长数字时右侧不跳 */
+.voice-route-now{font-size:12px;font-weight:600;color:var(--primary);font-variant-numeric:tabular-nums;text-align:right}
+@media (max-width:640px){.voice-preset-grid{grid-template-columns:1fr}}
+

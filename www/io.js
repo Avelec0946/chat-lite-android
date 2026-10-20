@@ -218,13 +218,32 @@ async function importAllData(jsonText, mode) {
     });
   }
 
+  // v126 修：老备份的 conversations 可能是 messages 数组（无 messageMap），
+  //   必须先迁移再进 state，否则打开会话时 getActiveChain 抛错、界面空白。
+  if (Array.isArray(data.conversations) && typeof migrateV1toV2 === 'function') {
+    for (var mi = 0; mi < data.conversations.length; mi++) {
+      var mcv = data.conversations[mi];
+      if (mcv && Array.isArray(mcv.messages) && !mcv.messageMap) {
+        try { migrateV1toV2(mcv); } catch (e2) { console.warn('migrateV1toV2 failed:', mcv.id, e2); }
+      }
+    }
+  }
+
   if (mode === 'overwrite') {
     // 覆盖模式：直接替换
     if (data.conversations) state.conversations = data.conversations;
     if (data.providers) { state.providers = data.providers; saveProviders(); }
     if (data.settings) {
-      Object.assign(settings, data.settings);
+      // v126 修：「覆盖」就要真的覆盖。
+      //   原来只做 Object.assign(settings, data.settings) —— 那是"合并"语义：
+      //   本地有、备份里没有的键会原样留着。后果是用户点了「覆盖」，字体/超时/开关
+      //   却还是导入前的值，看起来像"导入没生效"。备份里没有的项就该回到出厂默认。
+      settings = migrateSettings(Object.assign(defaultSettings(), data.settings));
       saveSettings();  // 走 IDB 持久化（不再用 localStorage）
+    } else {
+      // 备份里完全没有 settings：覆盖语义下同样回到默认，不能留着上一份配置
+      settings = defaultSettings();
+      saveSettings();
     }
     if (data.currentId) {
       state.currentId = data.currentId;
@@ -246,6 +265,13 @@ async function importAllData(jsonText, mode) {
     }
     if (data.settings) {
       Object.assign(settings, data.settings);
+      // v126 修：导入的 settings 必须过一遍 migrateSettings。
+      //   之前漏了这一步，老备份导进来会原样保留旧结构：
+      //   · modelPrompts 还是 {systemPrompt, emphasis} 老格式 → 模型修饰语在界面上变成空白
+      //   · global 字段残留 → 提示词被旧的 settings.global 影响
+      //   · 新版新增字段（voice / imageProviders 等）不会被补默认值
+      //   这些都是"没报错但功能不对"，比崩溃更难查。
+      settings = migrateSettings(settings);
       saveSettings();  // 走 IDB 持久化
     }
     // currentId 保留本地当前选中的，除非本地没有了
@@ -435,15 +461,33 @@ async function importAllDataStreamed(file) {
   const tailRaw = tailText.replace(/^[\s,\]]+/, '').trim();
   if (tailRaw) { try { tailObj = JSON.parse('{' + tailRaw.slice(0, -1) + '}'); } catch (e) { tailObj = {}; } }
 
+  // v126 修：更早版本的备份里，conversation 用 messages 数组而不是 messageMap。
+  //   loadData() 有这一步迁移（data.version < 2 时逐条 migrateV1toV2），但导入路径一直没有 ——
+  //   结果这类会话导进来后 messageMap 为空，getActiveChain 直接抛
+  //   "Cannot read properties of undefined (reading 'map')"，界面上就是一片空白。
+  //   这里补齐：只对"有 messages 但没有 messageMap"的会话动手，幂等。
+  for (let ci = 0; ci < newConvs.length; ci++) {
+    const cv = newConvs[ci];
+    if (cv && Array.isArray(cv.messages) && !cv.messageMap && typeof migrateV1toV2 === 'function') {
+      try { migrateV1toV2(cv); } catch (e) { console.warn('migrateV1toV2 failed:', cv.id, e); }
+    }
+  }
+
   // 覆盖模式应用（先整体替换，峰值 = 解析缓冲 + 对象数组 ~1x；main 数据源在备份文件中，失败可重导）
   state.conversations = newConvs;
   if (Array.isArray(tailObj.providers)) { state.providers = tailObj.providers; saveProviders(); }
-  if (tailObj.settings && typeof tailObj.settings === 'object') Object.assign(settings, tailObj.settings);
+  // v126 修：覆盖语义 —— 以出厂默认打底再叠加备份里的值，避免本地残留项（详见 importAllData 同名注释）
+  if (tailObj.settings && typeof tailObj.settings === 'object') {
+    settings = Object.assign(defaultSettings(), tailObj.settings);
+  } else {
+    settings = defaultSettings();
+  }
   if (headObj.convGroups && Array.isArray(headObj.convGroups)) state.convGroups = headObj.convGroups;
   if (tailObj.currentId) state.currentId = tailObj.currentId;
   else state.currentId = state.conversations.length > 0 ? state.conversations[0].id : null;
 
-  // 与全量导入一致的收尾
+  // v126 修：与全量导入一致的收尾（含 settings 迁移，见 importAllData 里的同款说明）
+  settings = migrateSettings(settings);
   saveSettings();
   save();
   renderSidebar();

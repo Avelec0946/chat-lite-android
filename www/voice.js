@@ -346,6 +346,187 @@
   };
 
   // =====================================================================================
+  // 3.5 语速：WSOLA 保音高时间伸缩（变速不变调）
+  // =====================================================================================
+  // 为什么自己写：AudioContext 的 playbackRate 会连带变调（1.3× 就尖得没法听），
+  //   而语速是通话里最常调的参数。WSOLA 不去拉伸波形周期，而是"在波形里找与上一帧
+  //   最像的位置接上"，所以音高不变，只改变时长。
+  // 流式约束：TTS 是一块块 PCM 吐出来的。若每块独立处理，块边界必然产生周期性咔哒声，
+  //   因此把"上一帧尾巴（对齐模板）/ 名义读取位置 / 交叠累加器 / 残留输入"全部放在
+  //   闭包里跨调用保留 —— 这是本实现与一次性处理的本质区别。
+  //   纯逻辑、不碰 AudioContext，可被单测直接调用。
+
+  var RATE_MIN = 0.6;
+  var RATE_MAX = 1.6;
+  var STRETCH_FRAME_MS = 30;    // 帧长：30ms 够覆盖语音基频的 2~3 个周期
+  var STRETCH_SEARCH_MS = 10;   // 对齐搜索窗 ±10ms，再宽只是白花 CPU
+
+  // 语速统一入口：非法值回落 1（直通），越界夹到 0.6~1.6
+  function clampRate(r) {
+    var n = num(r, 1);
+    if (!(n > 0)) return 1;
+    var lo = (typeof root.VoiceDirector === 'object' && root.VoiceDirector && num(root.VoiceDirector.RATE_MIN, RATE_MIN)) || RATE_MIN;
+    var hi = (typeof root.VoiceDirector === 'object' && root.VoiceDirector && num(root.VoiceDirector.RATE_MAX, RATE_MAX)) || RATE_MAX;
+    if (n < lo) return lo;
+    if (n > hi) return hi;
+    return n;
+  }
+
+  function makeTimeStretcher(rate, sampleRate) {
+    var sr = num(sampleRate, TTS_RATE);
+    if (!(sr > 0)) sr = TTS_RATE;
+    var frameLen = Math.max(8, Math.round(sr * STRETCH_FRAME_MS / 1000));
+    if (frameLen % 2) frameLen++;          // 50% 交叠要求偶数帧长
+    var hopOut = frameLen >> 1;
+    var searchWin = Math.max(2, Math.round(sr * STRETCH_SEARCH_MS / 1000));
+
+    // 周期性汉宁窗：50% 交叠时相邻两窗之和恒为 1，重建后不会有音量起伏
+    var win = new Float32Array(frameLen);
+    for (var wi = 0; wi < frameLen; wi++) win[wi] = 0.5 - 0.5 * Math.cos(2 * Math.PI * wi / frameLen);
+
+    var st = {
+      rate: 1,
+      sampleRate: sr,
+      frameLen: frameLen,
+      hopOut: hopOut,
+      searchWin: searchWin,
+      buf: new Float32Array(0),   // 尚未消费的输入（保留搜索窗，供下一块的帧对齐）
+      bufStart: 0,                // buf[0] 在整个输入流里的绝对下标
+      pos: 0,                     // 名义读取位置（小数）；按 hopOut * rate 前进
+      totalIn: 0,                 // 已喂进来的真实样本总数（flush 的结束判据）
+      acc: new Float32Array(frameLen),  // 交叠累加器：上一帧的后半段
+      tail: null,                 // 上一帧后半段（未加窗），作为下一帧的对齐模板
+      emitted: 0
+    };
+    st.rate = clampRate(rate);
+
+    function appendBuf(input, isReal) {
+      var add = input.length;
+      var merged = new Float32Array(st.buf.length + add);
+      merged.set(st.buf, 0);
+      merged.set(input, st.buf.length);
+      st.buf = merged;
+      if (isReal !== false) st.totalIn += add;
+    }
+
+    function trimBuf() {
+      // 下一帧的候选位置最早是 round(pos) - searchWin，再往前的输入永远不会用到
+      var keepFrom = Math.round(st.pos) - st.searchWin;
+      if (keepFrom <= st.bufStart) return;
+      var cut = keepFrom - st.bufStart;
+      if (cut >= st.buf.length) {
+        st.buf = new Float32Array(0);
+        st.bufStart = keepFrom;
+        return;
+      }
+      var nb = new Float32Array(st.buf.length - cut);
+      nb.set(st.buf.subarray(cut));
+      st.buf = nb;
+      st.bufStart = keepFrom;
+    }
+
+    function concatOut(chunks, total) {
+      var out = new Float32Array(total);
+      var off = 0;
+      for (var i = 0; i < chunks.length; i++) { out.set(chunks[i], off); off += chunks[i].length; }
+      return out;
+    }
+
+    // 流边界：一句 TTS 结束就清空。不清空的话，flush 时补的静音尾巴会留到下一句，
+    //   下一句开头几十毫秒会被当成"上一句的余音"混进去（听感是黏连 + 首字发虚）。
+    function resetStream() {
+      st.buf = new Float32Array(0);
+      st.bufStart = 0;
+      st.pos = 0;
+      st.totalIn = 0;
+      st.acc = new Float32Array(frameLen);
+      st.tail = null;
+      st.emitted = 0;
+    }
+
+    function generate(finishing) {
+      var chunks = [];
+      var total = 0;
+      var bufEnd = st.bufStart + st.buf.length;
+      var hopIn = hopOut * st.rate;
+      while (true) {
+        var target = Math.round(st.pos);
+        if (finishing && target >= st.totalIn) break;
+        if (target + st.searchWin + st.frameLen > bufEnd) break;   // 数据不够：留给下一块
+        // 在名义位置附近找"与上一帧后半段最相似"的接点，接上就不响（相位连续）
+        var bestStart = -1;
+        var bestScore = -Infinity;
+        if (!st.tail) {
+          bestStart = target;
+        } else {
+          for (var d = -st.searchWin; d <= st.searchWin; d++) {
+            var s = target + d;
+            if (s < st.bufStart || s + st.frameLen > bufEnd) continue;
+            var base = s - st.bufStart;
+            var corr = 0;
+            var energy = 0;
+            for (var i = 0; i < hopOut; i++) {
+              var x = st.buf[base + i];
+              corr += x * st.tail[i];
+              energy += x * x;
+            }
+            // 归一化互相关：否则会偏向响度更大的位置
+            var score = energy > 1e-9 ? corr / Math.sqrt(energy) : 0;
+            if (score > bestScore) { bestScore = score; bestStart = s; }
+          }
+        }
+        if (bestStart < 0) bestStart = target;
+        var fb = bestStart - st.bufStart;
+        for (var j = 0; j < frameLen; j++) st.acc[j] += st.buf[fb + j] * win[j];
+        var chunk = new Float32Array(hopOut);
+        for (var m = 0; m < hopOut; m++) chunk[m] = st.acc[m];
+        chunks.push(chunk);
+        total += hopOut;
+        st.emitted += hopOut;
+        // 累加器左移一个 hop：本帧后半段留给下一帧叠加
+        for (var q = 0; q < hopOut; q++) st.acc[q] = st.acc[q + hopOut];
+        for (var q2 = hopOut; q2 < frameLen; q2++) st.acc[q2] = 0;
+        if (!st.tail) st.tail = new Float32Array(hopOut);
+        for (var t = 0; t < hopOut; t++) st.tail[t] = st.buf[fb + hopOut + t];
+        st.pos += hopIn;
+      }
+      if (st.pos > st.searchWin) trimBuf();
+      return concatOut(chunks, total);
+    }
+
+    return {
+      process: function (input) {
+        if (!input || !input.length) return new Float32Array(0);
+        if (st.rate === 1) return input;      // 直通：零开销、零质量损失
+        appendBuf(input, true);
+        return generate(false);
+      },
+      // 一句话结束：把滞留的尾巴吐出来，否则每句都会丢掉最后几十毫秒
+      flush: function () {
+        var out = new Float32Array(0);
+        if (st.buf.length) {
+          // 末尾补零：搜索窗/帧长需要向右看，真实输入到头了用静音顶上
+          appendBuf(new Float32Array(st.searchWin + st.frameLen + hopOut), false);
+          out = generate(true);
+          // 5ms 线性淡出：句子在任意相位被截断，直接切断会有"哒"的一声
+          var fade = Math.min(out.length, Math.round(sr * 0.005));
+          for (var i = 0; i < fade; i++) out[out.length - 1 - i] *= (i / fade);
+        }
+        resetStream();
+        return out;
+      },
+      setRate: function (r) {
+        st.rate = clampRate(r);
+        return st.rate;
+      },
+      rate: function () { return st.rate; },
+      config: function () {
+        return { sampleRate: sr, frameLen: frameLen, hopOut: hopOut, searchWin: searchWin };
+      }
+    };
+  }
+
+  // =====================================================================================
   // 4. VAD 与端点检测（纯逻辑，可测）
   // =====================================================================================
   // 用法：
@@ -917,7 +1098,11 @@
     muted: false,
     stateEnteredAt: 0,
     startedAt: 0,
+    lastTurnAt: 0,           // 上一轮开始的时刻（时间感知：大脑要知道"距上次说话多久"）
+    callMarked: false,       // 本轮通话是否已写过"开始"标注（避免只写结束、留下孤立标注）
     turnId: 0,
+    route: '',               // 当前音频路由缓存：'speaker' | 'headset'，见 currentRoute()
+    routeAt: 0,
 
     // 音频
     audioCtx: null,          // 播放用的 AudioContext（24k 播放 / 也做采集解码）
@@ -1009,6 +1194,161 @@
   function tuning(key, dflt) {
     var range = TUNING_RANGES[key] || [undefined, undefined];
     return cfgNum(key, dflt, range[0], range[1]);
+  }
+
+  // ---- 音频路由（外放 / 耳机）----
+  // 耳机和外放的声学环境差一个数量级：外放要用更大的防自激窗口、更钝的打断，
+  //   耳机可以更灵敏。路由决定"用哪套预置"，所以必须先可靠地拿到当前路由。
+  //   原生插件（AudioRoute）可能不存在、可能是异步的、也可能调用失败：
+  //   三种情况都必须静默回落，绝不能让拿路由把通话搞挂。
+
+  var ROUTE_TTL_MS = 4000;   // 插件查询结果的缓存时长（每块 PCM 都要读，不能每次都问原生）
+
+  function normalizeRoute(v) {
+    var s = strOf(v).toLowerCase();
+    if (!s) return '';
+    // earpiece（听筒）要当成外放，不能当耳机 —— 这一点真机实测过：
+    //   原生插件在「没插任何耳机」的手机上会回报 earpiece（isSpeakerphoneOn() 默认 false
+    //   + 手机确实有听筒硬件），但 WebView 的音频走的是 STREAM_MUSIC，
+    //   没有耳机时是从**外放喇叭**出来的，不是听筒。
+    //   若把 earpiece 归到耳机预设，正好把两套参数用反：外放回声大却用了灵敏的耳机参数，
+    //   结果就是 AI 被自己的声音打断。听筒和外放在"麦克风会收到自己的声音"这件事上是一类的。
+    if (s.indexOf('head') >= 0 || s.indexOf('blue') >= 0 ||
+      s.indexOf('wired') >= 0 || s.indexOf('耳机') >= 0) return 'headset';
+    if (s.indexOf('speaker') >= 0 || s.indexOf('loud') >= 0 || s.indexOf('外放') >= 0 ||
+      s.indexOf('earpiece') >= 0 || s.indexOf('听筒') >= 0) return 'speaker';
+    return '';
+  }
+
+  // 原生插件返回 { type, name }（Android 侧 AudioRoutePlugin 的契约），
+  //   也可能只有字符串；统一抠出"能判断类型"的那个值
+  function routeValueOf(v) {
+    if (!v) return '';
+    if (typeof v === 'string') return v;
+    if (typeof v !== 'object') return '';
+    return v.route || v.value || v.type || v.name || '';
+  }
+
+  // 手动指定值（routeMode = speaker / headset 时）
+  function manualRoute() {
+    try {
+      var m = strOf(voiceCfg().routeMode).toLowerCase();
+      if (m === 'speaker' || m === 'headset') return m;
+    } catch (e) {}
+    return '';
+  }
+
+  function applyRoute(v) {
+    var nr = normalizeRoute(v);
+    if (!nr) return '';
+    _vc.route = nr;
+    _vc.routeAt = nowMs();
+    return nr;
+  }
+
+  // 当前路由：原生插件 > routeMode 手动值 > speaker
+  //   插件是异步的（Capacitor 都是 Promise）：同步路径先返回已知值/手动值，
+  //   结果回来后写进缓存，下一次读取（下一块 PCM / 下一轮）就生效。
+  function currentRoute() {
+    var manual = manualRoute();
+    try {
+      var plugins = (root.Capacitor && root.Capacitor.Plugins) ? root.Capacitor.Plugins : null;
+      var ar = plugins && plugins.AudioRoute;
+      if (ar && typeof ar.getRoute === 'function') {
+        var fresh = _vc.route && (nowMs() - (_vc.routeAt || 0)) < ROUTE_TTL_MS;
+        if (fresh) return _vc.route;
+        var res = ar.getRoute();
+        if (res && typeof res.then === 'function') {
+          try {
+            res.then(function (r) { applyRoute(routeValueOf(r)); }, function () {});
+          } catch (e) {}
+        } else {
+          var got = applyRoute(routeValueOf(res));
+          if (got) return got;
+        }
+        if (_vc.route && (nowMs() - (_vc.routeAt || 0)) < ROUTE_TTL_MS) return _vc.route;
+      }
+    } catch (e) { /* 静默：插件失败等同于"拿不到" */ }
+    if (manual) return manual;
+    return _vc.route || 'speaker';
+  }
+
+  // 插件的路由变化事件：只更新缓存，不打断正在进行的通话
+  //   （barge-in 参数是每块 PCM 读一次的，VAD 参数在每次开麦时读，下一次读取自然生效）
+  var _routeHooked = false;
+  function hookRouteChange() {
+    if (_routeHooked) return;
+    try {
+      var plugins = (root.Capacitor && root.Capacitor.Plugins) ? root.Capacitor.Plugins : null;
+      var ar = plugins && plugins.AudioRoute;
+      if (!ar || typeof ar.addListener !== 'function') return;
+      var handle = ar.addListener('routeChange', function (info) {
+        try {
+          if (applyRoute(routeValueOf(info))) refreshLiveTuning();
+        } catch (e) {}
+      });
+      if (handle && typeof handle.catch === 'function') handle.catch(function () {});
+      // 开拨前先问一次：插件是异步的，等第一块 PCM 到来时缓存里就有真实路由了
+      try {
+        var probe = ar.getRoute();
+        if (probe && typeof probe.then === 'function') {
+          probe.then(function (r) { applyRoute(routeValueOf(r)); }, function () {});
+        } else {
+          applyRoute(routeValueOf(probe));
+        }
+      } catch (e) {}
+      _routeHooked = true;
+    } catch (e) { /* 没有插件就没有事件 */ }
+  }
+
+  // 路由变了：把 VAD 已经快照下来的参数换成新预置
+  //   （barge-in 那几项本来就是每块 PCM 读一次，不需要这里管；正在进行的这一句话也不打断）
+  function refreshLiveTuning() {
+    try {
+      var vad = _vc.vad;
+      if (!vad || !vad.cfg) return;
+      vad.cfg.endpointSilenceMs = effectiveTuning('endpointSilenceMs', VAD_DEFAULTS.endpointSilenceMs);
+      vad.cfg.minUtteranceMs = effectiveTuning('minUtteranceMs', VAD_DEFAULTS.minUtteranceMs);
+    } catch (e) {}
+  }
+
+  // 生效参数 = settings.voice[key] 打底 + 当前路由预置覆盖
+  //   预置里只存"用户改过的项"，所以只能逐项覆盖；非法值（非数字/越界）忽略 ——
+  //   设置面板是自由输入，写错一个字符就会把打断阈值变成 NaN，现象是"功能突然坏了"。
+  function effectiveTuning(key, dflt) {
+    var range = TUNING_RANGES[key] || [undefined, undefined];
+    var base = cfgNum(key, dflt, range[0], range[1]);
+    var preset = null;
+    try {
+      var presets = voiceCfg().tuningPresets;
+      if (presets && typeof presets === 'object') preset = presets[currentRoute()];
+    } catch (e) { preset = null; }
+    if (!preset || typeof preset !== 'object') return base;
+    if (!Object.prototype.hasOwnProperty.call(preset, key)) return base;
+
+    // 优先用通话层的统一合并器：它按 TUNING_KEYS 认识每个键的合法范围，
+    //   超出范围的预置值直接忽略（保住 base），比本地夹紧更不容易把功能调死。
+    try {
+      var PD = root.VoiceDirector;
+      if (PD && typeof PD.resolveTuning === 'function') {
+        var baseObj = {};
+        baseObj[key] = base;
+        var merged = PD.resolveTuning(baseObj, preset);
+        if (merged && typeof merged === 'object' && Object.prototype.hasOwnProperty.call(merged, key)) {
+          var mv = merged[key];
+          if (typeof mv === 'number' && isFinite(mv)) return mv;
+        }
+        return base;
+      }
+    } catch (e) { /* 合并器坏了就自己合并 */ }
+
+    // 本地兜底：非数字或越界一律忽略
+    var pv = preset[key];
+    var pn = (typeof pv === 'number') ? pv : parseFloat(pv);
+    if (!isFinite(pn)) return base;
+    if (range[0] !== undefined && pn < range[0]) return base;
+    if (range[1] !== undefined && pn > range[1]) return base;
+    return pn;
   }
 
   function toast(msg, type) {
@@ -1180,11 +1520,42 @@
     };
   }
 
+  // 通话所用的会话：优先用开拨时抓的快照（中途切走也能继续用同一套人设）
+  function callConv() {
+    var conv = getConvById(_session.convId);
+    return conv || currentConvSafe();
+  }
+
+  // 大脑一律跟随当前会话的渠道 + 模型。
+  //   为什么不再给大脑单独选渠道：通话必须和会话是同一个"人"，
+  //   否则声音换了一个、人设还是另一套，用户第一时间就会觉得不对劲。
+  function resolveBrainProvider() {
+    var conv = callConv();
+    var convProvider = conv ? findProviderById(conv.providerId) : null;
+    if (convProvider && convProvider.apiKey && canBeBrain(convProvider)) {
+      return {
+        provider: convProvider,
+        model: strOf(conv.model) || pickChatModel(convProvider) || defaultModelFor('brain', convProvider),
+        label: convProvider.name || convProvider.id
+      };
+    }
+    // 会话没配（或渠道不可用）：① DeepSeek 直连 ② 任意"能当大脑"的渠道
+    var ds = builtinProvider('deepseek');
+    if (ds.provider.apiKey) return { provider: ds.provider, model: 'deepseek-chat', label: ds.provider.name };
+    var hero = providersList().filter(canBeBrain)[0];
+    if (hero) {
+      var heroModel = pickChatModel(hero);
+      if (heroModel) return { provider: hero, model: heroModel, label: hero.name || hero.id };
+    }
+    throw makeErr('没有可用的大模型渠道：请先在设置里添加接口（通话的大脑跟随当前会话）', 'voice_nokey');
+  }
+
   // kind: 'asr' | 'tts' | 'brain' → { provider, model, label }
   function resolveVoiceProvider(kind) {
     var cfg = voiceCfg();
-    var idKey = kind === 'asr' ? 'asrProviderId' : (kind === 'tts' ? 'ttsProviderId' : 'brainProviderId');
-    var modelKey = kind === 'asr' ? 'asrModel' : (kind === 'tts' ? 'ttsModel' : 'brainModel');
+    if (kind === 'brain') return resolveBrainProvider();
+    var idKey = kind === 'asr' ? 'asrProviderId' : 'ttsProviderId';
+    var modelKey = kind === 'asr' ? 'asrModel' : 'ttsModel';
     var wantId = strOf(cfg[idKey]).trim();
     var wantModel = strOf(cfg[modelKey]).trim();
 
@@ -1193,41 +1564,6 @@
       if (!p) throw makeErr('找不到语音渠道（' + kind + '）：请在设置里重新选择', 'voice_provider');
       if (!p.apiKey) throw makeErr('语音渠道「' + (p.name || p.id) + '」缺少 API 密钥', 'voice_nokey');
       return { provider: p, model: wantModel || defaultModelFor(kind, p), label: p.name || p.id };
-    }
-
-    if (kind === 'brain') {
-      // 空 = 跟随当前会话
-      var conv = currentConvSafe();
-      var convProvider = conv ? findProviderById(conv.providerId) : null;
-      if (convProvider && convProvider.apiKey && canBeBrain(convProvider)) {
-        return {
-          provider: convProvider,
-          model: wantModel || strOf(conv.model) || pickChatModel(convProvider),
-          label: convProvider.name || convProvider.id
-        };
-      }
-      if (wantModel) {
-        // 用户明确指定了大脑模型：优先放到 DeepSeek 直连上；没有 key 就找个能当大脑的渠道
-        var ds0 = builtinProvider('deepseek');
-        if (ds0.provider.apiKey) return { provider: ds0.provider, model: wantModel, label: ds0.provider.name };
-        var any = providersList().filter(canBeBrain)[0];
-        if (any) return { provider: any, model: wantModel, label: any.name || any.id };
-        throw makeErr('没有可用的大模型渠道：请先在设置里添加接口', 'voice_nokey');
-      }
-      // 未指定：① DeepSeek 直连 ② 当前会话的渠道 ③ 任意"能当大脑"的渠道
-      var ds = builtinProvider('deepseek');
-      if (ds.provider.apiKey) return { provider: ds.provider, model: 'deepseek-chat', label: ds.provider.name };
-      var conv2 = currentConvSafe();
-      var px = conv2 ? findProviderById(conv2.providerId) : null;
-      if (px && px.apiKey && canBeBrain(px)) {
-        return { provider: px, model: conv2.model || pickChatModel(px), label: px.name || px.id };
-      }
-      var hero = providersList().filter(canBeBrain)[0];
-      if (hero) {
-        var heroModel = pickChatModel(hero);
-        if (heroModel) return { provider: hero, model: heroModel, label: hero.name || hero.id };
-      }
-      throw makeErr('没有可用的大模型渠道：请先在设置里添加接口（语音渠道不能当通话音源）', 'voice_nokey');
     }
 
     // ASR / TTS：内置 MiMo 直连
@@ -1266,7 +1602,7 @@
   function canBeBrain(p) {
     if (!p || !p.apiKey) return false;
     var models = (p.models || []).map(function (m) { return strOf(m && (m.id || m.name)); }).filter(Boolean);
-    if (!models.length) return true;   // 没填模型目录：允许（用户可能直接填了 brainModel）
+    if (!models.length) return true;   // 没填模型目录：允许（运行时再用会话模型兜底）
     return models.some(function (id) { return !isAudioModel(id); });
   }
 
@@ -1646,9 +1982,30 @@
       drainTimer: null,
       onDrained: null,
       resampler: null,
-      rate: 1,
+      rate: 1,             // 配置里的语速（0.6~1.6），保留给调试/展示
+      rateMode: 'natural',
+      playRate: 1,         // 真正交给 playbackRate 的倍数：natural 恒为 1（变速交给 WSOLA）
+      stretcher: null,
       scheduledMs: 0,
       startedAtMs: 0
+    };
+
+    // 语速每块 PCM 读一次：设置里改完，下一块就生效，不用打断当前这句
+    p.syncRate = function () {
+      var cfg = {};
+      try { cfg = voiceCfg() || {}; } catch (e) { cfg = {}; }
+      var r = clampRate(cfg.rate);
+      var mode = (strOf(cfg.rateMode) === 'pitch') ? 'pitch' : 'natural';
+      p.rate = r;
+      p.rateMode = mode;
+      p.playRate = (mode === 'pitch') ? r : 1;
+      if (mode === 'pitch' || r === 1) {
+        p.stretcher = null;          // 1× 直通 / pitch 模式不用伸缩器
+      } else if (!p.stretcher) {
+        p.stretcher = makeTimeStretcher(r, TTS_RATE);
+      } else {
+        p.stretcher.setRate(r);
+      }
     };
 
     function finishDrain() {
@@ -1662,13 +2019,24 @@
     p.attach = function (ctx) {
       p.ctx = ctx;
       p.dest = ctx.destination;
-      try { p.rate = clamp(voiceCfg().rate, 0.5, 2) || 1; } catch (e) { p.rate = 1; }
+      try { p.syncRate(); } catch (e) { p.rate = 1; p.rateMode = 'natural'; p.playRate = 1; p.stretcher = null; }
     };
 
     p.resetStream = function () {
       var ctx = p.ctx;
       p.resampler = ctx ? new Resampler(TTS_RATE, ctx.sampleRate) : null;
+      p.stretcher = null;   // 新的流：丢掉上一段残留相位，避免跨句拼接出咔哒
     };
+
+    function pushFloat(out) {
+      if (!p.ctx || !out || !out.length) return;
+      var buf;
+      try {
+        buf = p.ctx.createBuffer(1, out.length, p.ctx.sampleRate);
+        buf.getChannelData(0).set(out);
+      } catch (e) { warn('createBuffer failed', e); return; }
+      p.appendBuffer(buf);
+    }
 
     // 24k 裸 PCM（Int16）→ 追加到播放排期
     p.appendPcm24 = function (bytes) {
@@ -1677,14 +2045,23 @@
       var i16 = bytesToInt16(bytes);
       if (!i16.length) return;
       var f32 = int16ToFloat32(i16);
-      var out = p.resampler.process(f32);
-      if (!out || !out.length) return;
-      var buf;
-      try {
-        buf = p.ctx.createBuffer(1, out.length, p.ctx.sampleRate);
-        buf.getChannelData(0).set(out);
-      } catch (e) { warn('createBuffer failed', e); return; }
-      p.appendBuffer(buf);
+      try { p.syncRate(); } catch (e) { p.rate = 1; p.rateMode = 'natural'; p.playRate = 1; p.stretcher = null; }
+      // 先做保音高伸缩，再重采样到设备采样率（WSOLA 按 24k 参数标定）
+      if (p.rateMode === 'natural' && p.stretcher) {
+        try { f32 = p.stretcher.process(f32); }
+        catch (e) { warn('time-stretch failed', e); p.stretcher = null; }
+      }
+      if (!f32 || !f32.length) return;
+      pushFloat(p.resampler.process(f32));
+    };
+
+    // 一句话的 PCM 到头了：把 WSOLA 里滞留的尾巴吐出来，否则每句都会丢掉最后几十毫秒
+    p.flushStretch = function () {
+      if (!p.stretcher || p.rateMode !== 'natural' || !p.resampler) return;
+      var tail = null;
+      try { tail = p.stretcher.flush(); } catch (e) { tail = null; }
+      if (!tail || !tail.length) return;
+      pushFloat(p.resampler.process(tail));
     };
 
     // 记录所有在播 source，打断时逐个 stop（用 gain 静音会有 ~1 帧延迟且恢复麻烦）
@@ -1694,12 +2071,14 @@
       var ctx = p.ctx;
       try { if (ctx.state === 'suspended') ctx.resume(); } catch (e) {}
       var now = ctx.currentTime;
-      var dur = buf.duration / (p.rate || 1);
+      // natural 模式下 playRate 恒为 1（时长已在 WSOLA 里改过），pitch 模式才交给 playbackRate
+      var pr = (p.playRate && p.playRate > 0) ? p.playRate : 1;
+      var dur = buf.duration / pr;
       var at = Math.max(p.nextTime, now + SCHEDULE_LEAD);
       var src;
       try { src = ctx.createBufferSource(); } catch (e) { warn('createBufferSource failed', e); return; }
       src.buffer = buf;
-      if (p.rate && p.rate !== 1) { try { src.playbackRate.value = p.rate; } catch (e) {} }
+      if (pr !== 1) { try { src.playbackRate.value = pr; } catch (e) {} }
       try { src.connect(p.dest); } catch (e) { warn('connect failed', e); return; }
       p.nextTime = at + dur;
       p.scheduledMs += dur * 1000;
@@ -1787,8 +2166,9 @@
     var sensitivity = cfgNum('sensitivity', 0.5, 0, 1);
     return createVad({
       sensitivity: sensitivity,
-      endpointSilenceMs: cfgNum('endpointSilenceMs', VAD_DEFAULTS.endpointSilenceMs, 200, 5000),
-      minUtteranceMs: cfgNum('minUtteranceMs', VAD_DEFAULTS.minUtteranceMs, 100, 5000),
+      // VAD 参数在每次开麦时读一次：路由预置在这里生效（通话中改设置，下次开麦才换）
+      endpointSilenceMs: effectiveTuning('endpointSilenceMs', VAD_DEFAULTS.endpointSilenceMs),
+      minUtteranceMs: effectiveTuning('minUtteranceMs', VAD_DEFAULTS.minUtteranceMs),
       maxUtteranceMs: VAD_DEFAULTS.maxUtteranceMs,
       calibrateMs: VAD_DEFAULTS.calibrateMs,
       speechOnMs: VAD_DEFAULTS.speechOnMs,
@@ -1919,10 +2299,11 @@
     if (_vc.state === 'speaking' && voiceCfg().bargeIn !== false) {
       var sinceSpeak = nowMs() - _vc.speakStartAt;
       // 三个量都可在设置里调：抑制窗口 / 持续时长 / 回漏系数
-      var echoGuard = tuning('echoGuardMs', ECHO_GUARD_MS);
-      var holdMs = tuning('bargeInHoldMs', BARGE_HOLD_MS);
-      var leakFactor = tuning('bargeInLeakFactor', BARGE_LEAK_FACTOR);
-      var leakFloor = tuning('leakFloor', BARGE_LEAK_FLOOR);
+      // 每块 PCM 读一次 → 外放/耳机预置切换后，下一块就按新参数判定，不影响这通电话
+      var echoGuard = effectiveTuning('echoGuardMs', ECHO_GUARD_MS);
+      var holdMs = effectiveTuning('bargeInHoldMs', BARGE_HOLD_MS);
+      var leakFactor = effectiveTuning('bargeInLeakFactor', BARGE_LEAK_FACTOR);
+      var leakFloor = effectiveTuning('leakFloor', BARGE_LEAK_FLOOR);
       var thrBarge = Math.max(_vc.leakRms * leakFactor, _vc.vad ? _vc.vad.threshold() * 1.15 : 0.02);
       if (sinceSpeak > echoGuard && rms > thrBarge) {
         _vc.bargeAboveMs += dtMs;
@@ -1995,7 +2376,7 @@
         decision = PD.turnPolicy(
           { phase: 'user-paused', hasSpeech: true, endpointSilenceMs: _vc.vad.cfg.endpointSilenceMs },
           { signals: signals, silenceMs: stats.silenceMs, speechMs: stats.speechMs, speechRateCps: signals.speechRateCps },
-          { endpointSilenceMs: cfgNum('endpointSilenceMs', 700, 200, 5000), action: suggestion, minUtteranceMs: cfgNum('minUtteranceMs', 400, 100, 5000) }
+          { endpointSilenceMs: effectiveTuning('endpointSilenceMs', 700), action: suggestion, minUtteranceMs: effectiveTuning('minUtteranceMs', 400) }
         );
       }
     } catch (e) { decision = null; }
@@ -2010,7 +2391,7 @@
 
   // 自适应端点：语速快、无长停顿、句尾拖垮 → 更早收
   function adaptiveEndpoint(signals, cfg) {
-    var base = cfgNum('endpointSilenceMs', 700, 200, 5000);
+    var base = effectiveTuning('endpointSilenceMs', 700);
     var rate = num(signals && signals.speechRateCps, 0);
     var longPauses = num(signals && signals.longPauseCount, 0);
     var trailing = !!(signals && signals.trailingOff);
@@ -2505,6 +2886,58 @@
     if (msg.title === '语音回复' && msg.content) msg.title = msg.content.substring(0, 24);
   }
 
+  // 通话开始/结束各留一条系统标注：落进会话树，回看时能分出"哪段是打电话聊的"
+  //   （渲染层会跳过 system 消息，所以不会变成气泡；聊天上下文同样会跳过它）。
+  //   标注绝不能影响通话本身：任何一步失败都静默跳过（没有 conv、主任没实现、存储报错都算）。
+  function appendCallMarker(kind) {
+    try {
+      var conv = getConvById(_session.convId) || currentConvSafe();
+      if (!conv || !conv.messageMap) return null;
+      var at = Date.now();
+      var startedAt = _vc.startedAt || at;
+      var turns = (_vc.metrics && _vc.metrics.turns) || 0;
+      var mk = null;
+      try {
+        var PD = root.VoiceDirector;
+        if (PD && typeof PD.buildCallMarker === 'function') {
+          mk = PD.buildCallMarker({ kind: kind, at: at, startedAt: startedAt, turns: turns });
+        }
+      } catch (e) { mk = null; }
+      if (!mk || !mk.content) {
+        // 通话层还没提供 buildCallMarker 时的最小兜底，保证时间线不断
+        mk = {
+          role: 'system',
+          content: (kind === 'start') ? '〔通话开始〕' : ('〔通话结束〕共 ' + turns + ' 轮'),
+          marker: 'call'
+        };
+      }
+      var parent = lastActiveMsg(conv);
+      var content = strOf(mk.content);
+      var msg = {
+        id: newMsgId(),
+        role: strOf(mk.role) || 'system',
+        content: content,
+        parentId: parent ? parent.id : conv.rootId,
+        children: [],
+        title: (kind === 'start') ? '通话开始' : '通话结束',
+        wordCount: wordCount(content),
+        versions: [{ content: content, timestamp: at, reason: 'voice' }],
+        activeVersion: 0,
+        files: [],
+        createdAt: at,
+        source: 'voice',
+        marker: strOf(mk.marker) || 'call'
+      };
+      appendMessage(conv, msg);
+      saveConvSafe();
+      renderSafe();
+      return msg;
+    } catch (e) {
+      warn('call marker failed', e);
+      return null;
+    }
+  }
+
   // =====================================================================================
   // 18. 大脑请求：流式 JSON 增量解析 → 句子立刻进 TTS 流水线
   // =====================================================================================
@@ -2530,7 +2963,9 @@
       if (typeof getActiveChain === 'function') chain = getActiveChain(conv);
       else chain = (conv.activePath || []).map(function (id) { return conv.messageMap[id]; });
       chain = (chain || []).filter(function (m) {
-        return m && (m.role === 'user' || m.role === 'assistant') && plainMsgContent(m);
+        // 通话标注（marker==='call'）不进普通历史：一轮一条，几通电话就能把上下文占满
+        if (!m || m.marker === 'call' || m.role === 'system') return false;
+        return (m.role === 'user' || m.role === 'assistant') && plainMsgContent(m);
       });
       var slice = chain.slice(-(limit || 16));
       for (var i = 0; i < slice.length; i++) {
@@ -2540,61 +2975,161 @@
     return out;
   }
 
+  // 会话人设：和 chat.js 的 buildContext() 用同一套 system 组装顺序，
+  //   但**不注入状态栏** —— 通话是念出来的，模型收到 <status> 指令会把标签当台词念。
+  //   全程 try/catch：取不到就跳过这一段，绝不能因为读人设把通话搞挂。
+  var MODEL_PROMPT_SEP = '===强调===';
+
+  function buildSessionSystemParts(conv) {
+    var parts = [];
+    try {
+      if (!conv) return parts;
+      var sys = strOf(conv.systemPrompt).trim();
+      if (sys) parts.push(sys);
+      var emp = strOf(conv.emphasis).trim();
+      if (emp) parts.push('【重要强调】' + emp);
+      // 模型修饰：优先用 chat.js 的 effectiveModelPrompt（它处理了会话级禁用/覆盖），
+      //   拿不到（加载顺序/老版本）就按同样的规则自己取一次，保证两边看到同一份修饰
+      var mp = null;
+      try {
+        if (typeof effectiveModelPrompt === 'function') mp = effectiveModelPrompt(conv) || null;
+      } catch (e) { mp = null; }
+      if (!mp) {
+        try {
+          if (!conv.modelPromptDisabled) {
+            if (conv.modelPromptOverride) mp = { text: conv.modelPromptOverride };
+            else {
+              var st = S();
+              var list = st && st.modelPrompts;
+              if (list) mp = list[(conv.providerId || '') + ':' + (conv.model || '')] || null;
+            }
+          }
+        } catch (e2) { mp = null; }
+      }
+      if (mp && mp.text) {
+        var text = strOf(mp.text);
+        var ix = text.indexOf(MODEL_PROMPT_SEP);
+        if (ix >= 0) {
+          // 用分隔符实际长度切分（不写死数字，避免吃掉强调的首字）
+          var head = text.substring(0, ix).trim();
+          var tail = text.substring(ix + MODEL_PROMPT_SEP.length).trim();
+          if (head) parts.push(head);
+          if (tail) parts.push('【重要强调】' + tail);
+        } else if (text.trim()) {
+          parts.push(text.trim());
+        }
+      }
+      var uid = strOf(conv.userIdentity).trim();
+      if (uid) parts.push('用户身份：' + uid);
+    } catch (e) { warn('session system parts', e); }
+    return parts;
+  }
+
+  // settings.voice 里的布尔可能被存成 true/1/'true'，都算开（字段缺失算关）
+  function cfgOn(v) {
+    if (v === true || v === 1) return true;
+    return strOf(v).toLowerCase() === 'true';
+  }
+
+  // 时间感知载荷：timestamps 关掉时只发 {enabled:false}，让通话层知道"别看表"
+  function buildClock() {
+    var cfg = voiceCfg();
+    if (!cfgOn(cfg.timestamps)) return { enabled: false };
+    return {
+      enabled: true,
+      now: Date.now(),
+      callStartedAt: _vc.startedAt || Date.now(),
+      lastTurnAt: _vc.lastTurnAt || 0,
+      turnIndex: (_vc.metrics && _vc.metrics.turns) || 0
+    };
+  }
+
   function buildBrainMessages(conv, userText, signals) {
     var cfg = voiceCfg();
-    var sys = '';
     var signalsText = '';
     try {
-      var PD = root.VoiceDirector;
-      if (PD && typeof PD.describeSignals === 'function') {
-        signalsText = strOf(PD.describeSignals(signals, { customPersona: cfg.customPersona }));
+      var PD0 = root.VoiceDirector;
+      if (PD0 && typeof PD0.describeSignals === 'function') {
+        signalsText = strOf(PD0.describeSignals(signals, { customPersona: cfg.customPersona }));
       }
     } catch (e) { signalsText = ''; }
+
+    var clock = buildClock();
+    var parts = buildSessionSystemParts(conv);
+    var layer = '';
     try {
-      var PD2 = root.VoiceDirector;
-      if (PD2 && typeof PD2.buildSystemPrompt === 'function') {
-        sys = strOf(PD2.buildSystemPrompt({
+      var PD1 = root.VoiceDirector;
+      if (PD1 && typeof PD1.buildCallLayer === 'function') {
+        var raw = PD1.buildCallLayer({
+          sessionSystem: parts.join('\n\n'),
+          sessionParts: parts.slice(),
           personaId: cfg.personaId,
           customPersona: cfg.customPersona,
           signals: signals,
           signalsText: signalsText,
           voiceLabel: strOf(cfg.voiceId),
-          channel: 'voice'
-        }));
+          channel: 'voice',
+          clock: clock,
+          rate: clampRate(cfg.rate),
+          rateMode: (strOf(cfg.rateMode) === 'pitch') ? 'pitch' : 'natural'
+        });
+        layer = (typeof raw === 'string') ? strOf(raw)
+          : strOf(raw && (raw.systemPrompt || raw.text || raw.content));
+        layer = layer.trim();
       }
-    } catch (e) { sys = ''; }
-    if (!sys) {
-      sys = '你正在和用户通电话。说话短、口语、自然，一次只说一两句，不要列条目，不要念标点。' +
-        (cfg.customPersona ? '补充：' + cfg.customPersona : '');
+    } catch (e) { layer = ''; }
+
+    if (!layer) {
+      // voice-director 还是旧版（没有 buildCallLayer）：沿用原来的整体提示词，绝不让通话没提示词
+      var sysOld = '';
+      try {
+        var PD2 = root.VoiceDirector;
+        if (PD2 && typeof PD2.buildSystemPrompt === 'function') {
+          sysOld = strOf(PD2.buildSystemPrompt({
+            personaId: cfg.personaId,
+            customPersona: cfg.customPersona,
+            signals: signals,
+            signalsText: signalsText,
+            voiceLabel: strOf(cfg.voiceId),
+            channel: 'voice'
+          }));
+        }
+      } catch (e) { sysOld = ''; }
+      if (!sysOld) {
+        sysOld = '你正在和用户通电话。说话短、口语、自然，一次只说一两句，不要列条目，不要念标点。' +
+          (cfg.customPersona ? '补充：' + cfg.customPersona : '');
+      }
+      layer = sysOld;
     }
-    if (signalsText) sys += '\n\n' + signalsText;
-    sys += '\n' + JSON_DIRECTIVE;
+
+    var sysParts = parts.slice();
+    if (layer) sysParts.push(layer);
+    // 通话层若没把副语言信号/时间写进提示词，这里补上（已包含就不重复）
+    var joined = sysParts.join('\n\n');
+    if (signalsText && joined.indexOf(signalsText) < 0) sysParts.push(signalsText);
+    if (clock.enabled) {
+      var clockText = '';
+      try {
+        var PD3 = root.VoiceDirector;
+        if (PD3 && typeof PD3.describeClock === 'function') clockText = strOf(PD3.describeClock(clock));
+      } catch (e) { clockText = ''; }
+      joined = sysParts.join('\n\n');
+      if (clockText && joined.indexOf(clockText) < 0) sysParts.push(clockText);
+    }
+    var sys = sysParts.join('\n\n') + '\n' + JSON_DIRECTIVE;
 
     var msgs = [{ role: 'system', content: sys }];
     var hist = historyMessages(conv, 14);
     for (var i = 0; i < hist.length; i++) msgs.push(hist[i]);
 
-    var turnMsgs = null;
-    try {
-      var PD3 = root.VoiceDirector;
-      if (PD3 && typeof PD3.buildTurnMessages === 'function') {
-        turnMsgs = PD3.buildTurnMessages({
-          userText: userText,
-          transcript: userText,
-          signals: signals,
-          signalsText: signalsText,
-          history: hist,
-          personaId: cfg.personaId
-        });
-      }
-    } catch (e) { turnMsgs = null; }
-    if (Array.isArray(turnMsgs) && turnMsgs.length) {
-      for (var j = 0; j < turnMsgs.length; j++) {
-        if (turnMsgs[j] && turnMsgs[j].role && turnMsgs[j].content !== undefined) msgs.push(turnMsgs[j]);
-      }
-    } else {
-      msgs.push({ role: 'user', content: userText });
-    }
+    // v126 修（v125 遗留）：这里原来还调了一次 VoiceDirector.buildTurnMessages。
+    //   那个函数**自己会再拼一遍 system**（不传 system 时它内部调 buildSystemPrompt），
+    //   而 system 与 history 上面已经加过了 —— 结果是发给模型的 messages 变成
+    //   [system(新), user, system(旧), user, user]：两套互相冲突的提示词，外加重复的历史。
+    //   实测抓到过：新通话层 + 旧 buildSystemPrompt 同时出现，JSON 格式说明也写了两份，
+    //   模型可能按旧的那份输出（字段名对不上就解析失败），而表面上一切正常。
+    //   现在只补本轮用户话，system / history 各只出现一次。
+    msgs.push({ role: 'user', content: userText });
     return msgs;
   }
 
@@ -2744,6 +3279,8 @@
           if (_vc.state !== 'speaking') enterSpeaking();
         }
       }).then(function (r) {
+        // 这一句的 PCM 已经全部到齐：吐出伸缩器里的尾巴，保持句尾完整
+        try { if (_vc.player) _vc.player.flushStretch(); } catch (e) {}
         if (r && r.firstChunkMs && (!q.firstChunkMs || r.firstChunkMs < q.firstChunkMs)) q.firstChunkMs = r.firstChunkMs;
       }).catch(function (e) {
         if (isAbort(e)) return;
@@ -2934,6 +3471,7 @@
     if (!_vc.running) return;
     var token = ++_vc.turnId;
     var turnStart = nowMs();
+    _vc.lastTurnAt = Date.now();   // 时间感知：这一轮是什么时候说的
     var gate = createGate();
     _vc.gate = gate;
     _vc.interrupted = false;
@@ -3227,6 +3765,12 @@
     setState('connecting', '正在请求麦克风权限…');
     _vc.running = true;
     _vc.startedAt = Date.now();
+    _vc.lastTurnAt = 0;
+    _vc.callMarked = false;
+    // 轮次按"这一通电话"算：不清零的话第二通电话的轮次会接着上一通数，
+    //   时间感知和结束标注都会说出错误的"第几轮 / 共几轮"
+    _vc.metrics.turns = 0;
+    try { hookRouteChange(); } catch (e) {}
     refreshVoiceName();
     tickTimer();
     var conv = currentConvSafe();
@@ -3244,6 +3788,8 @@
       // 播放器必须在这里挂上：否则 TTS 的 PCM 无处可去，
       //   pipeline 的"排空"判定永远等不到，一轮就会卡死在 thinking。
       ensurePlayer();
+      // 麦克风真的拿到了才算接通：在这条时间线上留一条标注
+      _vc.callMarked = !!appendCallMarker('start');
       setState('listening');
       haptic('connect');          // 接通：轻振一下，告诉用户"能说了"
       startAutoHangTimer();
@@ -3272,6 +3818,11 @@
     _vc.autoHangTimer = null;
     _vc.segChunks = [];
     _vc.saidText = '';
+    if (!silent && _vc.callMarked) {
+      // 先写标注再清状态：标注要用到 startedAt / turns
+      appendCallMarker('end');
+    }
+    _vc.callMarked = false;
     if (!silent && wasRunning) {
       flashEffect('is-hangup', null, 600);
       haptic('hangup');
@@ -3660,6 +4211,9 @@
     // 真机微调面板：注入到设置面板的「语音通话」分组里（幂等；骨架没到就等下次打开设置）
     try { hookAdvancedUI(); ensureAdvancedUI(); } catch (e) { warn('advanced init', e); }
 
+    // 外放/耳机切换：只更新路由缓存，不打断正在进行的通话（参数都是下一次读取时生效）
+    try { hookRouteChange(); } catch (e) {}
+
     // 换音色/人设后语气词要重做一批
     try {
       if (root.document && root.document.addEventListener) {
@@ -3730,15 +4284,17 @@
         state: _vc.state, running: _vc.running, open: _vc.open, muted: _vc.muted,
         captureRate: _vc.audioCtx ? _vc.audioCtx.sampleRate : 0,
         vad: _vc.vad ? { phase: _vc.vad.phase(), thr: _vc.vad.threshold(), noise: _vc.vad.noiseFloor() } : null,
+        route: currentRoute(),
         tuning: {
-          echoGuardMs: tuning('echoGuardMs', ECHO_GUARD_MS),
-          bargeInHoldMs: tuning('bargeInHoldMs', BARGE_HOLD_MS),
-          bargeInLeakFactor: tuning('bargeInLeakFactor', BARGE_LEAK_FACTOR),
-          leakFloor: tuning('leakFloor', BARGE_LEAK_FLOOR),
-          endpointSilenceMs: tuning('endpointSilenceMs', VAD_DEFAULTS.endpointSilenceMs),
-          minUtteranceMs: tuning('minUtteranceMs', VAD_DEFAULTS.minUtteranceMs),
-          sensitivity: tuning('sensitivity', 0.5)
+          echoGuardMs: effectiveTuning('echoGuardMs', ECHO_GUARD_MS),
+          bargeInHoldMs: effectiveTuning('bargeInHoldMs', BARGE_HOLD_MS),
+          bargeInLeakFactor: effectiveTuning('bargeInLeakFactor', BARGE_LEAK_FACTOR),
+          leakFloor: effectiveTuning('leakFloor', BARGE_LEAK_FLOOR),
+          endpointSilenceMs: effectiveTuning('endpointSilenceMs', VAD_DEFAULTS.endpointSilenceMs),
+          minUtteranceMs: effectiveTuning('minUtteranceMs', VAD_DEFAULTS.minUtteranceMs),
+          sensitivity: effectiveTuning('sensitivity', 0.5)
         },
+        rate: { value: _vc.player ? _vc.player.rate : clampRate(voiceCfg().rate), mode: _vc.player ? _vc.player.rateMode : (strOf(voiceCfg().rateMode) === 'pitch' ? 'pitch' : 'natural') },
         leakRms: Math.round((_vc.leakRms || 0) * 10000) / 10000,
         fillers: _vc.fillerBuffers.filter(Boolean).length,
         metrics: API.getMetrics()
@@ -3788,6 +4344,22 @@
     jsonUnescape: jsonUnescape,
     extractJsonString: extractJsonString,
     createSpeechExtractor: createSpeechExtractor,
+    // 语速 & 路由
+    makeTimeStretcher: makeTimeStretcher,
+    clampRate: clampRate,
+    RATE_MIN: RATE_MIN,
+    RATE_MAX: RATE_MAX,
+    effectiveTuning: effectiveTuning,
+    currentRoute: currentRoute,
+    normalizeRoute: normalizeRoute,
+    routeValueOf: routeValueOf,
+    // 大脑渠道 / 提示词组装
+    resolveVoiceProvider: resolveVoiceProvider,
+    buildSessionSystemParts: buildSessionSystemParts,
+    buildClock: buildClock,
+    buildBrainMessages: buildBrainMessages,
+    historyMessages: historyMessages,
+    appendCallMarker: appendCallMarker,
     // 其它
     clamp: clamp,
     num: num,

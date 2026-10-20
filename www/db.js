@@ -156,8 +156,8 @@ function defaultVoiceSettings() {
     asrModel: 'mimo-v2.5-asr',
     ttsProviderId: '',
     ttsModel: 'mimo-v2.5-tts',
-    brainProviderId: '',    // 空 = 跟随当前会话模型
-    brainModel: '',
+    // v126：大脑一律跟随当前会话，不再单独设渠道/模型。
+    //   用户原话「直接跟随会话窗口模型，不额外设置」——留两个空字段只会让人以为没生效。
     voiceId: 'Mia',
     voiceDesign: '',        // 非空则优先用声音设计模型
     cloneRefName: '',       // 克隆参考音（存文件系统，不存 base64）
@@ -180,7 +180,24 @@ function defaultVoiceSettings() {
     // v125 修（QA 发现）：契约里叫 haptics（复数），实现里读的是 haptic（单数）。
     //   两个都保留以避免再踩：haptic 是实际生效字段，haptics 作为兼容别名同步。
     haptic: true,
-    haptics: true
+    haptics: true,
+
+    // ===== v126 新增 =====
+    // 时间感知（默认关）。关着的时候模型不知道"现在几点""隔了多久"，
+    //   长时间挂着聊天会把隔两小时当成紧接着 —— 但多数人打电话并不需要这层，
+    //   而且它每轮都要多占 prompt，所以默认关闭、由用户按需打开。
+    timestamps: false,
+    // 语速。rate 是倍率；rateMode 决定"变速时音高变不变"：
+    //   natural = WSOLA 保持音高（像真人说快/说慢），pitch = 老式 playbackRate（会变尖）。
+    //   默认 natural —— 变尖的加速一听就假，那是"调播放器"，不是"人在说话"。
+    rate: 1.0,
+    rateMode: 'natural',
+    // 音频路由。auto = 问原生要实际路由（耳机/蓝牙/外放），
+    //   speaker/headset 是手动钉死（原生不可用时的兜底，也给用户一个确定性选择）。
+    routeMode: 'auto',
+    // 双套微调预设：外放回声大需要更大的防自激窗口，耳机不需要。
+    //   两套可以各调各的，也可以复制成一样（用户要求"可共享也可独立"）。
+    tuningPresets: { speaker: {}, headset: {} }
   };
 }
 
@@ -251,7 +268,15 @@ function migrateVoiceSettings(v) {
   out.endpointSilenceMs = clampNum(out.endpointSilenceMs, 300, 3000, def.endpointSilenceMs);
   out.minUtteranceMs = clampNum(out.minUtteranceMs, 200, 3000, def.minUtteranceMs);
   out.autoHangupSilenceMs = clampNum(out.autoHangupSilenceMs, 5000, 600000, def.autoHangupSilenceMs);
-  ['asrProviderId','asrModel','ttsProviderId','ttsModel','brainProviderId','brainModel',
+  // v126 新增字段的收敛
+  out.timestamps = !!out.timestamps;
+  out.rate = clampNum(out.rate, 0.6, 1.6, def.rate);
+  if (out.rateMode !== 'natural' && out.rateMode !== 'pitch') out.rateMode = def.rateMode;
+  if (out.routeMode !== 'auto' && out.routeMode !== 'speaker' && out.routeMode !== 'headset') {
+    out.routeMode = def.routeMode;
+  }
+  out.tuningPresets = normalizeTuningPresets(out.tuningPresets);
+  ['asrProviderId','asrModel','ttsProviderId','ttsModel',
    'voiceId','voiceDesign','cloneRefName','personaId','customPersona'].forEach(function(k) {
     if (typeof out[k] !== 'string') out[k] = def[k];
   });
@@ -260,6 +285,33 @@ function migrateVoiceSettings(v) {
   if (!out.ttsModel.trim()) out.ttsModel = def.ttsModel;
   if (!out.voiceId.trim()) out.voiceId = def.voiceId;
   if (!out.personaId.trim()) out.personaId = def.personaId;
+  return out;
+}
+
+// v126：双套微调预设的归一化。
+//   为什么单独做：这两套值是"用户手调出来的"，键名和范围跟 voice.js 的 TUNING_FIELDS 一致；
+//   但预设里只存"用户改过的项"，没改的项不该被写成默认值（否则以后改默认值，老用户永远收不到）。
+//   所以这里只做三件事：确保 speaker/headset 两个对象存在、丢掉非法键、把值收敛成数字。
+function normalizeTuningPresets(p) {
+  var out = { speaker: {}, headset: {} };
+  if (!p || typeof p !== 'object') return out;
+  var ranges = {
+    echoGuardMs: [0, 1200], bargeInHoldMs: [80, 800], bargeInLeakFactor: [1.5, 10],
+    leakFloor: [0, 1], endpointSilenceMs: [200, 3000], minUtteranceMs: [100, 2000],
+    sensitivity: [0, 1]
+  };
+  ['speaker', 'headset'].forEach(function (side) {
+    var src = p[side];
+    if (!src || typeof src !== 'object') return;
+    for (var k in src) {
+      if (!Object.prototype.hasOwnProperty.call(src, k)) continue;
+      if (!Object.prototype.hasOwnProperty.call(ranges, k)) continue;   // 未知键直接丢，防止脏数据长期驻留
+      var r = ranges[k];
+      var n = typeof src[k] === 'number' ? src[k] : parseFloat(src[k]);
+      if (!isFinite(n)) continue;
+      out[side][k] = Math.max(r[0], Math.min(r[1], n));
+    }
+  });
   return out;
 }
 

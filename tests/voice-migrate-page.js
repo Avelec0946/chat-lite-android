@@ -82,8 +82,11 @@ module.exports = async (ctx) => {
     '    var ok = await window.VoiceCall.start();',
     '    await new Promise(function(r){ setTimeout(r, 800); });',
     '    var st = window.VoiceCall.getState();',
+    // v126：失败时要能读到原因，否则断言只能看 true/false，无法区分"没配密钥"与"真坏了"
+    '    var txt = "";',
+    '    try { var el = document.getElementById("voice-state-text"); txt = el ? String(el.textContent || "") : ""; } catch (e) {}',
     '    window.VoiceCall.hangup(); window.VoiceCall.close();',
-    '    return JSON.stringify({ start: ok, state: st });',
+    '    return JSON.stringify({ start: ok, state: st, text: txt });',
     '  } catch (e) { return JSON.stringify({ threw: String(e && e.message) }); }',
     '})()'
   ].join('\n')));

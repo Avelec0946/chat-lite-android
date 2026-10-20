@@ -1,4 +1,4 @@
-// ===== voice-settings.js : 语音通话设置面板绑定（v125）=====
+// ===== voice-settings.js : 语音通话设置面板绑定（v126）=====
 // 职责：把 settings.voice 与设置面板「语音通话」分组的 DOM 双向绑定 + 保存 + 测试链路。
 // 为什么独立成文件：voice.js 是运行时（采集/播放/请求），几千行；设置绑定是另一件事，
 //   混在一起会让两边都难改。本文件只碰 DOM 与 settings，不碰音频与网络。
@@ -26,6 +26,17 @@
   var ASR_MODEL_SUGGESTIONS = ['mimo-v2.5-asr'];
   var TTS_MODEL_SUGGESTIONS = ['mimo-v2.5-tts', 'mimo-v2.5-tts-voicedesign', 'mimo-v2.5-tts-voiceclone'];
 
+  // v126：外放 / 耳机两套微调预设的字段定义。
+  // 范围与默认值必须和 voice.js 的 TUNING_FIELDS 对齐：两处一旦漂了，
+  //   用户在这里填的值会被运行时悄悄夹紧，看到的和生效的就不是同一个数。
+  var PRESET_FIELDS = [
+    { key: 'echoGuardMs', label: '防自激窗口（毫秒）', min: 0, max: 1200, step: 50, dflt: 250 },
+    { key: 'bargeInHoldMs', label: '打断确认时长（毫秒）', min: 80, max: 800, step: 20, dflt: 180 },
+    { key: 'bargeInLeakFactor', label: '回漏抑制系数', min: 1.5, max: 10, step: 0.1, dflt: 3.2 },
+    { key: 'endpointSilenceMs', label: '说完判定静音（毫秒）', min: 200, max: 3000, step: 50, dflt: 700 },
+    { key: 'minUtteranceMs', label: '最短话语（毫秒）', min: 100, max: 2000, step: 50, dflt: 400 }
+  ];
+
   // 人设列表从 voice-director 取（那边是真相来源），取不到时用兜底
   var FALLBACK_PERSONAS = [
     { id: 'warm', name: '温暖陪伴' },
@@ -36,6 +47,124 @@
 
   function $(id) { return document.getElementById(id); }
   function v() { return settings.voice || (settings.voice = defaultVoiceSettings()); }
+
+  // v126 新控件都是"改完立刻生效"：它们决定下一通电话听起来什么样，
+  //   用户不会想到还要再点一次保存。已有控件仍由保存按钮统一落盘，互不影响。
+  function persistVoice() {
+    try { if (typeof saveSettings === 'function') saveSettings(); } catch (e) {}
+  }
+
+  // 预设只存用户改过的项（空 = 用内置默认）。老用户的 settings.voice 里没有这个键，
+  //   这里补一层结构兜底，避免迁移没跑到时直接抛错。
+  function presetStore() {
+    var st = v();
+    if (!st.tuningPresets || typeof st.tuningPresets !== 'object') st.tuningPresets = { speaker: {}, headset: {} };
+    if (!st.tuningPresets.speaker || typeof st.tuningPresets.speaker !== 'object') st.tuningPresets.speaker = {};
+    if (!st.tuningPresets.headset || typeof st.tuningPresets.headset !== 'object') st.tuningPresets.headset = {};
+    return st.tuningPresets;
+  }
+
+  function fillPresetInputs() {
+    var p = presetStore();
+    ['speaker', 'headset'].forEach(function (side) {
+      PRESET_FIELDS.forEach(function (f) {
+        var el = $('voice-tune-' + side + '-' + f.key);
+        if (!el) return;
+        var cur = p[side][f.key];
+        el.value = (cur === undefined || cur === null || cur === '') ? '' : String(cur);
+      });
+    });
+  }
+
+  function copyPreset(from, to) {
+    var p = presetStore();
+    var src = p[from];
+    var out = {};
+    for (var k in src) {
+      if (Object.prototype.hasOwnProperty.call(src, k)) out[k] = src[k];
+    }
+    p[to] = out;
+    fillPresetInputs();
+    persistVoice();
+    var name = to === 'headset' ? '耳机' : '外放';
+    if (typeof showToast === 'function') showToast('已复制到' + name);
+  }
+
+  function clampRate(n) {
+    if (!isFinite(n)) return 1;
+    if (n < 0.6) return 0.6;
+    if (n > 1.6) return 1.6;
+    return n;
+  }
+
+  // 语速转人话。voice-director 里将来会有统一的 describeRate（气泡也要用同一套说法），
+  //   有就用它的，没有就自己拼 —— 设置面板不该等另一个模块就位才能用。
+  function describeRate(rate) {
+    var PD = root.VoiceDirector;
+    if (PD && typeof PD.describeRate === 'function') {
+      try {
+        var s = PD.describeRate(rate);
+        if (s && typeof s === 'string') return s;
+      } catch (e) {}
+    }
+    // 阈值和 voice-director 的口径保持一致（1.05 / 0.95），
+    //   否则模块没加载时同一档语速会显示成两种说法。
+    var n = String(Math.round(rate * 100) / 100);
+    if (rate >= 1.05) return '偏快（' + n + '×）';
+    if (rate <= 0.95) return '偏慢（' + n + '×）';
+    return '正常语速';
+  }
+
+  function syncRateUI() {
+    var n = clampRate(parseFloat(v().rate));
+    var inp = $('voice-rate');
+    if (inp) inp.value = String(n);
+    var val = $('voice-rate-value');
+    if (val) val.textContent = n.toFixed(2) + '×';
+    var desc = $('voice-rate-desc');
+    if (desc) desc.textContent = describeRate(n);
+  }
+
+  // 原生可能返回字符串、也可能返回对象，字段名各平台不统一；
+  //   这里只做"尽力认"，认不出就原样显示，绝不因为路由名陌生就报错。
+  function routeLabel(raw) {
+    if (raw && typeof raw === 'object') raw = raw.route || raw.type || raw.name || raw.current || '';
+    var text = String(raw || '');
+    var s = text.toLowerCase();
+    if (!s) return '';
+    if (s.indexOf('speaker') >= 0) return '外放';
+    if (s.indexOf('headset') >= 0 || s.indexOf('headphone') >= 0 || s.indexOf('wired') >= 0) return '耳机';
+    if (s.indexOf('bluetooth') >= 0 || s.indexOf('a2dp') >= 0) return '蓝牙耳机';
+    if (s.indexOf('earpiece') >= 0 || s.indexOf('receiver') >= 0) return '听筒';
+    if (s.indexOf('auto') >= 0) return '自动';
+    return text;
+  }
+
+  // 当前实际路由只在原生插件存在时才有意义；浏览器里显示一句话就好，不弹错。
+  function syncRouteNow() {
+    var out = $('voice-route-now');
+    if (!out) return;
+    var cap = root.Capacitor;
+    var plugin = cap && cap.Plugins && cap.Plugins.AudioRoute;
+    if (!plugin || typeof plugin.getRoute !== 'function') {
+      out.textContent = '浏览器/未接入原生';
+      return;
+    }
+    var apply = function (r) {
+      var label = routeLabel(r);
+      out.textContent = label || '未知（原生未返回）';
+    };
+    try {
+      var p = plugin.getRoute();
+      if (p && typeof p.then === 'function') {
+        p.then(apply).catch(function () { out.textContent = '浏览器/未接入原生'; });
+      } else {
+        apply(p);
+      }
+    } catch (e) {
+      out.textContent = '浏览器/未接入原生';
+    }
+  }
 
   function getPersonas() {
     var PD = root.VoiceDirector;
@@ -129,10 +258,8 @@
     var st = v();
     renderProviderSelect($('voice-asr-provider'), st.asrProviderId);
     renderProviderSelect($('voice-tts-provider'), st.ttsProviderId);
-    renderProviderSelect($('voice-brain-provider'), st.brainProviderId, { requireSelection: false });
     if ($('voice-asr-model')) $('voice-asr-model').value = st.asrModel || '';
     if ($('voice-tts-model')) $('voice-tts-model').value = st.ttsModel || '';
-    if ($('voice-brain-model')) $('voice-brain-model').value = st.brainModel || '';
     if ($('voice-design')) $('voice-design').value = st.voiceDesign || '';
     if ($('voice-custom-persona')) $('voice-custom-persona').value = st.customPersona || '';
     if ($('voice-barge-in')) $('voice-barge-in').checked = !!st.bargeIn;
@@ -148,6 +275,15 @@
     renderModelDatalist('voice-tts-model-suggestions', TTS_MODEL_SUGGESTIONS);
     syncCloneHint();
     syncCustomPersonaRow();
+    // v126 新控件回填。老用户没有这些键，一律按默认值显示，别让面板出现空白控件。
+    if ($('voice-timestamps')) $('voice-timestamps').checked = !!st.timestamps;
+    if ($('voice-rate-mode')) $('voice-rate-mode').value = st.rateMode === 'pitch' ? 'pitch' : 'natural';
+    if ($('voice-route-mode')) {
+      $('voice-route-mode').value = (st.routeMode === 'speaker' || st.routeMode === 'headset') ? st.routeMode : 'auto';
+    }
+    syncRateUI();
+    fillPresetInputs();
+    syncRouteNow();
     var nameEl = $('voice-voice-name');
     if (nameEl) nameEl.textContent = currentVoiceLabel();
   }
@@ -168,7 +304,7 @@
     renderModelDatalist(datalistId, models);
   }
 
-  // ===== DOM → settings（改动即写内存，保存按钮统一落盘）=====
+  // ===== DOM → settings（改动即写内存；v126 新控件另外即时落盘，其余仍归保存按钮）=====
   function bind() {
     var st = v;
 
@@ -182,11 +318,6 @@
       st().ttsProviderId = ttsSel.value;
       syncModelSuggestions(ttsSel.value, 'voice-tts-model-suggestions', TTS_MODEL_SUGGESTIONS);
     });
-    var brainSel = $('voice-brain-provider');
-    if (brainSel) brainSel.addEventListener('change', function () {
-      st().brainProviderId = brainSel.value;
-    });
-
     var bindText = function (id, key) {
       var el = $(id);
       if (!el) return;
@@ -195,7 +326,6 @@
     };
     bindText('voice-asr-model', 'asrModel');
     bindText('voice-tts-model', 'ttsModel');
-    bindText('voice-brain-model', 'brainModel');
     bindText('voice-design', 'voiceDesign');
     bindText('voice-custom-persona', 'customPersona');
 
@@ -230,6 +360,90 @@
     if (ep) ep.addEventListener('change', function () {
       st().endpointSilenceMs = clampNum(ep.value, 300, 3000, 700);
       ep.value = String(st().endpointSilenceMs);
+    });
+
+    // ===== v126：时间感知 =====
+    var ts = $('voice-timestamps');
+    if (ts) ts.addEventListener('change', function () {
+      st().timestamps = !!ts.checked;
+      persistVoice();
+    });
+
+    // ===== v126：语速 =====
+    // 拖动时只刷界面和内存（input 很密，每次落盘会写爆存储），松手（change）才持久化。
+    var rateInp = $('voice-rate');
+    if (rateInp) {
+      var applyRate = function (commit) {
+        var n = clampRate(parseFloat(rateInp.value));
+        st().rate = n;
+        var val = $('voice-rate-value');
+        if (val) val.textContent = n.toFixed(2) + '×';
+        var desc = $('voice-rate-desc');
+        if (desc) desc.textContent = describeRate(n);
+        if (commit) persistVoice();
+      };
+      rateInp.addEventListener('input', function () { applyRate(false); });
+      rateInp.addEventListener('change', function () { applyRate(true); });
+    }
+    var rateMode = $('voice-rate-mode');
+    if (rateMode) rateMode.addEventListener('change', function () {
+      st().rateMode = rateMode.value === 'pitch' ? 'pitch' : 'natural';
+      persistVoice();
+    });
+
+    // ===== v126：音频路由 =====
+    var routeMode = $('voice-route-mode');
+    if (routeMode) routeMode.addEventListener('change', function () {
+      var v2 = routeMode.value;
+      st().routeMode = (v2 === 'speaker' || v2 === 'headset') ? v2 : 'auto';
+      persistVoice();
+      // 手动模式不会立刻改原生输出（那要等通话启动时应用），
+      //   这里刷新一下"当前实际路由"，让用户知道系统现在到底走的哪条路。
+      syncRouteNow();
+    });
+
+    // ===== v126：外放 / 耳机双预设 =====
+    ['speaker', 'headset'].forEach(function (side) {
+      PRESET_FIELDS.forEach(function (field) {
+        var input = $('voice-tune-' + side + '-' + field.key);
+        if (!input) return;
+        var commit = function () {
+          var p = presetStore();
+          var raw = input.value.trim();
+          if (raw === '') {
+            // 清空 = 删掉这一项，回到内置默认；不写死默认值，
+            //   否则以后调默认值时这些用户永远收不到新值。
+            delete p[side][field.key];
+            persistVoice();
+            return;
+          }
+          var n = parseFloat(raw);
+          if (!isFinite(n)) {
+            delete p[side][field.key];
+            input.value = '';
+            persistVoice();
+            return;
+          }
+          if (n < field.min) n = field.min;
+          if (n > field.max) n = field.max;
+          p[side][field.key] = n;
+          input.value = String(n);   // 回写夹紧后的值：让用户看见离谱值被纠正了
+          persistVoice();
+        };
+        input.addEventListener('change', commit);
+        input.addEventListener('blur', commit);
+      });
+    });
+
+    // 「复制到另一栏」：整栏覆盖（包括"另一栏本来有、这一栏没有"的项），
+    //   半边残留旧值最容易出问题 —— 用户以为两栏一样，实际只有一栏生效。
+    var copyToHeadset = $('btn-voice-tune-copy-speaker');
+    if (copyToHeadset) copyToHeadset.addEventListener('click', function () {
+      copyPreset('speaker', 'headset');
+    });
+    var copyToSpeaker = $('btn-voice-tune-copy-headset');
+    if (copyToSpeaker) copyToSpeaker.addEventListener('click', function () {
+      copyPreset('headset', 'speaker');
     });
 
     // 克隆参考音上传：只记文件名 + 把音频存到 Filesystem/CACHE，不把 base64 塞进 settings
@@ -344,12 +558,19 @@
         setTimeout(syncVoiceSettingsUI, 0);
       });
     }
+    // 通话界面里的齿轮打开的是同一个设置面板，那条路径不经过 btn-settings，
+    //   这里补一次回填，免得面板显示的是上次打开时的旧值。
+    var voiceOpenSettings = $('btn-voice-settings');
+    if (voiceOpenSettings) {
+      voiceOpenSettings.addEventListener('click', function () {
+        setTimeout(syncVoiceSettingsUI, 0);
+      });
+    }
     // 渠道增删后同步
     if (root.document) {
       document.addEventListener('chatlite:providers-changed', function () {
         renderProviderSelect($('voice-asr-provider'), v().asrProviderId);
         renderProviderSelect($('voice-tts-provider'), v().ttsProviderId);
-        renderProviderSelect($('voice-brain-provider'), v().brainProviderId);
       });
     }
     bind();

@@ -7,7 +7,7 @@
 <title>chat-lite</title>
 <link rel="stylesheet" href="vendor/highlight/github-dark.min.css?v=116">
 <link rel="stylesheet" href="vendor/katex/katex.min.css?v=116">
-<link rel="stylesheet" href="style.css?v=125">
+<link rel="stylesheet" href="style.css?v=126">
   <meta name="theme-color" content="#7c3aed">
   <link rel="manifest" href="manifest.json">
 </head>
@@ -559,7 +559,7 @@
         <details class="setting-group setting-group-collapsible" data-group-key="voice">
           <summary class="setting-group-summary">语音通话 <span class="setting-scope">全局·所有会话可用</span></summary>
           <div class="setting-group-body">
-          <span class="setting-hint">通话用三路模型：听（语音识别）、想（对话大脑）、说（语音合成）。三路都可以指向各自渠道，互不影响。密钥与地址在「接口管理」里维护，这里只做选择。</span>
+          <span class="setting-hint">通话用三路模型：听（语音识别）、想（对话大脑）、说（语音合成）。识别与合成可以各自指向不同渠道；大脑直接跟随当前会话。密钥与地址在「接口管理」里维护，这里只做选择。</span>
 
           <div class="setting-divider"></div>
           <span class="setting-section-title">听 · 语音识别（ASR）</span>
@@ -576,15 +576,7 @@
 
           <div class="setting-divider"></div>
           <span class="setting-section-title">想 · 对话大脑</span>
-          <label class="setting-row setting-row-col">
-            <span>大脑渠道</span>
-            <select id="voice-brain-provider" class="setting-select"></select>
-          </label>
-          <span class="setting-hint">留空 = 跟随当前会话的模型。</span>
-          <label class="setting-row setting-row-col">
-            <span>大脑模型</span>
-            <input id="voice-brain-model" class="setting-select" type="text" placeholder="留空 = 跟随当前会话">
-          </label>
+          <span class="setting-hint">通话的大脑直接使用当前会话选择的模型，不单独设置。想换就换会话的模型。</span>
           <label class="setting-row setting-row-col">
             <span>人设</span>
             <select id="voice-persona" class="setting-select"></select>
@@ -657,6 +649,106 @@
             </label>
           </label>
           <span class="setting-hint">把「语速偏快 · 音量偏低」这类声音状态显示出来，同时也会喂给大脑。</span>
+
+          <div class="setting-divider"></div>
+          <span class="setting-section-title">时间与语速</span>
+          <label class="setting-row">
+            <span>时间感知</span>
+            <label class="toggle-switch">
+              <input type="checkbox" id="voice-timestamps">
+              <span class="toggle-slider"></span>
+            </label>
+          </label>
+          <span class="setting-hint">默认关闭。打开后模型会知道现在几点、这通电话打了多久、上一句隔了多久 —— 长时间挂着聊天时，不会把「隔了两小时」当成「紧接着」。</span>
+          <label class="setting-row">
+            <span>语速</span>
+            <input type="range" id="voice-rate" min="0.6" max="1.6" step="0.05" value="1" style="flex:1">
+            <span id="voice-rate-value" style="font-size:12px;color:var(--text2);min-width:52px;text-align:right">1.00×</span>
+          </label>
+          <span class="setting-hint" id="voice-rate-desc">正常语速</span>
+          <label class="setting-row setting-row-col">
+            <span>变速方式</span>
+            <select id="voice-rate-mode" class="setting-select">
+              <option value="natural">保持音高（推荐）</option>
+              <option value="pitch">跟着变调</option>
+            </select>
+          </label>
+          <span class="setting-hint">保持音高 = 快慢变了，但声音不变尖、不变粗。跟着变调 = 传统加速，声音会变尖，更省电，但不像真人。</span>
+
+          <div class="setting-divider"></div>
+          <span class="setting-section-title">音频路由</span>
+          <label class="setting-row setting-row-col">
+            <span>声音从哪出</span>
+            <select id="voice-route-mode" class="setting-select">
+              <option value="auto">自动（跟着耳机插拔走）</option>
+              <option value="speaker">外放</option>
+              <option value="headset">耳机</option>
+            </select>
+          </label>
+          <label class="setting-row">
+            <span>当前实际路由</span>
+            <span id="voice-route-now" class="voice-route-now">浏览器/未接入原生</span>
+          </label>
+          <span class="setting-hint">自动 = 插耳机走耳机、拔掉走外放；钉死某一项适合外放回声大、或耳机一直没被识别出来时。实际路由读的是原生回报，浏览器里没有这一层。</span>
+
+          <div class="setting-divider"></div>
+          <span class="setting-section-title">外放 / 耳机 · 分别微调</span>
+          <span class="setting-hint">耳机和外放可以分别调，也可以复制成一样。留空 = 用内置默认；这里只存你改过的项，改完立即生效。下面「真机微调（高级）」是两栏都没填时兜底的全局值。</span>
+          <div class="voice-preset-grid">
+            <div class="voice-preset-col">
+              <div class="voice-preset-head">
+                <span class="voice-preset-title">外放</span>
+                <button type="button" id="btn-voice-tune-copy-speaker" class="btn btn-small">复制到耳机</button>
+              </div>
+              <label class="setting-row setting-row-col">
+                <span>防自激窗口（毫秒）</span>
+                <input type="number" id="voice-tune-speaker-echoGuardMs" class="setting-select setting-num" min="0" max="1200" step="50" placeholder="默认 250">
+              </label>
+              <label class="setting-row setting-row-col">
+                <span>打断确认时长（毫秒）</span>
+                <input type="number" id="voice-tune-speaker-bargeInHoldMs" class="setting-select setting-num" min="80" max="800" step="20" placeholder="默认 180">
+              </label>
+              <label class="setting-row setting-row-col">
+                <span>回漏抑制系数</span>
+                <input type="number" id="voice-tune-speaker-bargeInLeakFactor" class="setting-select setting-num" min="1.5" max="10" step="0.1" placeholder="默认 3.2">
+              </label>
+              <label class="setting-row setting-row-col">
+                <span>说完判定静音（毫秒）</span>
+                <input type="number" id="voice-tune-speaker-endpointSilenceMs" class="setting-select setting-num" min="200" max="3000" step="50" placeholder="默认 700">
+              </label>
+              <label class="setting-row setting-row-col">
+                <span>最短话语（毫秒）</span>
+                <input type="number" id="voice-tune-speaker-minUtteranceMs" class="setting-select setting-num" min="100" max="2000" step="50" placeholder="默认 400">
+              </label>
+            </div>
+            <div class="voice-preset-col">
+              <div class="voice-preset-head">
+                <span class="voice-preset-title">耳机</span>
+                <button type="button" id="btn-voice-tune-copy-headset" class="btn btn-small">复制到外放</button>
+              </div>
+              <label class="setting-row setting-row-col">
+                <span>防自激窗口（毫秒）</span>
+                <input type="number" id="voice-tune-headset-echoGuardMs" class="setting-select setting-num" min="0" max="1200" step="50" placeholder="默认 250">
+              </label>
+              <label class="setting-row setting-row-col">
+                <span>打断确认时长（毫秒）</span>
+                <input type="number" id="voice-tune-headset-bargeInHoldMs" class="setting-select setting-num" min="80" max="800" step="20" placeholder="默认 180">
+              </label>
+              <label class="setting-row setting-row-col">
+                <span>回漏抑制系数</span>
+                <input type="number" id="voice-tune-headset-bargeInLeakFactor" class="setting-select setting-num" min="1.5" max="10" step="0.1" placeholder="默认 3.2">
+              </label>
+              <label class="setting-row setting-row-col">
+                <span>说完判定静音（毫秒）</span>
+                <input type="number" id="voice-tune-headset-endpointSilenceMs" class="setting-select setting-num" min="200" max="3000" step="50" placeholder="默认 700">
+              </label>
+              <label class="setting-row setting-row-col">
+                <span>最短话语（毫秒）</span>
+                <input type="number" id="voice-tune-headset-minUtteranceMs" class="setting-select setting-num" min="100" max="2000" step="50" placeholder="默认 400">
+              </label>
+            </div>
+          </div>
+          <span class="setting-hint">防自激窗口 = AI 刚开口这段时间内不判打断（外放回声大时调大）；打断确认时长 = 连续说这么久才算打断；回漏抑制系数 = 打断阈值相对回漏能量的倍数；说完判定静音 = 停多久算说完；最短话语 = 短于这个时长不送识别。</span>
 
           <div class="setting-divider"></div>
           <div class="card-import-row">
@@ -768,18 +860,18 @@
 <script src="vendor/katex/katex.min.js?v=116"></script>
 <!-- LaTeX 渲染层：须在 katex.min.js 之后、chat.js 之前加载 -->
 <script src="latex.js?v=119"></script>
-<script src="db.js?v=125"></script>
+<script src="db.js?v=126"></script>
 <script src="haptics.js?v=115"></script>
 <script src="providers.js?v=102"></script>
 <script src="image-gen.js?v=124"></script>
 <script src="conversation.js?v=112"></script>
 <script src="chat.js?v=122"></script>
-<script src="io.js?v=102"></script>
+<script src="io.js?v=126"></script>
 <script src="gesture-helpers.js?v=102"></script>
 <script src="app.js?v=125"></script>
 <!-- v125: 语音通话 —— voice-director 是纯函数层（无 DOM/无网络），voice.js 是运行时 -->
-<script src="voice-director.js?v=125"></script>
-<script src="voice-settings.js?v=125"></script>
-<script src="voice.js?v=125"></script>
+<script src="voice-director.js?v=126"></script>
+<script src="voice-settings.js?v=126"></script>
+<script src="voice.js?v=126"></script>
 </body>
 </html>

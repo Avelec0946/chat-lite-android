@@ -548,6 +548,394 @@ console.log('\n[11] 对外 API 形状（契约 §3.4）');
 })();
 
 // =====================================================================================
+console.log('\n[12] 通话提示词 = 会话人设 + 通话层');
+// =====================================================================================
+// 通话时"人设没保留"的根因是整体换成了 VoiceDirector.buildSystemPrompt()。
+//   这里守住三件事：会话人设每一部分都在、排在通话层之前、状态栏不被念出来。
+(function () {
+  var originSettings = globalThis.settings;
+  var hadEmp = Object.prototype.hasOwnProperty.call(globalThis, 'effectiveModelPrompt');
+  var originEmp = globalThis.effectiveModelPrompt;
+  var hadVD = Object.prototype.hasOwnProperty.call(globalThis, 'VoiceDirector');
+  var originVD = globalThis.VoiceDirector;
+
+  // 模拟 chat.js 的 effectiveModelPrompt 还没定义（加载顺序不确定）
+  globalThis.effectiveModelPrompt = undefined;
+  globalThis.settings = { modelPrompts: { 'p1:m1': { text: '模型修饰语\n\n===强调===\n模型强调内容' } } };
+  var conv = {
+    providerId: 'p1', model: 'm1',
+    systemPrompt: '你是猫娘', emphasis: '说话简短', userIdentity: '用户是程序员',
+    statusBar: { enabled: true, templateRule: '心情', displayFields: '体力' }
+  };
+
+  var parts = T.buildSessionSystemParts(conv);
+  var joined = parts.join('\n');
+  ok('会话 systemPrompt 保留', joined.indexOf('你是猫娘') >= 0, joined);
+  ok('会话 emphasis 保留（带【重要强调】前缀）', joined.indexOf('【重要强调】说话简短') >= 0, joined);
+  ok('模型修饰语保留', joined.indexOf('模型修饰语') >= 0, joined);
+  ok('模型修饰的强调部分保留', joined.indexOf('【重要强调】模型强调内容') >= 0, joined);
+  ok('userIdentity 保留', joined.indexOf('用户身份：用户是程序员') >= 0, joined);
+  ok('会话人设顺序：systemPrompt → emphasis → 模型修饰 → userIdentity',
+    joined.indexOf('你是猫娘') < joined.indexOf('说话简短') &&
+    joined.indexOf('说话简短') < joined.indexOf('模型修饰语') &&
+    joined.indexOf('模型修饰语') < joined.indexOf('用户身份'),
+    joined);
+  ok('状态栏开启时提示词不含 <status>', joined.indexOf('<status>') < 0, joined);
+  ok('状态栏指令文本也不进通话', joined.indexOf('状态栏') < 0, joined);
+
+  ok('空 conv 返回空数组（不抛）', (function () {
+    try { return T.buildSessionSystemParts(null).length === 0 && T.buildSessionSystemParts({}).length === 0; }
+    catch (e) { return false; }
+  })());
+
+  globalThis.effectiveModelPrompt = function () { return { text: '外部修饰' }; };
+  ok('优先用 chat.js 的 effectiveModelPrompt',
+    T.buildSessionSystemParts(conv).join('\n').indexOf('外部修饰') >= 0);
+  globalThis.effectiveModelPrompt = function () { return null; };
+  ok('external 返回 null 时回落到 settings.modelPrompts',
+    T.buildSessionSystemParts(conv).join('\n').indexOf('模型修饰语') >= 0);
+
+  // 通话层存在时：人设 → 通话层 → JSON 指令，且副语言/时间不重复
+  var seen = null;
+  globalThis.VoiceDirector = {
+    buildCallLayer: function (o) { seen = o; return '通话层'; },
+    describeClock: function () { return '【时间】下午三点'; },
+    describeSignals: function () { return '【语气】有点急'; }
+  };
+  globalThis.settings = { modelPrompts: {}, voice: { timestamps: true, rate: 1.2, rateMode: 'natural' } };
+  var msgs = T.buildBrainMessages(conv, '你好', null);
+  var sys = msgs[0].content;
+  ok('首条是 system 消息', msgs[0].role === 'system');
+  ok('会话人设排在通话层之前', sys.indexOf('你是猫娘') >= 0 && sys.indexOf('你是猫娘') < sys.indexOf('通话层'), sys);
+  ok('JSON 输出格式指令在最后', sys.indexOf('【输出格式（强制）】') > sys.indexOf('通话层'), sys);
+  ok('clock 传给通话层（enabled/now/callStartedAt/lastTurnAt/turnIndex）',
+    !!seen && !!seen.clock && seen.clock.enabled === true &&
+    typeof seen.clock.now === 'number' && typeof seen.clock.callStartedAt === 'number' &&
+    typeof seen.clock.lastTurnAt === 'number' && typeof seen.clock.turnIndex === 'number',
+    JSON.stringify(seen && seen.clock));
+  ok('timestamps 开时时间描述进提示词', sys.indexOf('【时间】下午三点') >= 0, sys);
+  ok('副语言信号只注入一次', sys.split('【语气】有点急').length - 1 === 1, sys);
+
+  // v126 回归：v125 里 buildBrainMessages 末尾还会调一次 buildTurnMessages，
+  //   而那个函数会自己再拼一遍 system —— 于是 messages 变成 [system, user, system, user, user]，
+  //   两套互相冲突的提示词同时发给模型（JSON 格式说明写了两份）。
+  //   这条断言钉住「system 只出现一次、历史不重复、末条是本轮用户话」。
+  ok('messages 里 system 只出现一次',
+    msgs.filter(function (m) { return m.role === 'system'; }).length === 1,
+    JSON.stringify(msgs.map(function (m) { return m.role; })));
+  ok('messages 末条是本轮用户话', msgs[msgs.length - 1].role === 'user' &&
+    msgs[msgs.length - 1].content === '你好',
+    JSON.stringify(msgs[msgs.length - 1]));
+  ok('本轮用户话只出现一次（不被 buildTurnMessages 重复追加）',
+    msgs.filter(function (m) { return m.role === 'user' && m.content === '你好'; }).length === 1,
+    JSON.stringify(msgs.map(function (m) { return m.role + ':' + String(m.content).slice(0, 8); })));
+  ok('提示词里 JSON 格式说明只有一份',
+    (sys.split('【输出格式').length - 1) === 1,
+    String(sys.split('【输出格式').length - 1));
+
+  globalThis.settings.voice.timestamps = false;
+  T.buildBrainMessages(conv, '你好', null);
+  ok('timestamps 关时 clock.enabled=false', seen.clock.enabled === false, JSON.stringify(seen.clock));
+
+  delete globalThis.VoiceDirector;
+  var sysOld = T.buildBrainMessages(conv, '你好', null)[0].content;
+  ok('buildCallLayer 缺失时回退旧提示词且不丢人设',
+    sysOld.indexOf('你是猫娘') >= 0 && sysOld.indexOf('你正在和用户通电话') >= 0, sysOld);
+
+  globalThis.settings = originSettings;
+  if (hadEmp) globalThis.effectiveModelPrompt = originEmp; else delete globalThis.effectiveModelPrompt;
+  if (hadVD) globalThis.VoiceDirector = originVD; else delete globalThis.VoiceDirector;
+})();
+
+// =====================================================================================
+console.log('\n[13] WSOLA 保音高时间伸缩（语速）');
+// =====================================================================================
+// 语速不能只改 playbackRate：那会把音高一起抬上去（1.5× 听起来像另一个人）。
+//   WSOLA 只改时长不改周期，所以输出仍然是 220Hz；分块流式处理还要与一次性处理等长，
+//   否则块边界会出现周期性咔哒。
+(function () {
+  var SR = 24000;
+
+  function tone(n) {
+    var a = new Float32Array(n);
+    for (var i = 0; i < n; i++) a[i] = 0.5 * Math.sin(2 * Math.PI * 220 * i / SR);
+    return a;
+  }
+
+  function stretchAll(rate, chunk, n) {
+    var ts = T.makeTimeStretcher(rate, SR);
+    var input = tone(n);
+    var pieces = [];
+    var total = 0;
+    for (var off = 0; off < n; off += chunk) {
+      var out = ts.process(input.subarray(off, Math.min(n, off + chunk)));
+      if (out && out.length) { pieces.push(out); total += out.length; }
+    }
+    var tail = ts.flush();
+    if (tail && tail.length) { pieces.push(tail); total += tail.length; }
+    var all = new Float32Array(total);
+    var at = 0;
+    var nan = 0;
+    var peak = 0;
+    for (var k = 0; k < pieces.length; k++) {
+      all.set(pieces[k], at);
+      at += pieces[k].length;
+      for (var j = 0; j < pieces[k].length; j++) {
+        var v = pieces[k][j];
+        if (!isFinite(v)) nan++;
+        if (Math.abs(v) > peak) peak = Math.abs(v);
+      }
+    }
+    var zc = 0;
+    for (var z = 1; z < all.length; z++) {
+      if ((all[z - 1] < 0 && all[z] >= 0) || (all[z - 1] >= 0 && all[z] < 0)) zc++;
+    }
+    var hz = all.length ? (zc / 2) / (all.length / SR) : 0;
+    return { total: total, nan: nan, peak: peak, hz: hz };
+  }
+
+  // rate=1：直通（同一份数组，零处理）
+  var pass = T.makeTimeStretcher(1, SR);
+  var inp = tone(2400);
+  var direct = pass.process(inp);
+  ok('rate=1 直通（输出 === 输入）', direct === inp && direct.length === inp.length, String(direct.length));
+  ok('rate=1 flush 为空', pass.flush().length === 0);
+
+  var r15 = stretchAll(1.5, 24000, 24000);
+  var e15 = 24000 / 1.5;
+  ok('rate=1.5 输出长度 ≈ 输入/1.5（±10%）', Math.abs(r15.total - e15) <= e15 * 0.1,
+    r15.total + ' vs ~' + e15);
+  ok('rate=1.5 保音高（≈220Hz，不是 330Hz）', Math.abs(r15.hz - 220) <= 20, r15.hz.toFixed(1) + 'Hz');
+  ok('rate>1 时长变短', r15.total < 24000, String(r15.total));
+
+  var r075 = stretchAll(0.75, 24000, 24000);
+  var e075 = 24000 / 0.75;
+  ok('rate=0.75 输出长度 ≈ 输入/0.75（±10%）', Math.abs(r075.total - e075) <= e075 * 0.1,
+    r075.total + ' vs ~' + e075);
+  ok('rate<1 时长变长', r075.total > 24000, String(r075.total));
+
+  // 分块：TTS 一块块吐 PCM，分块结果必须和一次性几乎等长（相位连续的直接体现）
+  var c15 = stretchAll(1.5, 4096, 24000);
+  var c075 = stretchAll(0.75, 4096, 24000);
+  ok('rate=1.5 分块与一次性长度接近（差 ≤ 400 样本）',
+    Math.abs(c15.total - r15.total) <= 400, c15.total + ' vs ' + r15.total);
+  ok('rate=0.75 分块与一次性长度接近（差 ≤ 400 样本）',
+    Math.abs(c075.total - r075.total) <= 400, c075.total + ' vs ' + r075.total);
+  ok('分块输出无 NaN/Infinity', c15.nan === 0 && c075.nan === 0, c15.nan + ',' + c075.nan);
+  ok('输出振幅不发散（峰值 ≤ 1.1）', r15.peak <= 1.1 && r075.peak <= 1.1,
+    r15.peak.toFixed(3) + ',' + r075.peak.toFixed(3));
+
+  // 边界：rate 夹在 0.6~1.6，非法值回落 1（直通）
+  ok('rate=99 夹到 1.6', T.makeTimeStretcher(99, SR).rate() === 1.6, String(T.makeTimeStretcher(99, SR).rate()));
+  ok('rate=0.1 夹到 0.6', T.makeTimeStretcher(0.1, SR).rate() === 0.6, String(T.makeTimeStretcher(0.1, SR).rate()));
+  ok('clampRate 常量 0.6~1.6', T.RATE_MIN === 0.6 && T.RATE_MAX === 1.6);
+  [NaN, 0, -1, 'abc', undefined].forEach(function (bad) {
+    var ts = T.makeTimeStretcher(bad, SR);
+    var o = ts.process(inp);
+    ok('非法 rate(' + String(bad) + ') 回落 1 且直通', ts.rate() === 1 && o === inp, String(ts.rate()));
+  });
+
+  var empty = T.makeTimeStretcher(1.5, SR);
+  ok('空输入不抛、输出为空', (function () {
+    try { return empty.process(new Float32Array(0)).length === 0 && empty.flush().length === 0; }
+    catch (e) { return false; }
+  })());
+
+  // 句子边界：flush 后状态清空，下一句开头不混入上一句的补零尾巴
+  var seg = T.makeTimeStretcher(1.5, SR);
+  var s1 = seg.process(tone(6000));
+  var f1 = seg.flush();
+  var s2 = seg.process(tone(6000));
+  var f2 = seg.flush();
+  ok('两句独立拉伸长度一致', (s1.length + f1.length) === (s2.length + f2.length),
+    (s1.length + f1.length) + ' vs ' + (s2.length + f2.length));
+  ok('flush 后再次 flush 为空（状态已清）', seg.flush().length === 0);
+  ok('setRate 改变速率并返回夹紧后的值',
+    (function () { var ts = T.makeTimeStretcher(1, SR); return ts.setRate(1.4) === 1.4 && ts.rate() === 1.4; })());
+})();
+
+// =====================================================================================
+console.log('\n[14] 路由预置 effectiveTuning / currentRoute');
+// =====================================================================================
+// 外放与耳机的声学环境差一个数量级，同一套打断参数不可能两边都合适。
+//   预置只在"当前路由"下覆盖 base，非法值必须忽略（否则一个手误就能把打断调死）。
+(function () {
+  var originSettings = globalThis.settings;
+  var hadCap = Object.prototype.hasOwnProperty.call(globalThis, 'Capacitor');
+  var originCap = globalThis.Capacitor;
+  var hadVD = Object.prototype.hasOwnProperty.call(globalThis, 'VoiceDirector');
+  var originVD = globalThis.VoiceDirector;
+
+  function withVoice(v) { globalThis.settings = { voice: v }; }
+
+  // 先测"什么都没有"的场景：此时路由缓存为空，才能确定地回落到 speaker
+  delete globalThis.settings;
+  ok('settings 缺失时 currentRoute 回落 speaker 不抛', T.currentRoute() === 'speaker', T.currentRoute());
+  ok('settings 缺失时 effectiveTuning 用默认值', T.effectiveTuning('echoGuardMs', 250) === 250);
+
+  withVoice({
+    echoGuardMs: 300, routeMode: 'speaker',
+    tuningPresets: {
+      speaker: { echoGuardMs: 400, bargeInHoldMs: 'abc', leakFloor: 999 },
+      headset: { echoGuardMs: 600 }
+    }
+  });
+  ok('currentRoute 用 routeMode 手动值（无插件）', T.currentRoute() === 'speaker', T.currentRoute());
+  ok('base + 当前路由预置合并', T.effectiveTuning('echoGuardMs', 250) === 400, String(T.effectiveTuning('echoGuardMs', 250)));
+  ok('预置没覆盖的键回落到 base', T.effectiveTuning('bargeInHoldMs', 180) === 180, String(T.effectiveTuning('bargeInHoldMs', 180)));
+  ok('预置里的非数字被忽略', T.effectiveTuning('bargeInHoldMs', 180) === 180, String(T.effectiveTuning('bargeInHoldMs', 180)));
+  ok('预置越界被忽略（回落到 base）', T.effectiveTuning('leakFloor', 0.004) === 0.004, String(T.effectiveTuning('leakFloor', 0.004)));
+  ok('没有预置的键用 base', T.effectiveTuning('endpointSilenceMs', 700) === 700, String(T.effectiveTuning('endpointSilenceMs', 700)));
+
+  // 主任提供统一合并器时优先用它（v126: resolveTuning(baseObj, presetObj) 逐项合并）
+  var mergeArgs = null;
+  globalThis.VoiceDirector = {
+    resolveTuning: function (base, preset) {
+      mergeArgs = { base: base, preset: preset };
+      var out = {};
+      for (var k in base) if (Object.prototype.hasOwnProperty.call(base, k)) out[k] = base[k];
+      if (preset && preset.echoGuardMs === 400) out.echoGuardMs = 777;   // 模拟"结果来自主任"
+      return out;
+    }
+  };
+  ok('合并器存在时走 VoiceDirector.resolveTuning', T.effectiveTuning('echoGuardMs', 250) === 777,
+    String(T.effectiveTuning('echoGuardMs', 250)));
+  ok('合并器收到 {当前键: base} 与预置对象',
+    !!mergeArgs && mergeArgs.base && mergeArgs.base.echoGuardMs === 300 && mergeArgs.preset.echoGuardMs === 400,
+    JSON.stringify(mergeArgs));
+  delete globalThis.VoiceDirector;
+
+  globalThis.settings.voice.routeMode = 'headset';
+  ok('切到耳机后 currentRoute 跟着变', T.currentRoute() === 'headset', T.currentRoute());
+  ok('切到耳机后预置跟着换', T.effectiveTuning('echoGuardMs', 250) === 600, String(T.effectiveTuning('echoGuardMs', 250)));
+
+  globalThis.settings.voice.routeMode = 'auto';
+  ok('auto + 无插件回落 speaker（不抛）', (function () {
+    try { return T.currentRoute() === 'speaker'; } catch (e) { return false; }
+  })());
+  ok('auto 时用 speaker 路由的预置', T.effectiveTuning('echoGuardMs', 250) === 400, String(T.effectiveTuning('echoGuardMs', 250)));
+
+  // 插件抛错：静默回落手动值（必须在插件成功之前测，否则会命中 4 秒路由缓存）
+  globalThis.Capacitor = { Plugins: { AudioRoute: { getRoute: function () { throw new Error('boom'); } } } };
+  globalThis.settings.voice.routeMode = 'speaker';
+  ok('插件抛错时静默回落手动值', (function () {
+    try { return T.currentRoute() === 'speaker'; } catch (e) { return false; }
+  })());
+
+  // 原生插件的 payload 是 { type, name }（AudioRoutePlugin 契约），不是 { route }
+  ok('插件 {type:headset} 归一化为 headset', T.normalizeRoute(T.routeValueOf({ type: 'headset', name: '有线耳机' })) === 'headset');
+  ok('插件 {type:bluetooth} 算耳机（蓝牙也是私密听感）',
+    T.normalizeRoute(T.routeValueOf({ type: 'bluetooth', name: '蓝牙设备' })) === 'headset');
+  // v126 真机修正：earpiece（听筒）必须算**外放**，不能算耳机。
+  //   实测场景：没插任何耳机，但原生插件回报 earpiece（isSpeakerphoneOn() 默认 false +
+  //   手机有听筒硬件）；而 WebView 的音频走 STREAM_MUSIC，实际是从外放喇叭出来的。
+  //   归成耳机就会把两套参数用反 —— 外放回声大却用了灵敏的耳机参数，AI 被自己打断。
+  ok('插件 {type:earpiece} 算外放（真机实测：无耳机时音频走外放）',
+    T.normalizeRoute(T.routeValueOf({ type: 'earpiece', name: '听筒' })) === 'speaker');
+  ok('插件中文名「听筒」也算外放',
+    T.normalizeRoute(T.routeValueOf({ type: '', name: '听筒' })) === 'speaker');
+  ok('插件 {type:speaker} 算外放', T.normalizeRoute(T.routeValueOf({ type: 'speaker', name: '外放' })) === 'speaker');
+  ok('插件 payload 直接是字符串也能用', T.normalizeRoute(T.routeValueOf('headset')) === 'headset');
+
+  // 插件存在：同步 getRoute 的结果优先于手动值
+  globalThis.Capacitor = { Plugins: { AudioRoute: { getRoute: function () { return { type: 'headset', name: '有线耳机' }; } } } };
+  ok('原生插件 getRoute 优先', T.currentRoute() === 'headset', T.currentRoute());
+  ok('耳机插件路由也会带出耳机预置', T.effectiveTuning('echoGuardMs', 250) === 600);
+
+  // 插件返回 Promise：同步调用先给已知值，结果回来后再更新（不能抛、不能卡）
+  globalThis.Capacitor = { Plugins: { AudioRoute: { getRoute: function () { return Promise.resolve({ route: 'headset' }); } } } };
+  ok('异步插件同步调用不抛', (function () {
+    try { var r = T.currentRoute(); return r === 'speaker' || r === 'headset'; } catch (e) { return false; }
+  })());
+
+  delete globalThis.Capacitor;
+  ok('插件被移除后 currentRoute 仍返回合法路由不抛', (function () {
+    try { var r = T.currentRoute(); return r === 'speaker' || r === 'headset'; } catch (e) { return false; }
+  })());
+
+  globalThis.settings = originSettings;
+  if (hadCap) globalThis.Capacitor = originCap; else delete globalThis.Capacitor;
+  if (hadVD) globalThis.VoiceDirector = originVD; else delete globalThis.VoiceDirector;
+})();
+
+// =====================================================================================
+console.log('\n[15] 大脑跟随会话 / 通话标注不污染历史');
+// =====================================================================================
+(function () {
+  var originSettings = globalThis.settings;
+  var originState = globalThis.state;
+  var hadConvFn = Object.prototype.hasOwnProperty.call(globalThis, 'currentConv');
+  var originConvFn = globalThis.currentConv;
+  var hadVD = Object.prototype.hasOwnProperty.call(globalThis, 'VoiceDirector');
+  var originVD = globalThis.VoiceDirector;
+
+  // 1) 大脑渠道/模型跟随会话；settings.voice 里残留的旧字段一律不再读
+  globalThis.settings = { apiKey: '', voice: { brainProviderId: 'old-id', brainModel: 'old-model' } };
+  globalThis.state = { providers: [{ id: 'convp', name: '会话渠道', apiKey: 'k', models: [{ id: 'deepseek-chat' }] }] };
+  globalThis.currentConv = function () { return { id: 'c1', providerId: 'convp', model: 'deepseek-chat' }; };
+  var r1 = T.resolveVoiceProvider('brain');
+  ok('大脑跟随会话渠道', r1.provider.id === 'convp', r1.provider.id);
+  ok('旧 brainProviderId 不再生效', r1.provider.id !== 'old-id', r1.provider.id);
+  ok('大脑模型用会话模型', r1.model === 'deepseek-chat', r1.model);
+
+  // 2) 会话没配渠道 → 回落 DeepSeek 直连（老兜底保留）
+  globalThis.settings = { apiKey: 'sk-test', voice: {} };
+  globalThis.state = { providers: [] };
+  globalThis.currentConv = function () { return { id: 'c2', providerId: '', model: '' }; };
+  var r2 = T.resolveVoiceProvider('brain');
+  ok('会话没配渠道回落 DeepSeek 直连',
+    r2.provider.id === '__builtin_deepseek' && r2.model === 'deepseek-chat', JSON.stringify(r2));
+
+  // 3) 什么都没有 → 可读错误（不能静默拿空 key 打请求）
+  globalThis.settings = { apiKey: '', voice: {} };
+  globalThis.state = { providers: [] };
+  ok('没有任何渠道时报 voice_nokey', (function () {
+    try { T.resolveVoiceProvider('brain'); return false; }
+    catch (e) { return e.code === 'voice_nokey'; }
+  })());
+
+  // 4) 通话标注：写进 activePath / 是 system+marker，但不进 historyMessages
+  var conv = { id: 'c3', rootId: 'r0', messageMap: {}, activePath: [] };
+  globalThis.state = { providers: [], conversations: [conv] };
+  globalThis.currentConv = function () { return conv; };
+  var markerOpts = null;
+  globalThis.VoiceDirector = {
+    buildCallMarker: function (o) { markerOpts = o; return { role: 'system', content: '〔通话开始〕', marker: 'call' }; }
+  };
+  var mk = T.appendCallMarker('start');
+  ok('通话标注写入 activePath', !!mk && conv.activePath.length === 1 && conv.activePath[0] === mk.id);
+  var stored = conv.messageMap[conv.activePath[0]];
+  ok('标注是 system 消息且 marker=call', stored.role === 'system' && stored.marker === 'call', JSON.stringify(stored));
+  ok('标注挂在 rootId 下（父子关系正确）', stored.parentId === 'r0', stored.parentId);
+  ok('buildCallMarker 收到 kind/at/startedAt/turns',
+    !!markerOpts && markerOpts.kind === 'start' && typeof markerOpts.at === 'number' &&
+    typeof markerOpts.startedAt === 'number' && typeof markerOpts.turns === 'number',
+    JSON.stringify(markerOpts));
+
+  var u = { id: 'u1', role: 'user', content: '你好' };
+  var a = { id: 'a1', role: 'assistant', content: '在的' };
+  conv.messageMap.u1 = u; conv.messageMap.a1 = a;
+  conv.activePath.push('u1', 'a1');
+  var hist = T.historyMessages(conv, 16);
+  ok('historyMessages 过滤掉通话标注', hist.length === 2 && hist[0].role === 'user' && hist[1].role === 'assistant',
+    JSON.stringify(hist));
+  ok('标注本身仍在会话里（可回看）', !!conv.messageMap[stored.id]);
+
+  // 5) 没有 buildCallMarker 也不炸：走最小兜底
+  delete globalThis.VoiceDirector;
+  var conv2 = { id: 'c4', rootId: 'r0', messageMap: {}, activePath: [] };
+  globalThis.state = { providers: [], conversations: [conv2] };
+  globalThis.currentConv = function () { return conv2; };
+  var mk2 = T.appendCallMarker('end');
+  ok('主任缺 buildCallMarker 时仍写标注（兜底）', !!mk2 && conv2.activePath.length === 1, JSON.stringify(mk2 && mk2.content));
+
+  globalThis.settings = originSettings;
+  globalThis.state = originState;
+  if (hadConvFn) globalThis.currentConv = originConvFn; else delete globalThis.currentConv;
+  if (hadVD) globalThis.VoiceDirector = originVD; else delete globalThis.VoiceDirector;
+})();
+
+// =====================================================================================
 var total = passes + failures;
 console.log('\n' + '='.repeat(58));
 console.log((failures === 0 ? '全部通过' : '有失败') + '：' + passes + '/' + total + ' 通过，' + failures + ' 失败');

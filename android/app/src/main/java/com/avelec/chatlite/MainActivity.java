@@ -37,6 +37,8 @@ public class MainActivity extends BridgeActivity {
         // v122: 注册自写流式插件——读超时可配 + 区分「正常结束」与「提前中断」
         // （npm 的 capacitor-stream-http 把 readTimeout 写死 30 秒，长思考模型必被掐断）
         registerPlugin(ChatStreamPlugin.class);
+        // v126: 注册音频路由插件——voice.js 据此在「外放 / 耳机」两套调参预设间切换
+        registerPlugin(AudioRoutePlugin.class);
         super.onCreate(savedInstanceState);
         // v71: 创建 WakeLock，用于后台期间保持 CPU 活跃
         PowerManager pm = (PowerManager) getSystemService(POWER_SERVICE);
