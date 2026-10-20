@@ -1396,3 +1396,28 @@ body.voice-view-open .btn-voice-entry::after{display:none}
 .voice-route-now{font-size:12px;font-weight:600;color:var(--primary);font-variant-numeric:tabular-nums;text-align:right}
 @media (max-width:640px){.voice-preset-grid{grid-template-columns:1fr}}
 
+/* ===== v127：语音接口 / 通话手感 ===== */
+/* 接口列表完全复用既有 .provider-group / .provider-summary / .provider-detail，
+   这里只补两样项目里还没有的东西：状态徽标、以及滑杆的外形。 */
+.provider-badge{font-size:11px;padding:1px 6px;border-radius:999px;margin-left:6px;font-weight:500;vertical-align:middle}
+.provider-badge-on{background:rgba(52,199,168,0.18);color:var(--success,#34c7a8)}
+.provider-badge-warn{background:rgba(230,168,58,0.18);color:var(--warning,#e6a83a)}
+
+/* 通话手感滑杆：沿用设置面板既有的行距与分隔线，只是把数字换成档位 */
+.voice-dial{padding:12px 0 6px;border-bottom:1px solid var(--border)}
+.voice-dial:last-child{border-bottom:none}
+.voice-dial-head{display:flex;align-items:baseline;justify-content:space-between;gap:8px;margin-bottom:2px}
+.voice-dial-label{font-size:14px;color:var(--text)}
+.voice-dial-value{font-size:13px;color:var(--primary);font-weight:500}
+.voice-dial-range{width:100%;margin:6px 0 2px;accent-color:var(--primary)}
+.voice-dial-scale{display:flex;justify-content:space-between;font-size:11px;color:var(--text2);margin-bottom:4px}
+
+/* 高级参数：沿用 .provider-group 的折叠观感，不另造一套 */
+.voice-adv{margin-top:12px;background:var(--bg2);border:1px solid var(--border);border-radius:8px;overflow:hidden}
+.voice-adv[open]{border-color:var(--primary)}
+.voice-adv-summary{padding:10px 12px;font-size:13px;color:var(--text2);cursor:pointer;list-style:none;display:flex;align-items:center;justify-content:space-between}
+.voice-adv-summary::-webkit-details-marker{display:none}
+.voice-adv-summary::after{content:'▾';font-size:12px;transition:transform 0.15s}
+.voice-adv[open] .voice-adv-summary::after{transform:rotate(180deg)}
+.voice-adv-body{padding:0 12px 12px}
+.voice-adv-body .setting-row{padding:6px 0}

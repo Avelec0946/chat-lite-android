@@ -27,15 +27,6 @@
   var TTS_MODEL_SUGGESTIONS = ['mimo-v2.5-tts', 'mimo-v2.5-tts-voicedesign', 'mimo-v2.5-tts-voiceclone'];
 
   // v126：外放 / 耳机两套微调预设的字段定义。
-  // 范围与默认值必须和 voice.js 的 TUNING_FIELDS 对齐：两处一旦漂了，
-  //   用户在这里填的值会被运行时悄悄夹紧，看到的和生效的就不是同一个数。
-  var PRESET_FIELDS = [
-    { key: 'echoGuardMs', label: '防自激窗口（毫秒）', min: 0, max: 1200, step: 50, dflt: 250 },
-    { key: 'bargeInHoldMs', label: '打断确认时长（毫秒）', min: 80, max: 800, step: 20, dflt: 180 },
-    { key: 'bargeInLeakFactor', label: '回漏抑制系数', min: 1.5, max: 10, step: 0.1, dflt: 3.2 },
-    { key: 'endpointSilenceMs', label: '说完判定静音（毫秒）', min: 200, max: 3000, step: 50, dflt: 700 },
-    { key: 'minUtteranceMs', label: '最短话语（毫秒）', min: 100, max: 2000, step: 50, dflt: 400 }
-  ];
 
   // 人设列表从 voice-director 取（那边是真相来源），取不到时用兜底
   var FALLBACK_PERSONAS = [
@@ -54,41 +45,6 @@
     try { if (typeof saveSettings === 'function') saveSettings(); } catch (e) {}
   }
 
-  // 预设只存用户改过的项（空 = 用内置默认）。老用户的 settings.voice 里没有这个键，
-  //   这里补一层结构兜底，避免迁移没跑到时直接抛错。
-  function presetStore() {
-    var st = v();
-    if (!st.tuningPresets || typeof st.tuningPresets !== 'object') st.tuningPresets = { speaker: {}, headset: {} };
-    if (!st.tuningPresets.speaker || typeof st.tuningPresets.speaker !== 'object') st.tuningPresets.speaker = {};
-    if (!st.tuningPresets.headset || typeof st.tuningPresets.headset !== 'object') st.tuningPresets.headset = {};
-    return st.tuningPresets;
-  }
-
-  function fillPresetInputs() {
-    var p = presetStore();
-    ['speaker', 'headset'].forEach(function (side) {
-      PRESET_FIELDS.forEach(function (f) {
-        var el = $('voice-tune-' + side + '-' + f.key);
-        if (!el) return;
-        var cur = p[side][f.key];
-        el.value = (cur === undefined || cur === null || cur === '') ? '' : String(cur);
-      });
-    });
-  }
-
-  function copyPreset(from, to) {
-    var p = presetStore();
-    var src = p[from];
-    var out = {};
-    for (var k in src) {
-      if (Object.prototype.hasOwnProperty.call(src, k)) out[k] = src[k];
-    }
-    p[to] = out;
-    fillPresetInputs();
-    persistVoice();
-    var name = to === 'headset' ? '耳机' : '外放';
-    if (typeof showToast === 'function') showToast('已复制到' + name);
-  }
 
   function clampRate(n) {
     if (!isFinite(n)) return 1;
@@ -172,23 +128,10 @@
     return FALLBACK_PERSONAS;
   }
 
-  // 把 state.providers 填进渠道下拉。空选项 = 「内置直连 MiMo」，
-  // 让没配过的用户也能开箱即用（走 settings.voice 里的默认地址）。
-  function renderProviderSelect(sel, currentId, opts) {
-    if (!sel) return;
-    var list = (state.providers || []);
-    var html = '';
-    if (!opts || !opts.requireSelection) {
-      html += '<option value="">内置直连（MiMo / DeepSeek 官方地址）</option>';
-    }
-    list.forEach(function (p) {
-      html += '<option value="' + p.id + '">' + escapeHtml(p.name) +
-        (p.models && p.models.length ? '（' + p.models.length + ' 个模型）' : '') + '</option>';
-    });
-    sel.innerHTML = html;
-    sel.value = currentId || '';
-    if (sel.value !== (currentId || '') && sel.options.length) sel.selectedIndex = 0;
-  }
+  // v127：renderProviderSelect 已删除。
+  //   它把「接口管理」里的聊天渠道填进语音的渠道下拉 —— 那正是 401 的源头：
+  //   聊天渠道的地址是文本网关，拿它发 asr/tts 密钥对不上。语音现在有独立的
+  //   「语音接口」管理（voice-provider.js），不再从 state.providers 取任何东西。
 
   function renderModelDatalist(dlId, models) {
     var dl = $(dlId);
@@ -256,8 +199,7 @@
   // ===== 从 settings → DOM（打开设置面板、切换渠道、外部改动后调用）=====
   function syncVoiceSettingsUI() {
     var st = v();
-    renderProviderSelect($('voice-asr-provider'), st.asrProviderId);
-    renderProviderSelect($('voice-tts-provider'), st.ttsProviderId);
+    // v127：渠道下拉已移除 —— 语音走独立的「语音接口」（voice-provider.js 负责渲染）
     if ($('voice-asr-model')) $('voice-asr-model').value = st.asrModel || '';
     if ($('voice-tts-model')) $('voice-tts-model').value = st.ttsModel || '';
     if ($('voice-design')) $('voice-design').value = st.voiceDesign || '';
@@ -268,7 +210,7 @@
     if ($('voice-sensitivity')) $('voice-sensitivity').value = String(st.sensitivity);
     var sv = $('voice-sensitivity-value');
     if (sv) sv.textContent = Number(st.sensitivity).toFixed(2);
-    if ($('voice-endpoint-ms')) $('voice-endpoint-ms').value = String(st.endpointSilenceMs);
+    // v127：「说完判定」改由 voice.js 的「接话快慢」滑杆控制，这里不再回填
     renderVoiceSelect();
     renderPersonaSelect();
     renderModelDatalist('voice-asr-model-suggestions', ASR_MODEL_SUGGESTIONS);
@@ -282,25 +224,37 @@
       $('voice-route-mode').value = (st.routeMode === 'speaker' || st.routeMode === 'headset') ? st.routeMode : 'auto';
     }
     syncRateUI();
-    fillPresetInputs();
     syncRouteNow();
+    // v127：自动挂断（默认关）
+    if ($('voice-auto-hangup')) $('voice-auto-hangup').checked = !!st.autoHangup;
+    if ($('voice-auto-hangup-min')) {
+      var mins = Math.round((Number(st.autoHangupSilenceMs) || 3600000) / 60000);
+      $('voice-auto-hangup-min').value = String(mins);
+      $('voice-auto-hangup-min').disabled = !st.autoHangup;
+    }
     var nameEl = $('voice-voice-name');
     if (nameEl) nameEl.textContent = currentVoiceLabel();
   }
 
-  // 当前选中渠道的模型目录 → 喂给模型输入框的建议列表
-  function syncModelSuggestions(providerId, datalistId, fallbackModels) {
+  // v127：建议列表改为从「语音接口」自己配的模型里取（不再读聊天渠道的模型目录）
+  function syncModelSuggestions(datalistId, fallbackModels) {
     var models = (fallbackModels || []).slice();
-    if (providerId) {
-      var p = (state.providers || []).filter(function (x) { return x.id === providerId; })[0];
-      if (p && p.models && p.models.length) {
-        // 只保留语音相关的模型名，避免把聊天模型也塞进建议（噪音）
-        var audio = p.models.map(function (m) { return m.id; }).filter(function (id) {
-          return /asr|tts|whisper|audio|speech|voice|transcri/i.test(id);
-        });
-        models = audio.length ? audio : models;
+    try {
+      var VP = root.VoiceProvider;
+      var p = (VP && typeof VP.current === 'function') ? VP.current() : null;
+      if (p) {
+        var mine = [];
+        if (p.asrModel) mine.push(p.asrModel);
+        if (p.ttsModel) mine.push(p.ttsModel);
+        if (Array.isArray(p.models)) {
+          p.models.forEach(function (m) {
+            var id = (typeof m === 'string') ? m : (m && (m.id || m.name));
+            if (id && mine.indexOf(id) < 0) mine.push(id);
+          });
+        }
+        if (mine.length) models = mine.concat(models.filter(function (x) { return mine.indexOf(x) < 0; }));
       }
-    }
+    } catch (e) {}
     renderModelDatalist(datalistId, models);
   }
 
@@ -308,16 +262,7 @@
   function bind() {
     var st = v;
 
-    var asrSel = $('voice-asr-provider');
-    if (asrSel) asrSel.addEventListener('change', function () {
-      st().asrProviderId = asrSel.value;
-      syncModelSuggestions(asrSel.value, 'voice-asr-model-suggestions', ASR_MODEL_SUGGESTIONS);
-    });
-    var ttsSel = $('voice-tts-provider');
-    if (ttsSel) ttsSel.addEventListener('change', function () {
-      st().ttsProviderId = ttsSel.value;
-      syncModelSuggestions(ttsSel.value, 'voice-tts-model-suggestions', TTS_MODEL_SUGGESTIONS);
-    });
+    // v127：渠道下拉已移除，改由 voice-provider.js 管理独立语音接口
     var bindText = function (id, key) {
       var el = $(id);
       if (!el) return;
@@ -356,10 +301,22 @@
       var sv = $('voice-sensitivity-value');
       if (sv) sv.textContent = st().sensitivity.toFixed(2);
     });
-    var ep = $('voice-endpoint-ms');
-    if (ep) ep.addEventListener('change', function () {
-      st().endpointSilenceMs = clampNum(ep.value, 300, 3000, 700);
-      ep.value = String(st().endpointSilenceMs);
+    // ===== v127：自动挂断（默认关，开了默认 1 小时）=====
+    var ah = $('voice-auto-hangup');
+    if (ah) ah.addEventListener('change', function () {
+      st().autoHangup = !!ah.checked;
+      var minEl = $('voice-auto-hangup-min');
+      if (minEl) minEl.disabled = !ah.checked;
+      persistVoice();
+    });
+    var ahMin = $('voice-auto-hangup-min');
+    if (ahMin) ahMin.addEventListener('change', function () {
+      var m = parseInt(ahMin.value, 10);
+      if (!isFinite(m) || m < 1) m = 60;
+      if (m > 720) m = 720;
+      st().autoHangupSilenceMs = m * 60000;
+      ahMin.value = String(m);
+      persistVoice();
     });
 
     // ===== v126：时间感知 =====
@@ -402,49 +359,9 @@
       syncRouteNow();
     });
 
-    // ===== v126：外放 / 耳机双预设 =====
-    ['speaker', 'headset'].forEach(function (side) {
-      PRESET_FIELDS.forEach(function (field) {
-        var input = $('voice-tune-' + side + '-' + field.key);
-        if (!input) return;
-        var commit = function () {
-          var p = presetStore();
-          var raw = input.value.trim();
-          if (raw === '') {
-            // 清空 = 删掉这一项，回到内置默认；不写死默认值，
-            //   否则以后调默认值时这些用户永远收不到新值。
-            delete p[side][field.key];
-            persistVoice();
-            return;
-          }
-          var n = parseFloat(raw);
-          if (!isFinite(n)) {
-            delete p[side][field.key];
-            input.value = '';
-            persistVoice();
-            return;
-          }
-          if (n < field.min) n = field.min;
-          if (n > field.max) n = field.max;
-          p[side][field.key] = n;
-          input.value = String(n);   // 回写夹紧后的值：让用户看见离谱值被纠正了
-          persistVoice();
-        };
-        input.addEventListener('change', commit);
-        input.addEventListener('blur', commit);
-      });
-    });
+    // v127：双预设两栏已移除（用户明确反对 15 个手填输入框）。
+    //   现在由 voice.js 注入三档滑杆 + 折叠的高级参数，直接写 settings.voice 同名字段。
 
-    // 「复制到另一栏」：整栏覆盖（包括"另一栏本来有、这一栏没有"的项），
-    //   半边残留旧值最容易出问题 —— 用户以为两栏一样，实际只有一栏生效。
-    var copyToHeadset = $('btn-voice-tune-copy-speaker');
-    if (copyToHeadset) copyToHeadset.addEventListener('click', function () {
-      copyPreset('speaker', 'headset');
-    });
-    var copyToSpeaker = $('btn-voice-tune-copy-headset');
-    if (copyToSpeaker) copyToSpeaker.addEventListener('click', function () {
-      copyPreset('headset', 'speaker');
-    });
 
     // 克隆参考音上传：只记文件名 + 把音频存到 Filesystem/CACHE，不把 base64 塞进 settings
     var up = $('btn-voice-clone-upload');
@@ -566,16 +483,13 @@
         setTimeout(syncVoiceSettingsUI, 0);
       });
     }
-    // 渠道增删后同步
-    if (root.document) {
-      document.addEventListener('chatlite:providers-changed', function () {
-        renderProviderSelect($('voice-asr-provider'), v().asrProviderId);
-        renderProviderSelect($('voice-tts-provider'), v().ttsProviderId);
-      });
-    }
     bind();
     // 首次尽力同步一次（若 DOM 已就绪且设置面板在 DOM 里）
-    if ($('voice-asr-provider')) syncVoiceSettingsUI();
+    if ($('voice-asr-model')) syncVoiceSettingsUI();
+    // v127：语音接口是独立配置，聊天渠道增删与它无关，不再监听 providers-changed
+    if (root.VoiceProvider && typeof root.VoiceProvider.init === 'function') {
+      try { root.VoiceProvider.init(); } catch (e) { console.warn('[voice-settings] VoiceProvider.init', e); }
+    }
   }
 
   // 暴露给 voice.js 用（音色标签、克隆参考音）

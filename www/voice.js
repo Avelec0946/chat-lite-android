@@ -1551,27 +1551,48 @@
   }
 
   // kind: 'asr' | 'tts' | 'brain' → { provider, model, label }
+  //
+  // v127 重要变更：ASR / TTS 只用「语音接口」（settings.voice.voiceProviders），
+  //   **不再复用「接口管理」里的聊天渠道**。
+  //   为什么必须分开：聊天渠道的 baseUrl 指向文本网关（如 token-plan-cn.xiaomimimo.com），
+  //   那个网关只认自己的密钥前缀，拿它发 asr/tts 必然 401 —— 用户实测就是这个报错。
+  //   而且聊天渠道的模型目录里全是文本模型，把 mimo-v2.5-asr 硬塞进去也发不对地址。
   function resolveVoiceProvider(kind) {
     var cfg = voiceCfg();
     if (kind === 'brain') return resolveBrainProvider();
-    var idKey = kind === 'asr' ? 'asrProviderId' : 'ttsProviderId';
+
     var modelKey = kind === 'asr' ? 'asrModel' : 'ttsModel';
-    var wantId = strOf(cfg[idKey]).trim();
     var wantModel = strOf(cfg[modelKey]).trim();
 
-    if (wantId) {
-      var p = findProviderById(wantId);
-      if (!p) throw makeErr('找不到语音渠道（' + kind + '）：请在设置里重新选择', 'voice_provider');
-      if (!p.apiKey) throw makeErr('语音渠道「' + (p.name || p.id) + '」缺少 API 密钥', 'voice_nokey');
-      return { provider: p, model: wantModel || defaultModelFor(kind, p), label: p.name || p.id };
+    // ① 选定的语音接口
+    var vp = pickVoiceProvider();
+    if (vp) {
+      if (!vp.apiKey) {
+        throw makeErr('语音接口「' + (vp.name || vp.id) + '」还没填 API 密钥', 'voice_nokey');
+      }
+      if (!vp.baseUrl) {
+        throw makeErr('语音接口「' + (vp.name || vp.id) + '」还没填接口地址', 'voice_provider');
+      }
+      // 模型优先用接口自己的配置，其次用全局设置里的
+      var own = kind === 'asr' ? vp.asrModel : vp.ttsModel;
+      var model = wantModel || strOf(own).trim() || defaultModelFor(kind, vp);
+      return { provider: vp, model: model, label: vp.name || vp.id };
     }
 
-    // ASR / TTS：内置 MiMo 直连
-    var mm = builtinProvider('mimo');
-    if (!mm.provider.apiKey) {
-      throw makeErr('语音服务缺少 API 密钥：请先添加 MiMo 渠道，或在设置里选择语音渠道', 'voice_nokey');
+    // ② 没有语音接口：明确告诉用户去配，不要偷偷拿聊天渠道顶
+    throw makeErr('还没有配置语音接口：请在「设置 → 语音通话 → 语音接口」里添加一个（填地址和密钥）', 'voice_nokey');
+  }
+
+  // 当前使用的语音接口：voiceProviderId 指定的那个，否则第一个
+  function pickVoiceProvider() {
+    var cfg = voiceCfg();
+    var list = Array.isArray(cfg.voiceProviders) ? cfg.voiceProviders : [];
+    if (!list.length) return null;
+    var wantId = strOf(cfg.voiceProviderId).trim();
+    if (wantId) {
+      for (var i = 0; i < list.length; i++) if (list[i] && list[i].id === wantId) return list[i];
     }
-    return { provider: mm.provider, model: wantModel || defaultModelFor(kind, mm.provider), label: mm.provider.name };
+    return list[0] || null;
   }
 
   function firstModel(p) {
@@ -3448,13 +3469,19 @@
     }, FILLER_DELAY_MS);
   }
 
+  // 自动挂断：v127 起**默认关闭**。
+  //   为什么改：挂机聊天本来就是要一直挂着，45 秒的默认值直接把"长期聊"这件事毁掉 ——
+  //   用户实测反馈「那还怎么长期挂机聊」。现在只有用户自己打开才计时，默认 1 小时。
   function startAutoHangTimer() {
     clearTimeout(_vc.autoHangTimer);
-    var limit = cfgNum('autoHangupSilenceMs', 45000, 5000, 3600000);
+    _vc.autoHangTimer = null;
+    if (!voiceCfg().autoHangup) return;            // 关着就完全不排定时器
+    var limit = cfgNum('autoHangupSilenceMs', 3600000, 5000, 7200000);
     _vc.autoHangTimer = setTimeout(function () {
       if (!_vc.running) return;
+      if (!voiceCfg().autoHangup) return;          // 中途被关掉
       if (_vc.state !== 'listening') { startAutoHangTimer(); return; }
-      toast('太久没说话，已自动挂断', 'info');
+      toast('太久没说话，已自动挂断（可在设置里关掉）', 'info');
       hangup();
     }, limit);
   }
@@ -3747,6 +3774,21 @@
     }
   }
 
+  // 本地静态检查：语音接口填全了没、模型名是不是明显填错了（不联网、不耗额度）
+  function quickVoiceSanity() {
+    var vp = pickVoiceProvider();
+    if (!vp) return '还没有配置语音接口：请在「设置 → 语音通话 → 语音接口」里添加（填地址和密钥）';
+    if (!vp.baseUrl) return '语音接口「' + (vp.name || vp.id) + '」缺接口地址';
+    if (!vp.apiKey) return '语音接口「' + (vp.name || vp.id) + '」缺 API 密钥';
+    var cfg = voiceCfg();
+    var asr = strOf(cfg.asrModel).trim() || strOf(vp.asrModel).trim();
+    var tts = strOf(cfg.ttsModel).trim() || strOf(vp.ttsModel).trim();
+    // 明显填反的情况：识别模型里写着 tts / 合成模型里写着 asr
+    if (asr && /tts|voicedesign|voiceclone/i.test(asr)) return '识别模型填成了合成模型（' + asr + '），请在设置里改回 asr 模型';
+    if (tts && /(^|[-_])asr([-_]|$)/i.test(tts)) return '合成模型填成了识别模型（' + tts + '），请在设置里改回 tts 模型';
+    return null;
+  }
+
   function start() {
     if (_vc.running) return Promise.resolve(true);
     if (!_vc.open) {
@@ -3775,6 +3817,17 @@
     tickTimer();
     var conv = currentConvSafe();
     _session.convId = conv ? conv.id : null;
+
+    // v127：语音接口是独立配置，接通前顺手把「模型名对不对」也确认一遍。
+    //   以前靠"第一次说话才报 401"，用户会以为是自己麦克风坏了。
+    //   这里只做本地检查（不发请求），失败就立刻说清楚是哪个接口、缺什么。
+    var quickErr = quickVoiceSanity();
+    if (quickErr) {
+      _vc.running = false;
+      setState('error', quickErr);
+      toast(quickErr, 'warn');
+      return Promise.resolve(false);
+    }
 
     // 关键：先同步拿到 getUserMedia 的 promise（Android 15 要求手势内触发）
     var capturePromise = null;
@@ -4040,96 +4093,206 @@
   // 注入策略：挂到 [data-group-key="voice"] 的 .setting-group-body 末尾，用现有的
   //   setting-row / setting-select 等类名，样式自动跟随（ui-polish 不用为它写新样式）。
 
+  // v127：微调面板重做。
+  //   旧版是 5 个裸数字输入框，还分成「全局」和「外放/耳机」两套互相干扰。
+  //   用户原话：「这么多设置你让人怎么调？凭感觉一个一个试吗？而且还是手填数值？」
+  //   新的做法：
+  //     · 常用项做成档位滑杆，用户选「感觉」而不是记数字；
+  //     · 其余收进 <details>，默认折叠，想折腾的再展开。
   var TUNING_FIELDS = [
     {
-      key: 'echoGuardMs', label: '防自激窗口（毫秒）', min: 0, max: 1200, step: 50, dflt: 250,
-      hint: 'AI 刚开口这段时间内不判断打断。外放/回声大导致 AI 自己打断自己时调大，建议 350。'
+      key: 'echoGuardMs', label: '防自激窗口', min: 0, max: 1200, step: 50, dflt: 250, unit: '毫秒',
+      hint: 'AI 刚开口这段时间内不判断打断。外放回声大导致 AI 自己打断自己时调大。'
     },
     {
-      key: 'bargeInHoldMs', label: '打断确认时长（毫秒）', min: 80, max: 800, step: 20, dflt: 180,
-      hint: '要连续说这么久才算打断。动不动就被打断（误触发）时调大；觉得抢话不够快时调小。'
+      key: 'bargeInHoldMs', label: '打断确认时长', min: 80, max: 800, step: 20, dflt: 180, unit: '毫秒',
+      hint: '要连续说这么久才算打断。动不动就被打断时调大；觉得抢话不够快时调小。'
     },
     {
-      key: 'bargeInLeakFactor', label: '回漏抑制系数', min: 1.5, max: 10, step: 0.1, dflt: 3.2,
+      key: 'bargeInLeakFactor', label: '回漏抑制系数', min: 1.5, max: 10, step: 0.1, dflt: 3.2, unit: '',
       hint: '打断阈值 = 自播放回漏能量 × 这个系数。外放时 AI 被自己的声音触发，就把这个数调高。'
     },
     {
-      key: 'endpointSilenceMs', label: '说完判定静音（毫秒）', min: 200, max: 3000, step: 50, dflt: 700,
-      hint: '你停下这么久 AI 就认为你说完了。觉得接话太慢调到 550；总被打断话头就调大。'
+      key: 'endpointSilenceMs', label: '说完判定静音', min: 200, max: 3000, step: 50, dflt: 700, unit: '毫秒',
+      hint: '你停下这么久 AI 就认为你说完了。觉得接话太慢调小；总被打断话头就调大。'
     },
     {
-      key: 'minUtteranceMs', label: '最短话语（毫秒）', min: 100, max: 2000, step: 50, dflt: 400,
+      key: 'minUtteranceMs', label: '最短话语', min: 100, max: 2000, step: 50, dflt: 400, unit: '毫秒',
       hint: '短于这个时长的片段直接丢弃，不送识别（防止把咳嗽、关门声送去识别成文字）。'
     }
   ];
 
-  function ensureAdvancedUI() {
-    if (el('voice-advanced-details')) return true;      // 幂等：重复调用不重复插
-    var group = null;
-    try {
-      group = document.querySelector('[data-group-key="voice"]');
-    } catch (e) { group = null; }
-    if (!group) return false;                            // 骨架还没就位：下次再试，绝不抛错
-    var body = group.querySelector('.setting-group-body') || group;
-    var wrap = document.createElement('div');
-    wrap.id = 'voice-advanced-details';
-    var html = '';
-    html += '<div class="setting-divider"></div>';
-    html += '<span class="setting-section-title">真机微调（高级）</span>';
-    html += '<span class="setting-hint">这几项只有在你自己的设备上才调得准。改完立即生效，下一轮通话就用新值。</span>';
-    for (var i = 0; i < TUNING_FIELDS.length; i++) {
-      var f = TUNING_FIELDS[i];
-      html += '<label class="setting-row setting-row-col">' +
-        '<span>' + escapeText(f.label) + '</span>' +
-        '<input type="number" id="voice-tune-' + f.key + '" class="setting-select setting-num" ' +
-        'min="' + f.min + '" max="' + f.max + '" step="' + f.step + '" ' +
-        'placeholder="默认 ' + f.dflt + '">' +
-        '<span class="setting-hint">' + escapeText(f.hint) + '</span>' +
-        '</label>';
+  // 档位滑杆：把「说不清的数字」翻译成「听得懂的描述」。
+  //   每一档带一组具体数值，用户只需选感受，不用记 700 还是 875。
+  var TUNING_DIALS = [
+    {
+      key: 'endpointSilenceMs', label: '接话快慢', lowLabel: '不抢话', highLabel: '秒接',
+      hint: '你停顿多久，它才认为你说完了。往右拨 = 接话更快，但更容易打断你思考。',
+      steps: [
+        { v: 1100, name: '很稳' },
+        { v: 875, name: '偏稳' },
+        { v: 700, name: '均衡' },
+        { v: 550, name: '偏快' },
+        { v: 420, name: '很快' }
+      ]
+    },
+    {
+      key: 'echoGuardMs', label: '抗回声强度', lowLabel: '灵敏', highLabel: '抗回声',
+      hint: '外放时 AI 容易被自己的声音打断。往右拨 = 更不容易自激，但打断也会稍微迟钝。',
+      steps: [
+        { v: 0, name: '关' },
+        { v: 150, name: '弱' },
+        { v: 250, name: '标准' },
+        { v: 400, name: '强' },
+        { v: 600, name: '很强' }
+      ]
+    },
+    {
+      key: 'minUtteranceMs', label: '防误触', lowLabel: '敏感', highLabel: '严格',
+      hint: '多短的声音算「不是说话」。往右拨 = 咳嗽、关门声更不会被当成一句话。',
+      steps: [
+        { v: 200, name: '敏感' },
+        { v: 300, name: '偏敏感' },
+        { v: 400, name: '标准' },
+        { v: 600, name: '偏严格' },
+        { v: 900, name: '严格' }
+      ]
     }
-    html += '<button id="btn-voice-tune-reset" class="btn btn-small" style="background:var(--bg3);color:var(--text)">恢复默认</button>';
-    wrap.innerHTML = html;
-    body.appendChild(wrap);
+  ];
 
-    // 回填 + 绑定（改动即时写内存并落盘，与 voice-settings.js 的口径一致）
+  function ensureAdvancedUI() {
+    if (el('voice-dials')) return true;                  // 幂等
+    var group = null;
+    try { group = document.querySelector('[data-group-key="voice"]'); } catch (e) { group = null; }
+    if (!group) return false;
+    var body = group.querySelector('.setting-group-body') || group;
+
+    // ---- 第一层：三档滑杆（常用项，永远可见）----
+    var dials = document.createElement('div');
+    dials.id = 'voice-dials';
+    var h = '';
+    h += '<div class="setting-divider"></div>';
+    h += '<span class="setting-section-title">通话手感</span>';
+    h += '<span class="setting-hint">直接选感受就行，不用记数字。改完下一轮通话立即生效。</span>';
+    for (var i = 0; i < TUNING_DIALS.length; i++) {
+      var d = TUNING_DIALS[i];
+      h += '<div class="voice-dial" data-key="' + d.key + '">';
+      h += '<div class="voice-dial-head"><span class="voice-dial-label">' + escapeText(d.label) + '</span>';
+      h += '<span class="voice-dial-value" id="voice-dial-val-' + d.key + '"></span></div>';
+      h += '<input type="range" class="voice-dial-range" id="voice-dial-' + d.key + '" ';
+      h += 'min="0" max="' + (d.steps.length - 1) + '" step="1" value="2">';
+      h += '<div class="voice-dial-scale"><span>' + escapeText(d.lowLabel) + '</span>';
+      h += '<span>' + escapeText(d.highLabel) + '</span></div>';
+      h += '<span class="setting-hint">' + escapeText(d.hint) + '</span>';
+      h += '</div>';
+    }
+    dials.innerHTML = h;
+    body.appendChild(dials);
+
+    // ---- 第二层：高级项，默认折叠 ----
+    var adv = document.createElement('details');
+    adv.id = 'voice-advanced-details';
+    adv.className = 'voice-adv';
+    var ah = '';
+    ah += '<summary class="voice-adv-summary">高级参数（一般不用动）</summary>';
+    ah += '<div class="voice-adv-body">';
+    ah += '<span class="setting-hint">这些是滑杆背后的具体数值。想精确控制时再展开，平时留空即可。</span>';
     for (var j = 0; j < TUNING_FIELDS.length; j++) {
+      var f = TUNING_FIELDS[j];
+      ah += '<label class="setting-row setting-row-col">';
+      ah += '<span>' + escapeText(f.label) + (f.unit ? '（' + escapeText(f.unit) + '）' : '') + '</span>';
+      ah += '<input type="number" id="voice-tune-' + f.key + '" class="setting-select setting-num" ';
+      ah += 'min="' + f.min + '" max="' + f.max + '" step="' + f.step + '" placeholder="默认 ' + f.dflt + '">';
+      ah += '<span class="setting-hint">' + escapeText(f.hint) + '</span>';
+      ah += '</label>';
+    }
+    ah += '<button id="btn-voice-tune-reset" class="btn btn-small" style="background:var(--bg3);color:var(--text)">恢复默认</button>';
+    ah += '</div>';
+    adv.innerHTML = ah;
+    body.appendChild(adv);
+
+    // 滑杆绑定：位置 → 档位值 → settings
+    for (var k = 0; k < TUNING_DIALS.length; k++) {
+      (function (dial) {
+        var range = el('voice-dial-' + dial.key);
+        if (!range) return;
+        var apply = function (commit) {
+          var idx = Math.max(0, Math.min(dial.steps.length - 1, parseInt(range.value, 10) || 0));
+          var step = dial.steps[idx];
+          voiceCfg()[dial.key] = step.v;
+          var valEl = el('voice-dial-val-' + dial.key);
+          if (valEl) valEl.textContent = step.name;
+          if (commit) saveSettingsSafe();
+        };
+        range.addEventListener('input', function () { apply(false); });
+        range.addEventListener('change', function () { apply(true); });
+      })(TUNING_DIALS[k]);
+    }
+
+    // 高级输入框绑定（与滑杆双向一致：手填了就以手填为准）
+    for (var m = 0; m < TUNING_FIELDS.length; m++) {
       (function (field) {
         var input = el('voice-tune-' + field.key);
         if (!input) return;
-        var cur = voiceCfg()[field.key];
-        input.value = (cur === undefined || cur === null || cur === '') ? '' : String(cur);
         var commit = function () {
           var raw = input.value.trim();
           if (raw === '') {
-            delete voiceCfg()[field.key];          // 清空 = 回到内置默认
+            delete voiceCfg()[field.key];
             saveSettingsSafe();
+            syncDials();
             return;
           }
           var n = num(raw, field.dflt);
           n = Math.max(field.min, Math.min(field.max, n));
           voiceCfg()[field.key] = n;
-          input.value = String(n);                  // 回写夹紧后的值：用户能看见自己填的离谱值被纠正
+          input.value = String(n);
           saveSettingsSafe();
+          syncDials();
         };
         input.addEventListener('change', commit);
         input.addEventListener('blur', commit);
-      })(TUNING_FIELDS[j]);
+      })(TUNING_FIELDS[m]);
     }
+
     var resetBtn = el('btn-voice-tune-reset');
     if (resetBtn) {
       resetBtn.addEventListener('click', function () {
         var cfg = voiceCfg();
-        for (var k = 0; k < TUNING_FIELDS.length; k++) {
-          delete cfg[TUNING_FIELDS[k].key];
-          var inp = el('voice-tune-' + TUNING_FIELDS[k].key);
+        for (var q = 0; q < TUNING_FIELDS.length; q++) {
+          delete cfg[TUNING_FIELDS[q].key];
+          var inp = el('voice-tune-' + TUNING_FIELDS[q].key);
           if (inp) inp.value = '';
         }
         saveSettingsSafe();
-        toast('已恢复默认调节值', 'info');
+        syncDials();
+        toast('已恢复默认', 'info');
       });
     }
-    log('高级设置区已注入');
+    syncDials();
+    log('通话手感面板已注入');
     return true;
+  }
+
+  // 把当前设置值反映到滑杆位置（最接近的那一档）
+  function syncDials() {
+    for (var i = 0; i < TUNING_DIALS.length; i++) {
+      var d = TUNING_DIALS[i];
+      var range = el('voice-dial-' + d.key);
+      if (!range) continue;
+      var cur = voiceCfg()[d.key];
+      var curNum = num(cur, NaN);
+      var best = 2;
+      if (isFinite(curNum)) {
+        var bestDiff = Infinity;
+        for (var j = 0; j < d.steps.length; j++) {
+          var diff = Math.abs(d.steps[j].v - curNum);
+          if (diff < bestDiff) { bestDiff = diff; best = j; }
+        }
+      }
+      range.value = String(best);
+      var valEl = el('voice-dial-val-' + d.key);
+      if (valEl) valEl.textContent = d.steps[best].name;
+    }
   }
 
   function saveSettingsSafe() {
@@ -4157,6 +4320,7 @@
       var cur = voiceCfg()[f.key];
       input.value = (cur === undefined || cur === null || cur === '') ? '' : String(cur);
     }
+    syncDials();
   }
 
   // =====================================================================================

@@ -152,7 +152,14 @@ function defaultSettings() {
 function defaultVoiceSettings() {
   return {
     enabled: true,
-    asrProviderId: '',      // 空 = 用内置 MiMo 兜底
+    // v127：语音接口独立配置（voiceProviders），与「接口管理」里的聊天渠道彻底分开。
+    //   为什么要独立：聊天渠道是给文本模型用的，语音要的是 asr/tts 专用模型，
+    //   而且像 MiMo Token Plan 这类网关地址（token-plan-cn.xiaomimimo.com）只认它自己的
+    //   密钥前缀（tp-），拿聊天渠道的地址去发语音必然 401。v125/v126 复用了聊天渠道，
+    //   用户实测就是「识别失败 HTTP 401: Invalid API Key」。
+    voiceProviders: [],      // [{id,name,baseUrl,endpointPath,apiKey,models[],authType,...}]
+    voiceProviderId: '',     // 当前使用的语音接口
+    asrProviderId: '',      // 兼容旧字段：指向 voiceProviders 的 id
     asrModel: 'mimo-v2.5-asr',
     ttsProviderId: '',
     ttsModel: 'mimo-v2.5-tts',
@@ -170,7 +177,10 @@ function defaultVoiceSettings() {
     bargeInThreshold: 0.35,
     showTranscript: true,
     showSignals: true,
-    autoHangupSilenceMs: 45000,
+    // v127：自动挂断。默认关闭 —— 挂机聊天本来就该一直挂着，
+    //   45 秒默认值会直接把"长期挂着聊"这件事毁掉（用户实测反馈）。
+    autoHangup: false,
+    autoHangupSilenceMs: 3600000,   // 开了之后默认 1 小时
     ttsFormat: 'pcm16',
     // v125 修（QA 发现）：契约 §3.1 里写了 rate 但这里漏了，
     //   而 migrateVoiceSettings 只保留 defaultVoiceSettings() 里有的键 ——
@@ -267,7 +277,8 @@ function migrateVoiceSettings(v) {
   out.bargeInThreshold = clampNum(out.bargeInThreshold, 0.05, 1, def.bargeInThreshold);
   out.endpointSilenceMs = clampNum(out.endpointSilenceMs, 300, 3000, def.endpointSilenceMs);
   out.minUtteranceMs = clampNum(out.minUtteranceMs, 200, 3000, def.minUtteranceMs);
-  out.autoHangupSilenceMs = clampNum(out.autoHangupSilenceMs, 5000, 600000, def.autoHangupSilenceMs);
+  out.autoHangup = !!out.autoHangup;
+  out.autoHangupSilenceMs = clampNum(out.autoHangupSilenceMs, 5000, 7200000, def.autoHangupSilenceMs);
   // v126 新增字段的收敛
   out.timestamps = !!out.timestamps;
   out.rate = clampNum(out.rate, 0.6, 1.6, def.rate);
@@ -276,10 +287,16 @@ function migrateVoiceSettings(v) {
     out.routeMode = def.routeMode;
   }
   out.tuningPresets = normalizeTuningPresets(out.tuningPresets);
-  ['asrProviderId','asrModel','ttsProviderId','ttsModel',
+  out.voiceProviders = normalizeVoiceProviders(out.voiceProviders);
+  ['voiceProviderId','asrProviderId','asrModel','ttsProviderId','ttsModel',
    'voiceId','voiceDesign','cloneRefName','personaId','customPersona'].forEach(function(k) {
     if (typeof out[k] !== 'string') out[k] = def[k];
   });
+  // voiceProviderId 指向不存在的接口时清空（不要留一个指向空气的 id，
+  //   否则运行时每次解析都要走一遍"找不到"的分支）
+  if (out.voiceProviderId && !out.voiceProviders.some(function (p) { return p.id === out.voiceProviderId; })) {
+    out.voiceProviderId = out.voiceProviders.length ? out.voiceProviders[0].id : '';
+  }
   // 模型名是必填项：空串会让上游报错，回落到默认
   if (!out.asrModel.trim()) out.asrModel = def.asrModel;
   if (!out.ttsModel.trim()) out.ttsModel = def.ttsModel;
@@ -312,6 +329,46 @@ function normalizeTuningPresets(p) {
       out[side][k] = Math.max(r[0], Math.min(r[1], n));
     }
   });
+  return out;
+}
+
+// v127：语音接口（独立于聊天渠道）的归一化。
+//   和生图接口同一个思路：地址、密钥、模型目录都是语音自己的事，
+//   不复用聊天渠道 —— 聊天渠道的 baseUrl 指向的是文本网关，拿它发 asr/tts 会 401。
+function normalizeVoiceProviders(list) {
+  if (!Array.isArray(list)) return [];
+  var out = [];
+  for (var i = 0; i < list.length; i++) {
+    var p = list[i];
+    if (!p || typeof p !== 'object') continue;
+    var models = [];
+    if (Array.isArray(p.models)) {
+      for (var j = 0; j < p.models.length; j++) {
+        var m = p.models[j];
+        var mid = typeof m === 'string' ? m : (m && (m.id || m.name));
+        if (mid && typeof mid === 'string' && mid.trim()) models.push({ id: mid.trim() });
+      }
+    }
+    var base = typeof p.baseUrl === 'string' ? p.baseUrl.trim() : '';
+    // 地址末尾的斜杠去掉，避免拼接出 //v1/chat/completions
+    base = base.replace(/\/+$/, '');
+    out.push({
+      id: (typeof p.id === 'string' && p.id) ? p.id : ('vp_' + Math.random().toString(36).slice(2, 10)),
+      name: (typeof p.name === 'string' && p.name.trim()) ? p.name.trim() : '语音接口',
+      baseUrl: base,
+      endpointPath: (typeof p.endpointPath === 'string' && p.endpointPath.trim()) ? p.endpointPath.trim() : '/v1/chat/completions',
+      apiKey: typeof p.apiKey === 'string' ? p.apiKey.trim() : '',
+      authType: p.authType === 'x-api-key' ? 'x-api-key' : 'bearer',
+      authHeader: (typeof p.authHeader === 'string' && p.authHeader) ? p.authHeader : 'Authorization',
+      authPrefix: typeof p.authPrefix === 'string' ? p.authPrefix : 'Bearer ',
+      extraHeaders: (p.extraHeaders && typeof p.extraHeaders === 'object') ? p.extraHeaders : {},
+      extraQuery: (p.extraQuery && typeof p.extraQuery === 'object') ? p.extraQuery : {},
+      models: models,
+      asrModel: (typeof p.asrModel === 'string' && p.asrModel.trim()) ? p.asrModel.trim() : '',
+      ttsModel: (typeof p.ttsModel === 'string' && p.ttsModel.trim()) ? p.ttsModel.trim() : '',
+      createdAt: typeof p.createdAt === 'number' ? p.createdAt : Date.now()
+    });
+  }
   return out;
 }
 

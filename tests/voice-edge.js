@@ -195,8 +195,9 @@ async function main() {
     add('B8.1 反复开 5 次：#voice-advanced-details 恒为 1', counts.length === 5 && counts.every(function (v) { return v === 1; }), mk(counts));
     add('B8.2 语音分组不重复', (c.groupCounts || []).every(function (v) { return v === 1; }), mk(c.groupCounts));
     add('B8.3 第 6 次（点设置按钮）仍为 1', c.afterBtn === 1, 'afterBtn=' + c.afterBtn);
-    // v126：全局 5 个 + 外放预设 5 个 + 耳机预设 5 个 = 15。断言"恰好 15"仍能抓重复注入。
-    add('B8.4 微调输入框不重复（5 全局 + 5 外放 + 5 耳机）', c.tuneInputs === 15, 'tuneInputs=' + c.tuneInputs);
+    // v127：双预设两栏已删除（用户反对 15 个手填框），高级参数收进折叠区，只剩 5 个。
+    //   断言"恰好 5"仍能抓重复注入。
+    add('B8.4 高级参数输入框不重复（折叠区内 5 个）', c.tuneInputs === 5, 'tuneInputs=' + c.tuneInputs);
     add('B8.5 恢复默认按钮不重复', c.resetBtns === 1, 'resetBtns=' + c.resetBtns);
   }
 
@@ -278,7 +279,8 @@ async function main() {
       dflt.voiceId === 'Mia' && dflt.personaId === 'warm' && dflt.enabled === true &&
       dflt.sensitivity === 0.5 && dflt.endpointSilenceMs === 700 && dflt.minUtteranceMs === 400 &&
       dflt.showTranscript === true && dflt.showSignals === true &&
-      dflt.autoHangupSilenceMs === 45000 && dflt.ttsFormat === 'pcm16';
+      dflt.autoHangupSilenceMs === 3600000 && dflt.ttsFormat === 'pcm16' &&
+      dflt.autoHangup === false;   // v127：默认不自动挂断
     add9('B9.4 迁移出的是契约 §3.1 的默认值', okDflt, mk(dflt));
     // v126：迁移后 start() 不再"无脑成功"。没配语音渠道时它必须返回 false 并说明原因，
     //   而不是进 listening 让用户以为接通了。这里钉住"失败要有可读理由"。

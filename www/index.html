@@ -559,14 +559,52 @@
         <details class="setting-group setting-group-collapsible" data-group-key="voice">
           <summary class="setting-group-summary">语音通话 <span class="setting-scope">全局·所有会话可用</span></summary>
           <div class="setting-group-body">
-          <span class="setting-hint">通话用三路模型：听（语音识别）、想（对话大脑）、说（语音合成）。识别与合成可以各自指向不同渠道；大脑直接跟随当前会话。密钥与地址在「接口管理」里维护，这里只做选择。</span>
+          <span class="setting-hint">通话用三路模型：听（语音识别）、想（对话大脑）、说（语音合成）。识别与合成走下面独立的「语音接口」，<b>和「接口管理」里的聊天渠道完全无关</b> —— 聊天渠道是给文本模型用的，拿它发语音会报 401。大脑直接跟随当前会话。</span>
+
+          <div class="setting-divider"></div>
+          <span class="setting-section-title">语音接口（识别 + 合成）</span>
+          <span class="setting-hint">语音要有自己的地址和密钥。填一次就行，识别和合成共用。可以加多个，随时切换。</span>
+          <button id="btn-add-voice-provider" class="btn btn-small" style="margin-top:8px">+ 添加语音接口</button>
+          <div id="voice-provider-list" class="provider-list" style="margin-top:8px"></div>
+
+          <div id="voice-provider-editor" class="image-provider-editor" style="display:none">
+            <label class="card-field"><span>名称</span>
+              <input id="vp-name" class="card-input" type="text" placeholder="如：MiMo 官方">
+            </label>
+            <label class="card-field"><span>预设</span>
+              <select id="vp-preset" class="card-input">
+                <option value="">手动填写</option>
+                <option value="mimo">MiMo 官方（api.xiaomimimo.com）</option>
+              </select>
+            </label>
+            <label class="card-field"><span>接口地址</span>
+              <input id="vp-base-url" class="card-input" type="text" placeholder="https://api.xiaomimimo.com">
+            </label>
+            <label class="card-field"><span>路径</span>
+              <input id="vp-endpoint" class="card-input" type="text" placeholder="/v1/chat/completions">
+            </label>
+            <label class="card-field"><span>API 密钥</span>
+              <input id="vp-api-key" class="card-input" type="password" placeholder="sk-...">
+            </label>
+            <label class="card-field"><span>识别模型</span>
+              <input id="vp-asr-model" class="card-input" type="text" placeholder="mimo-v2.5-asr">
+            </label>
+            <label class="card-field"><span>合成模型</span>
+              <input id="vp-tts-model" class="card-input" type="text" placeholder="mimo-v2.5-tts">
+            </label>
+            <div class="card-import-row">
+              <button id="btn-save-voice-provider" class="btn btn-small">保存</button>
+              <button id="btn-cancel-voice-provider" class="btn btn-small" style="background:var(--bg3);color:var(--text)">取消</button>
+            </div>
+          </div>
+
+          <label class="setting-row setting-row-col" id="voice-provider-pick-row">
+            <span>当前使用</span>
+            <select id="voice-provider-pick" class="setting-select"></select>
+          </label>
 
           <div class="setting-divider"></div>
           <span class="setting-section-title">听 · 语音识别（ASR）</span>
-          <label class="setting-row setting-row-col">
-            <span>识别渠道</span>
-            <select id="voice-asr-provider" class="setting-select"></select>
-          </label>
           <label class="setting-row setting-row-col">
             <span>识别模型</span>
             <input id="voice-asr-model" class="setting-select" type="text" placeholder="mimo-v2.5-asr" list="voice-asr-model-suggestions">
@@ -588,10 +626,6 @@
 
           <div class="setting-divider"></div>
           <span class="setting-section-title">说 · 语音合成（TTS）</span>
-          <label class="setting-row setting-row-col">
-            <span>合成渠道</span>
-            <select id="voice-tts-provider" class="setting-select"></select>
-          </label>
           <label class="setting-row setting-row-col">
             <span>合成模型</span>
             <input id="voice-tts-model" class="setting-select" type="text" placeholder="mimo-v2.5-tts" list="voice-tts-model-suggestions">
@@ -629,11 +663,19 @@
             <span id="voice-sensitivity-value" style="font-size:12px;color:var(--text2);min-width:36px;text-align:right">0.50</span>
           </label>
           <span class="setting-hint">调高更容易被识别为「在说话」，嘈杂环境建议调低。</span>
+          <!-- v127：「说完判定（毫秒）」裸输入已移除，改由下面的「接话快慢」滑杆控制 -->
           <label class="setting-row">
-            <span>说完判定（毫秒）</span>
-            <input type="number" id="voice-endpoint-ms" class="setting-select setting-num" min="300" max="3000" step="50" placeholder="默认 700">
+            <span>长时间没人说话自动挂断</span>
+            <label class="toggle-switch">
+              <input type="checkbox" id="voice-auto-hangup">
+              <span class="toggle-slider"></span>
+            </label>
           </label>
-          <span class="setting-hint">停顿多久算「你说完了」。数字小接话快但容易误抢，数字大更稳但会冷场。默认 700。</span>
+          <label class="setting-row">
+            <span>挂断等待（分钟）</span>
+            <input type="number" id="voice-auto-hangup-min" class="setting-select setting-num" min="1" max="720" step="1" placeholder="默认 60" disabled>
+          </label>
+          <span class="setting-hint">默认关闭 —— 挂着聊天就该一直挂着。打开后默认 1 小时没人说话才挂断，可以改。</span>
           <label class="setting-row">
             <span>显示实时字幕</span>
             <label class="toggle-switch">
@@ -691,65 +733,9 @@
           </label>
           <span class="setting-hint">自动 = 插耳机走耳机、拔掉走外放；钉死某一项适合外放回声大、或耳机一直没被识别出来时。实际路由读的是原生回报，浏览器里没有这一层。</span>
 
-          <div class="setting-divider"></div>
-          <span class="setting-section-title">外放 / 耳机 · 分别微调</span>
-          <span class="setting-hint">耳机和外放可以分别调，也可以复制成一样。留空 = 用内置默认；这里只存你改过的项，改完立即生效。下面「真机微调（高级）」是两栏都没填时兜底的全局值。</span>
-          <div class="voice-preset-grid">
-            <div class="voice-preset-col">
-              <div class="voice-preset-head">
-                <span class="voice-preset-title">外放</span>
-                <button type="button" id="btn-voice-tune-copy-speaker" class="btn btn-small">复制到耳机</button>
-              </div>
-              <label class="setting-row setting-row-col">
-                <span>防自激窗口（毫秒）</span>
-                <input type="number" id="voice-tune-speaker-echoGuardMs" class="setting-select setting-num" min="0" max="1200" step="50" placeholder="默认 250">
-              </label>
-              <label class="setting-row setting-row-col">
-                <span>打断确认时长（毫秒）</span>
-                <input type="number" id="voice-tune-speaker-bargeInHoldMs" class="setting-select setting-num" min="80" max="800" step="20" placeholder="默认 180">
-              </label>
-              <label class="setting-row setting-row-col">
-                <span>回漏抑制系数</span>
-                <input type="number" id="voice-tune-speaker-bargeInLeakFactor" class="setting-select setting-num" min="1.5" max="10" step="0.1" placeholder="默认 3.2">
-              </label>
-              <label class="setting-row setting-row-col">
-                <span>说完判定静音（毫秒）</span>
-                <input type="number" id="voice-tune-speaker-endpointSilenceMs" class="setting-select setting-num" min="200" max="3000" step="50" placeholder="默认 700">
-              </label>
-              <label class="setting-row setting-row-col">
-                <span>最短话语（毫秒）</span>
-                <input type="number" id="voice-tune-speaker-minUtteranceMs" class="setting-select setting-num" min="100" max="2000" step="50" placeholder="默认 400">
-              </label>
-            </div>
-            <div class="voice-preset-col">
-              <div class="voice-preset-head">
-                <span class="voice-preset-title">耳机</span>
-                <button type="button" id="btn-voice-tune-copy-headset" class="btn btn-small">复制到外放</button>
-              </div>
-              <label class="setting-row setting-row-col">
-                <span>防自激窗口（毫秒）</span>
-                <input type="number" id="voice-tune-headset-echoGuardMs" class="setting-select setting-num" min="0" max="1200" step="50" placeholder="默认 250">
-              </label>
-              <label class="setting-row setting-row-col">
-                <span>打断确认时长（毫秒）</span>
-                <input type="number" id="voice-tune-headset-bargeInHoldMs" class="setting-select setting-num" min="80" max="800" step="20" placeholder="默认 180">
-              </label>
-              <label class="setting-row setting-row-col">
-                <span>回漏抑制系数</span>
-                <input type="number" id="voice-tune-headset-bargeInLeakFactor" class="setting-select setting-num" min="1.5" max="10" step="0.1" placeholder="默认 3.2">
-              </label>
-              <label class="setting-row setting-row-col">
-                <span>说完判定静音（毫秒）</span>
-                <input type="number" id="voice-tune-headset-endpointSilenceMs" class="setting-select setting-num" min="200" max="3000" step="50" placeholder="默认 700">
-              </label>
-              <label class="setting-row setting-row-col">
-                <span>最短话语（毫秒）</span>
-                <input type="number" id="voice-tune-headset-minUtteranceMs" class="setting-select setting-num" min="100" max="2000" step="50" placeholder="默认 400">
-              </label>
-            </div>
-          </div>
-          <span class="setting-hint">防自激窗口 = AI 刚开口这段时间内不判打断（外放回声大时调大）；打断确认时长 = 连续说这么久才算打断；回漏抑制系数 = 打断阈值相对回漏能量的倍数；说完判定静音 = 停多久算说完；最短话语 = 短于这个时长不送识别。</span>
-
+          <!-- v127：双预设两栏已移除。15 个手填输入框是毛坯房，用户明确反对。
+               现在改为 voice.js 注入的三档滑杆（voice-dials）+ 折叠的高级参数，
+               滑杆背后直接写 settings.voice 的同名字段，不再有「全局/预设」两套互相干扰。 -->
           <div class="setting-divider"></div>
           <div class="card-import-row">
             <button id="btn-voice-test" class="btn btn-small">测试语音链路</button>
@@ -860,7 +846,7 @@
 <script src="vendor/katex/katex.min.js?v=116"></script>
 <!-- LaTeX 渲染层：须在 katex.min.js 之后、chat.js 之前加载 -->
 <script src="latex.js?v=119"></script>
-<script src="db.js?v=126"></script>
+<script src="db.js?v=127"></script>
 <script src="haptics.js?v=115"></script>
 <script src="providers.js?v=102"></script>
 <script src="image-gen.js?v=124"></script>
@@ -870,8 +856,10 @@
 <script src="gesture-helpers.js?v=102"></script>
 <script src="app.js?v=125"></script>
 <!-- v125: 语音通话 —— voice-director 是纯函数层（无 DOM/无网络），voice.js 是运行时 -->
+<!-- v127: voice-provider 管独立的语音接口（地址+密钥+模型），与「接口管理」的聊天渠道无关 -->
 <script src="voice-director.js?v=126"></script>
-<script src="voice-settings.js?v=126"></script>
-<script src="voice.js?v=126"></script>
+<script src="voice-provider.js?v=127"></script>
+<script src="voice-settings.js?v=127"></script>
+<script src="voice.js?v=127"></script>
 </body>
 </html>

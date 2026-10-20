@@ -1,5 +1,8 @@
-// v125 e2e：在页面里配置 MiMo / DeepSeek 渠道 + 语音设置
+// v127 e2e：配置「语音接口」（独立于聊天渠道）+ 会话大脑
 // 由 tests/voice-e2e-page.js 通过 ctx.ev() 执行；key 来自 window.__e2eKeys（node 侧注入，不落盘）
+//
+// v127 变更：语音不再复用「接口管理」里的聊天渠道，改为独立的 settings.voice.voiceProviders。
+//   e2e 也必须按新结构配，否则 start() 会在预检阶段就失败（这正是用户遇到的 401 的同类问题）。
 (function () {
   var K = window.__e2eKeys || {};
   var mk = function (id, name, tpl, base, key, models) {
@@ -7,20 +10,33 @@
       apiKey: key, authType: 'bearer', authHeader: 'Authorization', authPrefix: 'Bearer ',
       extraHeaders: {}, extraQuery: {}, models: models || [], features: { supportsStreaming: true } };
   };
-  state.providers = (state.providers || []).filter(function (x) { return x.id !== 'e2e-mimo' && x.id !== 'e2e-ds'; });
-  state.providers.push(mk('e2e-mimo', 'E2E MiMo', 'openai', 'https://api.xiaomimimo.com', K.mimo,
-    [{ id: 'mimo-v2.5-tts' }, { id: 'mimo-v2.5-asr' }]));
+
+  // 聊天渠道（只用于"大脑"，跟随会话）
+  state.providers = (state.providers || []).filter(function (x) { return x.id !== 'e2e-ds'; });
   state.providers.push(mk('e2e-ds', 'E2E DeepSeek', 'deepseek', 'https://api.deepseek.com', K.ds,
     [{ id: 'deepseek-chat' }]));
+
+  // 语音接口（独立配置：地址 + 密钥 + 模型）
   var v = settings.voice = settings.voice || {};
-  v.asrProviderId = 'e2e-mimo';
-  v.ttsProviderId = 'e2e-mimo';
+  v.voiceProviders = [{
+    id: 'e2e-voice',
+    name: 'E2E MiMo 官方',
+    baseUrl: 'https://api.xiaomimimo.com',
+    endpointPath: '/v1/chat/completions',
+    apiKey: K.mimo,
+    authType: 'bearer', authHeader: 'Authorization', authPrefix: 'Bearer ',
+    extraHeaders: {}, extraQuery: {},
+    models: [{ id: 'mimo-v2.5-asr' }, { id: 'mimo-v2.5-tts' }],
+    asrModel: 'mimo-v2.5-asr',
+    ttsModel: 'mimo-v2.5-tts'
+  }];
+  v.voiceProviderId = 'e2e-voice';
   v.asrModel = 'mimo-v2.5-asr';
   v.ttsModel = 'mimo-v2.5-tts';
-  v.brainProviderId = 'e2e-ds';
-  v.brainModel = 'deepseek-chat';
   v.voiceId = 'Mia';
   v.minUtteranceMs = 400;
   v.endpointSilenceMs = 700;
-  return JSON.stringify({ providers: (state.providers || []).map(function (p) { return p.id; }) });
+  v.autoHangup = false;          // 挂机测试不能被自动挂断打断
+  return JSON.stringify({ providers: (state.providers || []).map(function (p) { return p.id; }),
+    voiceProviders: v.voiceProviders.length });
 })()

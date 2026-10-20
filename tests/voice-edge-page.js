@@ -53,7 +53,28 @@ module.exports = async (ctx) => {
     '    });',
     '    return JSON.stringify(v);',
     '  },',
-    '  mkProvider: function (id, name, base, key) {',
+    // v127：语音接口是独立配置，测试也必须按新结构配（不再复用聊天渠道）
+  '  setVoiceProvider: function (opt) {',
+  '    opt = opt || {};',
+  '    var v = settings.voice;',
+  '    if (opt.clear) { v.voiceProviders = []; v.voiceProviderId = ""; return "cleared"; }',
+  '    var p = {',
+  '      id: opt.id || "qa-voice",',
+  '      name: opt.name || "QA 语音接口",',
+  '      baseUrl: opt.baseUrl || "https://api.xiaomimimo.com",',
+  '      endpointPath: "/v1/chat/completions",',
+  '      apiKey: opt.apiKey === undefined ? "sk-qa-placeholder" : opt.apiKey,',
+  '      authType: "bearer", authHeader: "Authorization", authPrefix: "Bearer ",',
+  '      extraHeaders: {}, extraQuery: {},',
+  '      models: [{ id: "mimo-v2.5-asr" }, { id: "mimo-v2.5-tts" }],',
+  '      asrModel: opt.asrModel || "mimo-v2.5-asr",',
+  '      ttsModel: opt.ttsModel || "mimo-v2.5-tts"',
+  '    };',
+  '    v.voiceProviders = [p];',
+  '    v.voiceProviderId = p.id;',
+  '    return JSON.stringify(v.voiceProviders);',
+  '  },',
+  '  mkProvider: function (id, name, base, key) {',
     '    return { id: id, name: name, template: "openai", baseUrl: base, endpointPath: "/v1/chat/completions",',
     '      apiKey: key, authType: "bearer", authHeader: "Authorization", authPrefix: "Bearer ",',
     '      extraHeaders: {}, extraQuery: {}, models: [], features: { supportsStreaming: true } };',
@@ -99,7 +120,8 @@ module.exports = async (ctx) => {
       'window.__savedProviders = (state.providers||[]).slice();',
       'window.__savedApiKey = settings.apiKey;',
       'window.__savedConvProv = null;',
-      'window.__h.setVoice({ asrProviderId:"", ttsProviderId:"", brainProviderId:"", brainModel:"" });',
+      'window.__h.setVoice({ asrModel:"mimo-v2.5-asr", ttsModel:"mimo-v2.5-tts" });',
+      'window.__h.setVoiceProvider({ clear: true });',   // v127：清空独立语音接口
       'state.providers = (state.providers||[]).filter(function(p){',
       '  return !/mimo|xiaomi|小米|deepseek|深度求索/i.test((p.name||"")+" "+(p.baseUrl||"")); });',
       'settings.apiKey = "";',
@@ -144,9 +166,10 @@ module.exports = async (ctx) => {
   out.cases.b2 = await (async () => {
     await ev('window.__h.reset()');
     await ev([
-      'window.__h.setVoice({ asrProviderId:"bad-mimo", ttsProviderId:"bad-mimo", brainProviderId:"e2e-ds", brainModel:"deepseek-chat" });',
-      'state.providers = (state.providers||[]).filter(function(p){return p.id!=="bad-mimo";});',
-      'state.providers.push(window.__h.mkProvider("bad-mimo","Bad MiMo","https://api.xiaomimimo.com","sk-invalid-key-for-qa-000000"));',
+      // v127：坏 key 放进「语音接口」，不再是聊天渠道
+      'window.__h.setVoiceProvider({ id:"bad-voice", name:"Bad Voice", baseUrl:"https://api.xiaomimimo.com", apiKey:"sk-invalid-key-for-qa-000000" });',
+      'var c0 = state.conversations.find(function(x){return x.id===state.currentId;});',
+      'if (c0) { c0.providerId = "e2e-ds"; c0.model = "deepseek-chat"; }',
       '1'
     ].join('\n'));
     const r = await ev([
@@ -164,7 +187,7 @@ module.exports = async (ctx) => {
       '    metrics: window.VoiceCall.getMetrics() });',
       '})()'
     ].join('\n'));
-    await ev('state.providers = (state.providers||[]).filter(function(p){return p.id!=="bad-mimo";}); window.__h.reset(); 1');
+    await ev('window.__h.reset(); 1');
     await ev(read('voice-e2e-setup.js'));
     return jp(r);
   })();
@@ -172,7 +195,9 @@ module.exports = async (ctx) => {
   // ---------------------------------------------------------------- B3 模型名不存在
   out.cases.b3 = await (async () => {
     await ev('window.__h.reset()');
-    await ev('window.__h.setVoice({ asrProviderId:"e2e-mimo", ttsProviderId:"e2e-mimo", asrModel:"mimo-not-exist-asr", ttsModel:"mimo-v2.5-tts", brainProviderId:"e2e-ds", brainModel:"deepseek-chat" })');
+    // v127：模型名写错 —— 语音接口照常配好，只是 asr 模型是不存在的
+    await ev('window.__h.setVoiceProvider({ id:"e2e-mimo", name:"E2E MiMo", baseUrl:"https://api.xiaomimimo.com", asrModel:"mimo-not-exist-asr", ttsModel:"mimo-v2.5-tts" })');
+    await ev('var c3 = state.conversations.find(function(x){return x.id===state.currentId;}); if (c3) { c3.providerId = "e2e-ds"; c3.model = "deepseek-chat"; } 1');
     const r = await ev([
       '(async function(){',
       '  var ok = await window.VoiceCall.start();',
