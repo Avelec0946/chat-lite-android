@@ -211,6 +211,10 @@ function saveSettings() {
       if (lite.dataUrl) lite.dataUrl = null;
       if (lite.referenceImages) lite.referenceImages = null;
       if (lite.thumbnailDataUrl) lite.thumbnailDataUrl = null;
+      // v124: v123 新增的缩略图内存副本。**只在有文件版时**剥离 ——
+      //   APK 模式靠 thumbName 读盘、不需要这段 base64；浏览器模式没有 Filesystem，
+      //   剥了就等于永远没有缩略图，所以保留。
+      if (lite.thumbName && lite.thumbDataUrl) lite.thumbDataUrl = null;
       return lite;
     });
   }

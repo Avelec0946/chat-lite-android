@@ -1168,4 +1168,31 @@ image: <reference.png Blob>
 
 > 本次含 Capacitor 专属原生插件（`ChatStreamPlugin` + MainActivity 注册），**原生部分不推主仓库**；`chat.js` / `db.js` 属共享文件，`index.html` 与 `app.js` 需按 `isCapacitor()` 甄别后同步。
 
+### 31. v123/v124：生图模块交互对齐 + 缩略图存储（cache-bust image-gen.js v121→v124 / db.js v122→v124 / style.css v122→v124，2026-10-20）
 
+**v123（`2134b5e` + 5 个真机补丁）**：生图与对话界面的交互对齐、简陋设计清理。本文档只登记**与 APK/Capacitor 相关**的部分（纯 Web 逻辑不登记）：
+
+| 改动 | 位置 | 为什么必须登记 |
+|---|---|---|
+| **96px 缩略图落盘** | `image-gen.js` `writeThumbFile()` / `getImageThumbUrl()` / `backfillImageThumbnail()` | 走 `CapFilesystem.writeFile`（`Directory.DATA`，目录 `chatlite_images`，文件名 `<id>_thumb.jpg`）。**浏览器模式没有 Filesystem，会退化成 `thumbDataUrl` 内存字段**；同步主仓库时必须保留这条降级分支，不能当成纯 Web 代码删掉 |
+| **缩略图与主图同生命周期** | `deleteImageFile()` 调用点、`purgeOrphanImageFiles()` 的 `keep` 列表 | v123 起 `keep` 同时收 `fileName` 与 `thumbName`，否则孤儿回收会把缩略图全删光（主图还在、列表却全变裂图） |
+| **生图反馈振感开关** | `index.html` `#image-haptic-check`（`.setting-row.capacitor-only`） | 整行带 `capacitor-only` 类，web 下 `display:none`。主仓库同步 `index.html` 时这一行**可以保留**（无害），但要知道它只在 APK 可见 |
+
+**v124（本次补丁）**：修 v123 遗留缺陷，全部为共享代码，**无新增原生依赖**：
+
+| 修复 | 说明 |
+|---|---|
+| 缩略图分支写反 | 老图（有 `fileName`、无 `thumbName`）被误判成「有缩略图」→ 回退读全尺寸并缓存。改为严格按 `thumbName` 分流；并在 `migrateImportedImagesToFilesystem` 里为存量图补缩略图（幂等，每 5 张落盘一次） |
+| 模型记忆不落盘 | `rememberImageModel` 内部补 `saveSettings()` |
+| 自定义模型名被重绘冲掉 | `renderImageModelSelect` 以输入框现值为准，不再无条件覆盖 |
+| 窄屏侧栏遮挡生图 | 新增 `syncImageSidebarForViewport()`，生图可见时窄屏强制收侧栏；**并补 resize 双向处理**（窄→宽要把自动收起的侧栏还原，否则宽屏下生图白占满屏） |
+| 图卡操作区 | 收成只留「⋯」（外链图保留「重新下载」） |
+| 错误条 | 补「复制提示词」「检查接口」；「重试」改为直接提交同参数；空图库时错误条不再被空态挤出可视区（`.image-stream.has-error`） |
+| 长按 | `touchend` 的 `preventDefault()` 在 passive 手势里无效，改为时间戳抑制随后的 click；`.image-card img` 补 `-webkit-touch-callout:none` 防系统菜单抢长按 |
+| 生成数量上限 | 按 `features.maxBatch` 收敛输入框 `max`（此前只 toast，不限制） |
+| 删除失败可见 | `deleteImageFile` 真失败时抛出（ENOENT 视为成功），调用方 await 并 toast |
+| 持久化 | `db.js` 剥离名单补 `thumbDataUrl`（**仅当有 `thumbName` 时**才剥，浏览器模式必须保留） |
+
+**同步主仓库时注意**：以上全是 `www/` 下的共享文件改动，`sync.ps1` 可直接同步；**没有新增原生插件、没有新增权限**。`image-gen.js` 里凡是 `isCapacitor()` 分支都必须原样保留（缩略图、图片落盘、通知）。
+
+**cache-bust**：只升真正变了的三个 —— `image-gen.js` v123→v124、`db.js` v123→v124、`style.css` v123→v124；`app.js` 本次未改（保持 v123）。

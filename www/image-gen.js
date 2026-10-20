@@ -589,6 +589,10 @@ function renderImageProviderSelect() {
   }).join('');
   if (settings.imageProviderId) sel.value = settings.imageProviderId;
   renderImageModelSelect();
+  // v124: 渠道变了，能力位（quality / 分辨率 / 数量上限 / 参考图上限）都可能跟着变。
+  //   此前只有下拉的 change 事件里调，凡是「程序化改 imageProviderId」的路径（重试恢复、
+  //   导入、初始化）都会漏刷新，表现为控件与实际能力对不上。
+  if (typeof updateImageAdvancedVisibility === 'function') updateImageAdvancedVisibility();
 }
 
 // v123: 模型下拉 —— 与对话界面 #model-select 同构（按接口分组的思想简化成「当前接口的模型目录」）。
@@ -602,6 +606,10 @@ function renderImageModelSelect() {
   var models = (provider && provider.models) ? provider.models.slice() : [];
   var remembered = (settings.imageModelByProvider && provider) ? settings.imageModelByProvider[provider.id] : null;
   var current = remembered || (provider ? provider.defaultModel : '') || '';
+  // v124 修（v123 缺陷）：重绘时若输入框正开着且有内容（用户正在「自定义…」里打字），
+  //   要以框里的值为准来判断「当前是什么模型」，否则会被判成非自定义态而被清空。
+  var inputIsCustom = !!(input && input.style.display !== 'none' && input.value.trim());
+  if (inputIsCustom) current = input.value.trim();
   // 「自定义」态：当前值不在目录里，也允许（用户可能手填了未被收录的模型名）
   var isCustom = current !== '' && models.indexOf(current) < 0;
   var html = models.map(function(m) {
@@ -616,7 +624,10 @@ function renderImageModelSelect() {
   if (input) {
     var showCustom = isCustom || models.length === 0;
     input.style.display = showCustom ? '' : 'none';
-    input.value = showCustom ? current : '';
+    // v124 修（v123 缺陷）：关设置面板会触发重绘，此前无条件把输入框写回「记住值」，
+    //   用户正在「自定义…」里打的字还没提交就被冲掉。现在：自定义态且框里有字就保留。
+    if (!showCustom) input.value = '';
+    else if (!input.value.trim()) input.value = current;
   }
 }
 
@@ -635,7 +646,11 @@ function rememberImageModel(model) {
   var provider = getCurrentImageProvider();
   if (!provider || !model) return;
   if (!settings.imageModelByProvider) settings.imageModelByProvider = {};
+  if (settings.imageModelByProvider[provider.id] === model) return;  // 没变就不写盘
   settings.imageModelByProvider[provider.id] = model;
+  // v124 修（v123 缺陷）：此前只写内存，调用点里只有「自定义输入框」那条跟了 saveSettings，
+  //   于是「切渠道记得上次模型」只在同一次运行内成立，重启即回落。
+  saveSettings();
 }
 // F1: 更新图库计数显示
 function updateImageGalleryCount() {
@@ -664,6 +679,11 @@ function toggleImageView(open) {
       state._imageSidebarAutoHidden = false;
     }
   }
+  // v124 修（v123 缺陷）：窄屏侧栏是 80vw 固定抽屉且 z-index 60 > 生图 55，
+  //   而「进生图自动收侧栏」只在 open 那一刻按 innerWidth 判一次 —— 宽屏切窄屏、
+  //   或窄屏手动点开侧栏后，它会整块盖住顶栏的「生图」入口（实测 elementFromPoint 命中 #sidebar-header）。
+  //   这里统一在「生图可见」时保证窄屏侧栏收起，并挂 resize 重算。
+  syncImageSidebarForViewport();
   document.body.classList.toggle('sidebar-hidden', !!(sidebarEl && sidebarEl.classList.contains('hidden')));
   var main = document.getElementById('main');
   if (open) {
@@ -683,6 +703,28 @@ function toggleImageView(open) {
   }
 }
 
+// v124: 生图可见时，窄屏下强制收起侧栏 —— 否则 80vw 的固定抽屉会盖住整个生图视图
+//   （含顶栏入口本身，导致「进不去也出不来」）。宽屏不动，侧栏照常可用。
+//   只记「自己收起的那次」，关闭生图时只还原自己收的，不覆盖用户手动选择。
+function syncImageSidebarForViewport() {
+  var sidebarEl = document.getElementById('sidebar');
+  if (!sidebarEl) return;
+  var isNarrow = window.innerWidth <= 768;
+  if (state.imageViewOpen && isNarrow && !sidebarEl.classList.contains('hidden')) {
+    sidebarEl.classList.add('hidden');
+    state._imageSidebarAutoHidden = true;
+    document.body.classList.add('sidebar-hidden');
+    return;
+  }
+  // v124: 反向也要处理 —— 从窄屏转回宽屏时，之前「为了不遮挡而生图自动收起」的侧栏要还原，
+  //   否则宽屏下生图会白占满整屏、侧栏再也不出现（实测 ivWidth 1280 而非 1025）。
+  if (!isNarrow && state._imageSidebarAutoHidden) {
+    sidebarEl.classList.remove('hidden');
+    state._imageSidebarAutoHidden = false;
+    document.body.classList.remove('sidebar-hidden');
+  }
+}
+
 // F1: 根据当前生图接口格式与能力，显示/隐藏高级参数中的 quality / 负面提示词 / 参考图等字段
 function updateImageAdvancedVisibility() {
   var provider = getCurrentImageProvider();
@@ -699,6 +741,16 @@ function updateImageAdvancedVisibility() {
   if (negRow) negRow.style.display = (features && features.supportsNegativePrompt) ? '' : 'none';
   // v123: 提示词扩展/水印改为 features 驱动 —— 此前是 if (fmt === 'wanxiang') 硬编码，
   //   新增厂商就得回来改这一处（v103 号称已去硬编码，实际只改了一半）。
+  // v124: 生成数量的输入上限跟着渠道能力走 —— v123 只在提交时 toast，输入框仍是写死的 max=4，
+  //   用户填 4 却拿到 1 张，会以为坏了。这里直接把 max 与当前值一起收敛。
+  var batchEl = document.getElementById('image-batch-n');
+  if (batchEl) {
+    var maxBatchNow = (features && features.maxBatch) ? features.maxBatch : 4;
+    batchEl.max = String(maxBatchNow);
+    var curN = parseInt(batchEl.value, 10) || 1;
+    if (curN > maxBatchNow) batchEl.value = String(maxBatchNow);
+    batchEl.title = maxBatchNow > 1 ? ('该渠道一次最多 ' + maxBatchNow + ' 张') : '该渠道一次只出 1 张';
+  }
   var promptExtendLabel = document.getElementById('image-prompt-extend-label');
   if (promptExtendLabel) promptExtendLabel.style.display = (features && features.supportsPromptExtend) ? '' : 'none';
   var watermarkLabel = document.getElementById('image-watermark-label');
@@ -733,8 +785,38 @@ function buildImageErrorBar() {
     var retryBtn = document.createElement('button');
     retryBtn.className = 'continue-btn';
     retryBtn.textContent = '重试';
-    retryBtn.addEventListener('click', function() { retryLastImageGeneration(); });
+    // v124 修：v123 的「重试」只是把参数回填到控件、让用户再点一次生成。
+    //   计划 A2 要的是「发出同一请求」——现在恢复快照后直接提交，用户少点一次；
+    //   快照里若带了参考图，也一并还原（retryLastImageGeneration 内部负责）。
+    retryBtn.addEventListener('click', function() {
+      retryLastImageGeneration({ submit: true });
+    });
     bar.appendChild(retryBtn);
+    // v124: 计划要求的「复制提示词」——失败时最常用的下一步是改措辞重发
+    var copyBtn = document.createElement('button');
+    copyBtn.className = 'continue-btn image-error-dismiss';
+    copyBtn.textContent = '复制提示词';
+    copyBtn.addEventListener('click', function() {
+      var last = state._imageLastRequest;
+      var text = (last && (last.promptRaw || last.promptFinal)) || '';
+      if (!text) { showToast('这次失败没有留下提示词', 'info'); return; }
+      copyTextWithFallback(text).then(function(ok) {
+        showToast(ok ? '提示词已复制' : '复制失败', ok ? 'success' : 'warn');
+      });
+    });
+    bar.appendChild(copyBtn);
+    // v124: 计划要求的「检查接口」——直接跳设置并展开生图分组，省掉「自己找」的几步
+    var setupBtn2 = document.createElement('button');
+    setupBtn2.className = 'continue-btn image-error-dismiss';
+    setupBtn2.textContent = '检查接口';
+    setupBtn2.addEventListener('click', function() {
+      toggleSettings(true);
+      setTimeout(function() {
+        var grp = document.querySelector('#settings-body details[data-group-key="image-provider"]');
+        if (grp) { grp.open = true; grp.scrollIntoView({ block: 'start', behavior: 'smooth' }); }
+      }, 80);
+    });
+    bar.appendChild(setupBtn2);
   }
   var dismissBtn = document.createElement('button');
   dismissBtn.className = 'continue-btn image-error-dismiss';
@@ -759,9 +841,11 @@ function copyTextWithFallback(text) {
     function finish(ok) { if (!done) { done = true; resolve(ok); } }
     try {
       if (navigator.clipboard && navigator.clipboard.writeText) {
-        navigator.clipboard.writeText(text).then(function() { finish(true); }).catch(function() { finish(legacyCopy(text)); });
-        // 兜底超时：某些 WebView 的 clipboard Promise 偶发不 settle
-        setTimeout(function() { finish(legacyCopy(text)); }, 800);
+        navigator.clipboard.writeText(text).then(function() { finish(true); }).catch(function() { if (!done) finish(legacyCopy(text)); });
+        // 兜底超时：某些 WebView 的 clipboard Promise 偶发不 settle。
+        //   v124 修：此前把 legacyCopy(text) 写在参数位置 —— 参数先求值，800ms 时一定会执行，
+        //   即使 Async Clipboard 早已成功，也会去抢选区、打断用户输入。现在只在「确实还没 settle」时才跑。
+        setTimeout(function() { if (!done) finish(legacyCopy(text)); }, 800);
         return;
       }
     } catch (e) { /* 落到兜底 */ }
@@ -912,11 +996,18 @@ function showGalleryMenu(event) {
 }
 
 // F1: 渲染图片流（从 settings.images 全局图库读取，按时间倒序）
+// v124: 长按出菜单后短暂抑制随后的 click（passive 手势里 preventDefault 无效，只能自己让路）
+var _suppressImageClickUntil = 0;
+
 function renderImageStream() {
   var stream = document.getElementById('image-stream');
   if (!stream) return;
   var images = settings.images || [];
   if (images.length === 0) {
+    // v124 修（v123 缺陷 D-5）：空态块是 height:100% 的居中容器，错误条 append 在它**后面**，
+    //   会被挤出可视区（实测只剩顶部一条边）。有错误时改成纵向排列：
+    //   空态让位、错误条排在它下方并保持可见。
+    stream.classList.toggle('has-error', !!state._imageLastError);
     stream.innerHTML = '<div class="image-empty" id="image-empty">' +
       '<svg width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" opacity="0.4"><rect x="3" y="3" width="18" height="18" rx="2"/><circle cx="8.5" cy="8.5" r="1.5"/><polyline points="21 15 16 10 5 21"/></svg>' +
       '<h2>生图</h2><p>输入提示词，生成图片</p>' +
@@ -938,6 +1029,8 @@ function renderImageStream() {
     });
     return;
   }
+  // 有图时不需要「空态 + 错误条」的纵向排布
+  stream.classList.remove('has-error');
   // 时间倒序展示（最新在最底部，因为渲染时按数组顺序，新图 push 到末尾）
   // v123: 默认只渲染最近 PAGE_SIZE 条，「显示更早」按钮逐页展开 —— 避免一次重建几百个 <img>。
   var PAGE_SIZE = 30;
@@ -951,8 +1044,12 @@ function renderImageStream() {
     var img = images[i];
     // v123: 优先缩略图（列表只加载小图），没有缩略图才回退全尺寸 / 异步读文件
     var imgSrc = img.thumbDataUrl || '';
-    var needThumb = !imgSrc && !!(img.thumbName || img.fileName);
-    var needAsync = !imgSrc && !needThumb && !!img.fileName;
+    // v124 修（v123 缺陷）：此前把「有原图文件名」也判成「有缩略图」——
+    //   于是存量图（v123 之前生成的，没有 thumbName）走进缩略图分支、读不到小图后
+    //   回退全尺寸并缓存进内存；同时 needAsync 恒为 false，异步分支成了死代码。
+    //   现在严格按「有没有缩略图文件」分流：有 → 只读小图；没有 → 读原图并顺手补一张。
+    var needThumb = !imgSrc && !!img.thumbName;
+    var needAsync = !imgSrc && !img.thumbName && !!img.fileName;
     var isExt = !!img.externalUrl;  // v120: 尚未落地的外链图
     if (!imgSrc && !needThumb && !needAsync && isExt) imgSrc = img.externalUrl;
     // v69: 参考图缩略图示意（从 img.referenceImages 读取，不可点击）
@@ -973,13 +1070,17 @@ function renderImageStream() {
         (img.negativePrompt ? '<span class="meta-tag">neg</span>' : '') +
         (isExt ? '<span class="meta-tag meta-external">外链</span>' : '') +
       '</div>' +
+      // v124 修（v123 缺陷）：计划要求「卡片默认只留一个 ⋯」，v123 仍是「保存到相册 + ⋯」
+      //   （外链还多一个「重新下载」）。这里收回菜单里 —— 菜单已含保存/分享/重新下载，功能不减。
+      //   外链图保留一个显式的「重新下载」，因为那是它唯一能自救的动作。
       '<div class="image-card-actions">' +
         (isExt ? '<button class="img-action-btn" data-action="refetch" data-id="' + img.id + '">重新下载</button>' : '') +
-        '<button class="img-action-btn" data-action="save" data-id="' + img.id + '">保存到相册</button>' +
         '<button class="img-action-btn" data-action="more" data-id="' + img.id + '">⋯</button>' +
       '</div>' +
     '</div></div></div>';
   }
+  // v124: 重建 DOM 会把 scrollTop 归零，所以「原来是不是贴着底」必须在赋值前量。
+  var _wasPinned = (stream.scrollHeight - stream.scrollTop - stream.clientHeight) < 160;
   stream.innerHTML = html;
   // v123: 上一次失败的错误条（结构化留存，重渲染后仍在）
   if (state._imageLastError) stream.appendChild(buildImageErrorBar());
@@ -987,8 +1088,18 @@ function renderImageStream() {
   var loadEarlierBtn = document.getElementById('btn-image-load-earlier');
   if (loadEarlierBtn) {
     loadEarlierBtn.addEventListener('click', function() {
-      state._imagePageSize = (state._imagePageSize || 30) + 30;
+      // v124: 记住「加了内容之后，原按钮所在位置」——展开后把视图钉回原处，
+      //   否则新内容全在下方、用户眼前的锚点消失，看起来像「点了没反应」。
+      var anchorOffset = loadEarlierBtn.getBoundingClientRect().top - stream.getBoundingClientRect().top;
+      var addedBefore = state._imagePageSize || 30;
+      state._imagePageSize = addedBefore + 30;
       renderImageStream();
+      // 新展开的 30 条插在原内容之前，所以原锚点会往下移；用「保持原按钮在视野同一高度」的方式还原
+      setTimeout(function() {
+        var still = document.getElementById('btn-image-load-earlier');
+        var target = stream.scrollTop + anchorOffset - (still ? (still.getBoundingClientRect().top - stream.getBoundingClientRect().top) : 0);
+        stream.scrollTop = Math.max(0, target);
+      }, 0);
     });
   }
   // v123: 缩略图异步加载（列表主路径）—— 只读 96px 小图，不碰全尺寸原图
@@ -1005,16 +1116,21 @@ function renderImageStream() {
     });
   });
   // 异步加载 Filesystem 中的图片（APK 模式，无缩略图的旧数据）
+  //   v124: 读到原图后顺手补一张 96px 缩略图并落盘 —— 存量图也能在下次渲染时走小图路径，
+  //         否则「缩略图止血」永远只对新图生效（v123 的实际状态）。
   stream.querySelectorAll('img[data-need-async="1"]').forEach(function(imgEl) {
     var imageId = imgEl.dataset.imageId;
     var imgObj = (settings.images || []).find(function(x) { return x.id === imageId; });
-    if (imgObj) {
-      getImageDataUrl(imgObj).then(function(dataUrl) {
-        if (dataUrl) imgEl.src = dataUrl;
+    if (!imgObj) return;
+    getImageDataUrl(imgObj).then(function(dataUrl) {
+      if (!dataUrl) {
         // v120: 读不出内容 = 历史空文件残骸，明确说明，而不是留一块灰底让人猜
-        else showBrokenImageNote(imgEl, imgObj);
-      });
-    }
+        showBrokenImageNote(imgEl, imgObj);
+        return;
+      }
+      imgEl.src = dataUrl;
+      if (!imgObj.externalUrl) backfillImageThumbnail(imgObj, dataUrl);
+    });
   });
   // 绑定图片点击预览
   // v123 修：列表里 img 的 src 是**缩略图**（96px），此前直接把 imgEl.src 传给预览，
@@ -1022,6 +1138,8 @@ function renderImageStream() {
   //   缩略图仅作为「打开前的一帧占位」，原图读回来后再替换。
   stream.querySelectorAll('img[data-image-id]').forEach(function(imgEl) {
     imgEl.addEventListener('click', function() {
+      // v124: 长按刚出过菜单时，这一下 click 属于同一次手势的尾巴，不该再弹大图预览
+      if (Date.now() < _suppressImageClickUntil) return;
       showImagePreview(imgEl.src, imgEl.dataset.imageId);
     });
   });
@@ -1072,15 +1190,18 @@ function renderImageStream() {
     }, { passive: true });
     imgEl.addEventListener('touchend', function(e) {
       cancel();
-      // 长按已出菜单：阻止随后的 click 触发大图预览
-      if (fired) { fired = false; e.preventDefault(); }
+      // v124 修：v123 在这里用 e.preventDefault() 想挡住长按后的 click —— 但 touchstart 是
+      //   {passive:true}，该手势已被标记为不可取消，preventDefault 只会在控制台报错，click 照发。
+      //   改成「打一个短暂的时间戳标记」，由 click 处理器自己让路（见下面 data-image-id 的 click 绑定）。
+      if (fired) { fired = false; _suppressImageClickUntil = Date.now() + 700; }
     });
     imgEl.addEventListener('touchcancel', cancel);
     // 桌面端：右键同样出菜单
     imgEl.addEventListener('contextmenu', function(e) { e.preventDefault(); showImageCardMenu(e, imgEl.dataset.imageId); });
   });
-  // 滚到底部（最新内容）
-  setTimeout(function() { stream.scrollTop = stream.scrollHeight; }, 0);
+  // 滚动（v124 修）：v123 每次渲染都无条件滚到底，导致顶部的「显示更早」按钮刚出现就被滚出视口、
+  //   点一下又跳走。现在只在「渲染前本来就贴着底」时才跟随到底，否则保持原位。
+  if (_wasPinned) setTimeout(function() { stream.scrollTop = stream.scrollHeight; }, 0);
   // v66: 若生图请求进行中（如切出后切回），恢复加载占位提示
   if (state._imageGenerating) {
     var loadingRestored = document.createElement('div');
@@ -1336,19 +1457,25 @@ async function shareImage(id) {
 }
 
 // F1: 从图库删除单张图片
-function deleteImageFromGallery(id) {
+async function deleteImageFromGallery(id) {
   if (!confirm('确定从图库删除此图片？')) return;
   if (!settings.images) return;
   var idx = settings.images.findIndex(function(x) { return x.id === id; });
   if (idx < 0) return;
   var img = settings.images[idx];
-  // 同步删除 Filesystem 中的图片文件（APK 模式）；v123: 缩略图一并删
-  if (img.fileName) deleteImageFile(img.fileName);
-  if (img.thumbName) deleteImageFile(img.thumbName);
+  // v124 修：v123 两处 deleteImageFile 都没 await、失败只 console.warn ——
+  //   结果是「记录已删、文件还在」，用户完全不知道，还会变成无主文件。
+  //   现在等删除结果，失败如实告知（记录仍删，但把「文件没删掉」讲清楚）。
+  var failed = 0;
+  if (img.fileName) { try { await deleteImageFile(img.fileName); } catch (e) { failed++; } }
+  if (img.thumbName) { try { await deleteImageFile(img.thumbName); } catch (e) { failed++; } }
   settings.images.splice(idx, 1);
   saveImageProviders(); // 持久化 settings
   renderImageStream();
   updateImageGalleryCount();
+  if (failed > 0) {
+    showToast('记录已删除，但有 ' + failed + ' 个文件没删掉（磁盘上会残留，可在「清空图库」时一并回收）', 'warn');
+  }
 }
 // F1: 压缩参考图（用于上传给生图 API，最大 1024px，JPEG 0.8）
 function compressImageForGeneration(file) {
@@ -1437,6 +1564,33 @@ async function writeThumbFile(thumbDataUrl, imgId) {
     console.warn('writeThumbFile failed:', e);
     return null;
   }
+}
+
+// v124: 存量图补缩略图 —— 懒补，只做一次。
+//   触发点：列表里某张老图因为没有 thumbName 而回退读原图时（见 renderImageStream 的 data-need-async 分支）。
+//   幂等性：补成功才写 thumbName/thumbDataUrl，失败静默（下次渲染再试，不阻塞列表）。
+var _thumbBackfilling = {};
+function backfillImageThumbnail(img, dataUrl) {
+  if (!img || !img.id || !dataUrl || img.thumbName || img.thumbDataUrl) return;
+  if (_thumbBackfilling[img.id]) return;
+  _thumbBackfilling[img.id] = true;
+  buildImageThumbnail(dataUrl).then(function(meta) {
+    if (!meta || !meta.thumbDataUrl) return;
+    img.thumbDataUrl = meta.thumbDataUrl;
+    if (isCapacitor() && CapFilesystem) {
+      return writeThumbFile(meta.thumbDataUrl, img.id).then(function(name) {
+        if (!name) return;
+        img.thumbName = name;
+        img.thumbDataUrl = null;  // 有文件就不必再驻留内存
+        saveImageProviders();
+      });
+    }
+    saveImageProviders();
+  }).catch(function(e) {
+    console.warn('backfillImageThumbnail failed:', img.id, e);
+  }).then(function() {
+    delete _thumbBackfilling[img.id];
+  });
 }
 
 // v123: 读缩略图（优先文件，其次内存字段，最后回退原图）
@@ -1556,13 +1710,19 @@ async function readImageFile(fileName) {
 // 删除 Filesystem 中的图片文件
 async function deleteImageFile(fileName) {
   if (!isCapacitor() || !CapFilesystem || !fileName) return;
+  // v124: 失败改为抛出，让调用方能如实告知用户（此前只 console.warn，
+  //   表现为「记录删了、文件还在」，而且这个文件从此不会再被任何记录指向）。
+  //   注意：文件本来就不存在（ENOENT）视为成功 —— 目的已达成，不该报警。
   try {
     await CapFilesystem.deleteFile({
       path: IMAGE_STORE_DIR + '/' + fileName,
       directory: 'DATA'
     });
   } catch (e) {
-    console.warn('deleteImageFile failed:', e);
+    var msg = String((e && (e.message || e.code)) || e || '');
+    if (/not exist|ENOENT|no such file|does not exist/i.test(msg)) return;
+    console.warn('deleteImageFile failed:', fileName, e);
+    throw e;
   }
 }
 
@@ -1829,8 +1989,10 @@ function renderRecentImagePrompts() {
   });
 }
 
-// 重试上一次请求：用留存快照重新提交（不改原记录，等价于对话界面的「重新生成」）
-function retryLastImageGeneration() {
+// 重试上一次请求：用留存快照恢复控件；opts.submit = true 时恢复完直接提交
+//   （等价于对话界面的「重新生成」：同一输入、新的一次请求）
+function retryLastImageGeneration(opts) {
+  opts = opts || {};
   var last = state._imageLastRequest;
   if (!last) { showToast('没有可重试的请求', 'warn'); return; }
   var input = document.getElementById('image-prompt-input');
@@ -1866,7 +2028,12 @@ function retryLastImageGeneration() {
     }
   }
   updateImageSendButton();
-  showToast('已恢复上次的提示词与参数，确认后点生成', 'info');
+  if (opts.submit) {
+    showToast('正在用上次的提示词与参数重试', 'info');
+    generateImage();
+  } else {
+    showToast('已恢复上次的提示词与参数，确认后点生成', 'info');
+  }
 }
 
 // F1: 核心生图函数 —— 调用 API、处理响应、存入图库
@@ -3050,6 +3217,16 @@ function initImageView() {
     var sidebarBtn = document.getElementById('btn-sidebar-toggle');
     if (sidebarBtn) sidebarBtn.addEventListener('click', function() { setTimeout(syncSidebarClass, 0); });
     try { new MutationObserver(syncSidebarClass).observe(sidebarEl, { attributes: true, attributeFilter: ['class'] }); } catch (e) {}
+    // v124: 视口变化时重算 —— 宽屏切窄屏（或反过来）后，侧栏的遮挡关系会变，
+    //   而 v123 只在 open 那一刻判过一次。
+    var resizeTimer = null;
+    window.addEventListener('resize', function() {
+      if (resizeTimer) clearTimeout(resizeTimer);
+      resizeTimer = setTimeout(function() {
+        syncImageSidebarForViewport();
+        syncSidebarClass();
+      }, 120);
+    });
   })();
 
   // v90: 提示词输入回车仅换行（contenteditable 默认），生成走生成按钮
@@ -3236,10 +3413,33 @@ async function migrateImportedImagesToFilesystem() {
       }
     }
   }
-  if (migrated > 0) {
+  // v124: 存量图补缩略图 —— 逐张补、补一张存一次，失败不影响其它（幂等：已有 thumbName 就跳过）。
+  //   没有这一步，v123 的「缩略图止血」只对新图生效（老图仍逐个读全尺寸）。
+  var thumbAdded = 0;
+  for (var k = 0; k < images.length; k++) {
+    var rec = images[k];
+    if (!rec || rec.thumbName || rec.thumbDataUrl) continue;
+    if (!rec.fileName || rec.externalUrl) continue;
+    try {
+      var full = await getImageDataUrl(rec);
+      if (!full) continue;
+      var meta = await buildImageThumbnail(full);
+      if (!meta || !meta.thumbDataUrl) continue;
+      var tName = await writeThumbFile(meta.thumbDataUrl, rec.id);
+      if (!tName) continue;
+      rec.thumbName = tName;
+      rec.thumbDataUrl = null;
+      thumbAdded++;
+      if (thumbAdded % 5 === 0) saveImageProviders();  // 分批落盘，避免一次性大写入
+    } catch (e2) {
+      console.warn('backfill thumb failed:', rec && rec.id, e2);
+    }
+  }
+  if (migrated > 0 || thumbAdded > 0) {
     saveImageProviders();  // 持久化（此时 dataUrl 已剥离，settings 体积小）
     renderImageStream();
-    console.log('已迁移 ' + migrated + ' 张图片到 Filesystem');
+    if (migrated > 0) console.log('已迁移 ' + migrated + ' 张图片到 Filesystem');
+    if (thumbAdded > 0) console.log('已为 ' + thumbAdded + ' 张存量图补上缩略图');
   }
   // v121: 顺带回收孤儿文件（导入覆盖、以及早期「清空图库不删文件」留下的无主文件）。
   //   安全阀：记录为空时绝不动手 —— 无法区分「确实没有图」与「图库尚未加载完」，

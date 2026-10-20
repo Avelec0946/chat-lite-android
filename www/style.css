@@ -508,7 +508,10 @@ body.image-view-open.sidebar-hidden .image-view{left:0}
 .image-status-indicator.err{background:var(--danger)}
 
 /* 图片流（对话流式展示） */
-.image-stream{flex:1;overflow-y:auto;padding:16px 0;position:relative;-webkit-overflow-scrolling:touch}
+/* v124: 显式声明 display:block —— 此前只写了 flex:1，靠「未声明 display 的普通块」这个隐式默认成立；
+   一旦上游（皮肤/注入样式/其它构建）把它变成 flex 容器，纵向流式就会横排、卡片被撑宽、
+   顶部「显示更早」按钮也会被挤出可点区域。写明意图，别让它依赖默认值。 */
+.image-stream{display:block;flex:1;overflow-y:auto;padding:16px 0;position:relative;-webkit-overflow-scrolling:touch}
 .image-empty{display:flex;flex-direction:column;align-items:center;justify-content:center;height:100%;color:var(--text2);gap:8px;text-align:center;padding:24px}
 .image-empty h2{font-size:20px;font-weight:300;color:var(--text);margin-top:8px}
 .image-empty p{font-size:14px}
@@ -530,7 +533,10 @@ body.image-view-open.sidebar-hidden .image-view{left:0}
 
 /* 生成的图片卡片 */
 .image-card{display:flex;flex-direction:column;gap:6px;max-width:100%}
-.image-card img{max-width:100%;max-height:60vh;border-radius:12px;display:block;cursor:pointer;background:var(--bg3);box-shadow:var(--shadow)}
+.image-card img{max-width:100%;max-height:60vh;border-radius:12px;display:block;cursor:pointer;background:var(--bg3);box-shadow:var(--shadow);
+  /* v124: 长按要出我们自己的菜单，必须关掉系统「保存图片 / 打开图片」的原生长按菜单，
+     否则真机上系统菜单会先抢走这次长按（对话气泡那边也是这么处理的，见 .msg-bubble）。 */
+  -webkit-touch-callout:none;-webkit-user-select:none;user-select:none}
 .image-card-meta{font-size:12px;color:var(--text2);display:flex;flex-wrap:wrap;gap:8px;align-items:center}
 .image-card-meta .meta-tag{padding:1px 6px;border-radius:4px;background:var(--bg3);font-size:11px}
 /* v120: 外链图标记 + 加载失败提示 */
@@ -594,6 +600,15 @@ body.image-view-open.sidebar-hidden .image-view{left:0}
 
 /* F1: 生图 Provider 编辑器（复用 .provider-editor 结构） */
 .image-provider-editor{background:var(--bg3);border:1px solid var(--border);border-radius:var(--radius);padding:12px;margin-top:8px}
+/* v124: 生图 API 编辑器套用 v122 定下的设置面板排版规格 ——
+   此前它用的是 .card-field（12px/400/次级色），与 .setting-row>span:first-child（13px/500/主色）
+   完全不在同一条规则上，于是同一个面板里「名称」比别处小一号、还更淡（实测 13 个字段全中）。
+   这里用后代选择器补齐，不动 .card-field 本身（对话侧的角色卡编辑器还在用它）。 */
+.image-provider-editor .card-field > span:first-child{font-size:13px;font-weight:500;color:var(--text);line-height:1.35}
+.image-provider-editor .card-field{margin-bottom:12px}
+.image-provider-editor .card-field > .setting-hint,
+.image-provider-editor .setting-hint{margin:3px 0 0}
+.image-provider-editor .provider-editor-actions{margin-top:14px}
 .image-provider-test-result{font-size:12px;margin-top:6px;padding:6px 10px;border-radius:6px;background:var(--bg2);border:1px solid var(--border);color:var(--text2);min-height:16px}
 .image-provider-test-result.ok{color:var(--success);border-color:var(--success);background:var(--bg3)}
 .image-provider-test-result.err{color:var(--danger);border-color:var(--danger);background:var(--bg3)}
@@ -641,6 +656,13 @@ body.image-view-open.sidebar-hidden .image-view{left:0}
 
 /* 缩略图加载中的占位底色（避免列表在图片到达前是一片空白方块） */
 .image-card img{background:var(--bg3)}
+
+/* v124: 空图库 + 有错误时，让错误条有位置。
+   .image-empty 是 height:100% 的居中容器，错误条 append 在它后面会被挤出可视区
+   （v123 实测只剩顶部一条边）。这里在 has-error 状态下改成纵向排布、空态不再吃满高度。 */
+.image-stream.has-error{display:flex;flex-direction:column}
+.image-stream.has-error .image-empty{height:auto;flex:0 0 auto;padding:32px 16px 8px}
+.image-stream.has-error .interrupted-bar{margin:0 16px 16px}
 
 /* v66: 生图停止按钮（生成中 sendBtn 变停止按钮） */
 .image-send-btn.stopping{background:var(--danger);animation:pulseStop 1s ease-in-out infinite}
