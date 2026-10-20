@@ -182,3 +182,96 @@ QA 指出我原报告里两处**证据链偏弱**，我接受并更正：
 | 包内容核验 | **8 个关键文件 SHA256 与工作区逐一比对，全部一致** |
 | 权限 | `RECORD_AUDIO` / `MODIFY_AUDIO_SETTINGS` 均在 |
 | 测试残留 | 全包搜索 perm-test 等关键词：无 |
+---
+
+# v126 语音通话体验补完 —— 验证记录
+
+> 承接 v125。用户真机验收后提了 8 条意见，本文记录 v126 的验证过程与证据强度。
+> 原则不变：**没实测过的不写「已验证」**；一次性输出不留档的不算实测值。
+
+## 1. 本次修复的真实缺陷（都不是猜的，是复现出来的）
+
+| # | 缺陷 | 怎么发现的 | 后果 |
+|---|---|---|---|
+| 1 | 导入的 settings 没过 `migrateSettings` | 用真实 53MB 旧备份跑导入，对比 `migrateSettings` 前后 | 老 `modelPrompts` 结构原样留下，模型修饰语变空白 |
+| 2 | 老备份 `messages` 数组没迁移 | 造老 schema 备份导入，`getActiveChain` 抛 `Cannot read properties of undefined (reading 'map')` | 打开会话一片空白 |
+| 3 | 「覆盖」只做 `Object.assign` | 设本地独有键后导入，键仍在 | 点了覆盖，字体/超时还是旧值 |
+| 4 | 流式导入同样漏 1、2 | 对比两条导入路径的收尾代码 | APK 覆盖导入与 Web 导入行为不一致 |
+| 5 | **系统提示词重复** | 拦截真实 fetch，打印发出的 messages | `[system,user,system,user,user]`，两套冲突的 JSON 格式说明 |
+| 6 | 听筒误判成耳机预设 | 真机 `getRoute()` 返回 `earpiece`，但音频实际走外放 | 两套参数用反，AI 被自己声音打断 |
+
+第 5 条尤其值得记：**它在 v125 就存在，主路径完全看不出来** —— 通话能通、有回复、状态机正常，
+只是模型同时收到两套格式要求。这类缺陷只有「抓真实请求体」才能发现。
+
+## 2. WSOLA 语速（实测数据，可复现）
+
+`node tools/t-wsola.js`，24kHz / 2 秒 / 220Hz 正弦：
+
+| rate | 输出样本 | 期望 | 偏差 | 过零率（音高代理） |
+|---|---|---|---|---|
+| 1.00 | 48000 | 48000 | 0.0% | 439.5Hz |
+| 0.60 | 80280 | 80000 | +0.4% | — |
+| 0.80 | 60120 | 60000 | +0.2% | 439.1Hz |
+| 1.20 | 40320 | 40000 | +0.8% | — |
+| 1.50 | 32040 | 32000 | +0.1% | 439.7Hz |
+| 1.60 | 30240 | 30000 | +0.8% | — |
+
+- **rate=1 逐样本直通**：maxDiff = 0.000000（不是「接近」，是完全相同）
+- **分块 vs 一次性**：rate=1.5 与 0.8 下，4096/块与整段的输出长度比 **1.0000**（相位连续的直接证据）
+- **音高不随速度变**：439.5 → 439.7 → 439.1 Hz（±0.15%），这是 WSOLA 与 `playbackRate` 的本质区别
+
+## 3. 真机验证（22081212C / Android 15）
+
+| 项 | 结果 |
+|---|---|
+| 三模块加载 | `VoiceCall` / `VoiceDirector` / `VoiceSettings` 均为 object |
+| 原生路由插件 | `getRoute()` 与 `addListener('routeChange')` 均返回正常 |
+| 原始回报 | `{type:'earpiece', name:'听筒'}`（未插耳机） |
+| 归一化结果 | **`speaker`**（正确：WebView 音频走 STREAM_MUSIC，实际外放） |
+| 预设生效 | 设 speaker=999 / headset=111，`effectiveTuning('echoGuardMs')` 返回 **999** |
+| 新字段 | timestamps=false / rate=1 / rateMode=natural / routeMode=auto / tuningPresets 双空 / 共 26 键 |
+| 新控件 | 全部存在；`voice-brain-provider` / `voice-brain-model` 已不存在 |
+
+## 4. 测试总数
+
+| 套件 | 断言 | 结果 |
+|---|---|---|
+| `voice-director.test.js` | 480 | 全过（v125 为 340，新增 140） |
+| `voice-runtime.test.js` | 238 | 全过（v125 为 155，新增 83） |
+| `import.test.js` | 24 | 全过（新增文件） |
+| `voice-edge.js` | 53 | 全过 |
+| `e2e-voice.js` | 39 | 全过 |
+| **合计** | **834** | |
+
+> edge 里 5 条 v125 遗留断言已按新行为更新，不是「改测试让它过」：
+> 大脑字段确实删了（B12.1）、字段数确实从 22 涨到 26（B9.3）、
+> 微调输入框确实是 5+5+5=15（B8.4）、`start()` 确实改成了快速失败（B1.2 / B9.5）。
+
+## 5. 构建陷阱（本次踩到并记录）
+
+`android/app/src/main/assets/public/` 是 `npx cap copy android` 的产物且在 `.gitignore` 里。
+首次构建时**跳过了 `cap copy`**，`BUILD SUCCESSFUL`，但解包比对发现 **8 个文件里 7 个是 v125 的**。
+只有逐个比对 SHA256 才能发现 —— 构建成功 ≠ 包内容正确。
+
+正确顺序：`npx cap copy android` → `gradlew assembleDebug` → 解包比对 SHA256。
+
+## 6. 本次未验证（如实登记）
+
+| 项 | 为什么没验 |
+|---|---|
+| WSOLA 主观音质 | 只能人耳判断；已给出客观指标（长度/音高/相位），听感需用户确认 |
+| 耳机 / 外放预设切换手感 | 需要真的插拔耳机并通话 |
+| 蓝牙耳机 | 需要蓝牙设备 |
+| 息屏通话 | 需要真机长时间挂着 |
+| 旧备份导入的完整 UI 流程 | CDP 的 `DOM.setFileInputFiles` 走不通 SAF 权限（`NotReadableError`），已确认系统文件选择器能正常弹出，导入逻辑用 DataTransfer 构造 File 验证 |
+
+## 7. 交付物
+
+| 项 | 值 |
+|---|---|
+| APK | `chat-lite-2.1-v126-maintenance-debug.apk`（**4,623,860 字节**） |
+| appId | `com.avelec.chatlite.maintenance`（与主包共存） |
+| 装机 | 已安装并启动 |
+| 包内容核验 | **8 个关键文件 SHA256 与工作区逐一比对，全部一致** |
+| 分支 | `maintenance`（commit `42fe916`，已推 origin） |
+| main | **未动**（等用户验收，§3.4 铁律） |

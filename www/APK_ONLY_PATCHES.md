@@ -1,4 +1,4 @@
-﻿# APK 专属改动清单（v1.3.0+）
+# APK 专属改动清单（v1.3.0+）
 
 > 此文件由 `sync-from-upstream.ps1` 同步主仓库 `chat-lite/` 时**不会**自动维护。
 > 主仓库同步会**直接覆盖** `www/`，凡下方列出的段落，sync 后**必须手动重新打补丁**。
@@ -1242,3 +1242,51 @@ JS 侧表现为「通话一直卡在连接中」，而日志里 `onPermissionReq
 `voice.js` / `voice-director.js` / `voice-settings.js` 是纯 Web 代码，可整体同步；
 但 `voice-settings.js` 里的 `isCapacitor()` 分支（`CapFilesystem` 存克隆参考音）**必须原样保留**，Web 侧自动降级到 IndexedDB。
 `MainActivity.java` / `AndroidManifest.xml` 属原生，**不推主仓库**。
+---
+
+## 33. v126 语音通话体验补完（commit `42fe916`）
+
+### 一、原生侧新增：`AudioRoutePlugin.java`
+
+| 项 | 内容 |
+|---|---|
+| 注册 | `MainActivity.onCreate` 里 `registerPlugin(AudioRoutePlugin.class)`（紧跟 `ChatStreamPlugin` 之后一行） |
+| 接口 | `getRoute()` → `{ type, name }`；`addListener('routeChange', cb)` |
+| type 取值 | `headset` / `bluetooth` / `speaker` / `earpiece` |
+| 判定 | `AudioManager.getDevices(GET_DEVICES_OUTPUTS)`：WIRED_HEADPHONES/WIRED_HEADSET/USB_HEADSET → headset；BLUETOOTH_A2DP/SCO → bluetooth；其余无外接时按 `isSpeakerphoneOn()` + 是否有听筒硬件区分 earpiece / speaker |
+| 热切换 | `AudioDeviceCallback`（API 23+），回调里 `notifyListeners('routeChange')`；`handleOnDestroy` 反注册 |
+| 权限 | **不申请任何运行时权限**。Android 12+ 读蓝牙名需 `BLUETOOTH_CONNECT`，已用 `try/catch(Throwable)` 包住，拿不到就退回 `productName` → 「蓝牙设备」 |
+| 兜底 | 任何异常都返回 `{type:'speaker', name:'外放'}`，绝不 reject 到 JS |
+
+> **实测记录（真机 22081212C / Android 15，未插耳机）**：插件原始回报 `{"type":"earpiece","name":"听筒"}`。
+> 原因是 `isSpeakerphoneOn()` 在非通话态默认为 false，而手机确实有听筒硬件。
+> **但 WebView 的音频走 STREAM_MUSIC，没有耳机时实际是从外放喇叭出来的** —— 所以 `voice.js` 把 `earpiece` 归一化成 **speaker**（不是 headset）。
+> 若归成耳机，两套预设会用反：外放回声大却用了灵敏的耳机参数 → AI 被自己的声音打断。真机已验证 raw=earpiece → 归一化 speaker → 生效的是外放预设。
+
+### 二、Web 侧新增的 APK 相关分支
+
+| 改动 | 位置 | 说明 |
+|---|---|---|
+| 路由查询 | `voice.js` `currentRoute()` | 读 `Capacitor.Plugins.AudioRoute`；插件缺失 / 同步返回 / Promise reject / 抛错四种情况都静默回落，**绝不抛**。4 秒 TTL 缓存（每块 PCM 都要读，不能每次问原生） |
+| 路由变化 | `voice.js` `hookRouteChange()` | `addListener('routeChange')`；只更新缓存与重算生效参数，**不打断正在进行的通话** |
+| 双预设 | `voice.js` `effectiveTuning()` + `settings.voice.tuningPresets` | `{speaker:{...}, headset:{...}}`，按当前路由合并；非法值/越界忽略并保留 base |
+| 语速 | `voice.js` `makeTimeStretcher()` | WSOLA 纯 JS，无原生依赖。`rate===1` 逐样本直通 |
+
+### 三、cache-bust
+
+只升真正变了的：`db.js` / `io.js` / `voice.js` / `voice-director.js` / `voice-settings.js` / `style.css` → **v126**。
+**`app.js` 未改，保持 v125**（v125 才升过）；`image-gen.js` 保持 v124、`chat.js` 122、`conversation.js` 112。
+
+### 四、★ 构建陷阱：`cap copy` 必须跑
+
+`android/app/src/main/assets/public/` 是 `npx cap copy android` 的产物，**在 `.gitignore` 里**。
+直接 `gradlew assembleDebug` 会用**上一次 copy 的旧资源**打包 —— 本次首次构建就踩了：APK 里 8 个文件有 7 个是 v125 的，
+而构建输出一切正常（`BUILD SUCCESSFUL`），**只有逐个比对 SHA256 才能发现**。
+
+**正确顺序**：`npx cap copy android` → `gradlew assembleDebug` → 解包比对 `assets/public/*` 的 SHA256。
+
+### 五、主仓库同步提示
+
+`AudioRoutePlugin.java` / `MainActivity.java` 属原生，**不推主仓库**。
+`voice.js` 里的 `Capacitor.Plugins.AudioRoute` 调用**必须原样保留**（Web 侧插件不存在时自动回落，不影响浏览器）。
+`io.js` 的导入修复是纯 Web 逻辑，可整体同步。
