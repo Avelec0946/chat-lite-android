@@ -44,4 +44,16 @@
     <uses-permission android:name="android.permission.WRITE_EXTERNAL_STORAGE" android:maxSdkVersion="28" />
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
     <uses-permission android:name="android.permission.WAKE_LOCK" />
+
+    <!-- v125: 语音通话（真实时双向语音）所需权限
+         RECORD_AUDIO 是 getUserMedia 在 WebView 里工作的【硬前提】：
+           WebView 的 WebChromeClient.onPermissionRequest 只能"批准"网页请求，
+           真正决定麦克风能不能打开的是 App 的运行时权限。
+         没有这一行时：onPermissionRequest 里 requestPermissions 直接判定为拒绝，
+           getUserMedia 报 NotAllowedError，语音通话完全不可用。
+         MODIFY_AUDIO_SETTINGS：WebView / WebRTC 采集链需要的音频路由配置权限（install-time，无弹窗）。
+         uses-feature microphone required=false：避免在无麦克风设备上被商店/安装器过滤掉。 -->
+    <uses-permission android:name="android.permission.RECORD_AUDIO" />
+    <uses-permission android:name="android.permission.MODIFY_AUDIO_SETTINGS" />
+    <uses-feature android:name="android.hardware.microphone" android:required="false" />
 </manifest>

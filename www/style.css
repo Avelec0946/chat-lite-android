@@ -698,3 +698,686 @@ body.image-view-open.sidebar-hidden .image-view{left:0}
    不加虚线/变色 —— 思维链里常有非 LaTeX 的 $ 用法，标出来反而像报错。
    hover 时 title 属性仍会提示原因。 */
 .clx-tex-raw{color:inherit}
+/* ===== v125: 语音通话界面（voice-view）=====
+   归属：ui-polish。本分节整体追加在 style.css 末尾，不改动上方任何既有规则。
+   骨架由 index.html 提供；运行时钩子由 voice.js 写入（见下方注释里的钩子清单）。
+
+   钩子契约（以 Lead 的权威表为准，voice.js / 本文件共同遵守）：
+   · #voice-view 显示时 body 加 .voice-view-open；display 由 JS 置 flex/none（本文件给默认值兜底）
+   · 状态类（互斥，同一时刻只有一个，挂在 #voice-orb 上）：
+       is-idle / is-connecting / is-listening / is-thinking / is-speaking / is-error
+     同时 #voice-view 上写 data-state="idle|connecting|listening|thinking|speaking|error"（本文件用它切色）
+   · 一次性动效类（短暂加、播完移除，挂在 #voice-orb 上）：
+       is-interrupted（被打断的骤停回弹，约 400ms）
+       is-bargein（与 is-interrupted 同时加，光环爆开）
+       is-hangup（挂断瞬间收束；#voice-view 与 #voice-orb 两处都接住，挂哪都能收尾）
+   · CSS 变量：--voice-level（0~1 实时音量，voice.js 写在 #voice-view 上）→ 驱动 orb 的手写 scale
+   · --voice-tint / --voice-rgb / --voice-glow：本文件在状态类上重定义，供各子元素统一取色
+   · 字幕两行是否显示由 voice.js 用内联 display 控制，本文件不得强制 display，否则设置开关会失效
+   · 只动 transform / opacity / filter 做动画，避免逐帧重排（60fps） */
+
+.voice-view{
+  /* 未设 data-state 时的中性值；状态类会覆盖 */
+  --voice-rgb:124,58,237;
+  --voice-tint:#7c3aed;
+  --voice-glow:.25;
+  position:fixed;top:0;left:0;right:0;bottom:0;z-index:55;
+  display:flex;flex-direction:column;overflow:hidden;
+  color:#e9e6f4;
+  /* 极暗底：中心偏上的一团冷紫，四角压黑 —— 不用纯黑，留一点空气感 */
+  background:
+    radial-gradient(120% 78% at 50% 22%,#1b1730 0%,#121021 42%,#0a0a0f 74%,#06060a 100%),
+    #06060a;
+  /* 避免 iOS/WebView 下拉橡皮筋把通话层拉出白边 */
+  overscroll-behavior:contain;
+  -webkit-tap-highlight-color:transparent;
+  animation:voiceViewIn .3s ease both;
+}
+@keyframes voiceViewIn{from{opacity:0;transform:scale(.995)}to{opacity:1;transform:scale(1)}}
+
+/* ---- 背景质感：极暗渐变 + 状态联动光晕（纯度克制，只当呼吸的底噪） ---- */
+.voice-ambient{position:absolute;top:0;left:0;right:0;bottom:0;overflow:hidden;pointer-events:none;z-index:0}
+.voice-ambient-glow{
+  position:absolute;left:50%;top:28%;width:min(78vh,110vw);height:min(78vh,110vw);
+  margin-left:calc(min(78vh,110vw) / -2);margin-top:calc(min(78vh,110vw) / -2);
+  border-radius:50%;
+  /* 两个坑，都踩过，写在这里免得后人再踩：
+     ① 不要用 filter:blur() 柔化 —— blur 的滤波表面按元素框裁剪，圆形糊上去边缘会切成硬边矩形。
+     ② radial-gradient 必须写 closest-side：默认是 farthest-corner，100% 半径 ≈ 半宽×1.414，
+        比元素框还大 → 渐变在框边还没衰减到 0，被框硬切，同样出现矩形。
+        指定 closest-side 后 100% 半径 = 半宽，下面的色标（最远 78%）在框内自然收尾。 */
+  background:radial-gradient(circle closest-side,
+    rgba(var(--voice-rgb),.5) 0%,
+    rgba(var(--voice-rgb),.3) 24%,
+    rgba(var(--voice-rgb),.13) 44%,
+    rgba(var(--voice-rgb),.045) 62%,
+    rgba(var(--voice-rgb),0) 78%);
+  opacity:calc(var(--voice-glow) * .8);
+  transform:scale(1);
+  transition:opacity .8s ease;
+  animation:voiceGlowBreath 9s ease-in-out infinite;
+}
+@keyframes voiceGlowBreath{0%,100%{transform:scale(1)}50%{transform:scale(1.07)}}
+/* 细颗粒噪点：用极小的重复渐变做“纸感”，避免大面积纯色渐变出现色带 */
+.voice-ambient::after{
+  content:'';position:absolute;top:0;left:0;right:0;bottom:0;pointer-events:none;
+  background-image:
+    radial-gradient(rgba(255,255,255,.045) .5px,transparent .5px),
+    radial-gradient(rgba(255,255,255,.03) .5px,transparent .5px);
+  background-size:3px 3px,7px 7px;
+  background-position:0 0,1px 2px;
+  opacity:.35;
+}
+
+/* ---- 顶栏（返回 / 标题 / 设置） ---- */
+.voice-bar{
+  position:relative;z-index:2;flex-shrink:0;
+  display:flex;align-items:center;gap:10px;
+  padding:calc(env(safe-area-inset-top,0px) + 12px) 16px 12px;
+}
+/* 顶栏按钮在深色通话层上要重新取色（.btn-icon 是浅色主题的毛玻璃底） */
+.voice-view .voice-bar .btn-icon,
+.voice-view .btn-icon{
+  width:38px;height:38px;border-radius:12px;
+  background:rgba(255,255,255,.055);
+  border:1px solid rgba(255,255,255,.075);
+  color:rgba(233,230,244,.82);
+  -webkit-backdrop-filter:blur(10px);backdrop-filter:blur(10px);
+  transition:background .15s ease,color .15s ease,transform .12s ease;
+}
+.voice-view .btn-icon:hover{background:rgba(255,255,255,.1);color:#fff}
+.voice-view .btn-icon:active{transform:scale(.92)}
+.voice-bar-title{flex:1;min-width:0;display:flex;flex-direction:column;align-items:center;line-height:1.25}
+.voice-bar-name{font-size:14px;font-weight:500;letter-spacing:.02em;color:rgba(233,230,244,.9)}
+.voice-bar-sub{font-size:11px;color:rgba(233,230,244,.42);letter-spacing:.04em;margin-top:1px}
+/* 顶栏切声音名时淡入，避免瞬时跳字 */
+.voice-bar-sub{transition:opacity .25s ease}
+
+/* ---- 舞台（orb + 状态 + 字幕 + 标签），窄屏更靠上、宽屏居中偏上 ---- */
+/* 舞台内部是四个**独立块**的纵向流（orb / 状态文案 / 字幕 / 副语言标签），互不覆盖：
+   orb 可伸缩但必须给下面三块留位；字幕与标签各自有 min-height，空状态也占位。 */
+.voice-stage{
+  position:relative;z-index:2;flex:1;min-height:0;
+  display:flex;flex-direction:column;align-items:center;
+  justify-content:flex-start;
+  /* 顶部留够：orb 在 speaking 态会 scale 到约 1.22 倍，视觉体积超出自身盒子，
+     不留余量就会顶出 stage 上边界（窄屏实测溢出 7px）。 */
+  padding:min(5vh,36px) 20px 12px;
+  /* 不能用 overflow:hidden：块一旦溢出会被静默裁掉半截（宽屏实测副语言标签被切）。
+     改为允许溢出可见，靠各块的 min-height / max-height 自己收敛。 */
+  overflow:visible;
+}
+
+/* ===== 声波球：核心视觉 =====
+   结构：三层圆环 + 内芯（内芯里是一枚麦克风图标，只在 idle 时示弱显示）。
+   节奏：idle 微光 / connecting 慢呼吸(4s) / listening 缓慢呼吸(4s) / thinking 快速不规则脉动 /
+        speaking 大幅波动（--voice-level 驱动）/ interrupted 骤停回弹。 */
+.voice-orb{
+  /* flex-shrink 必须允许收缩：宽屏由下面的宽高定尺寸，矮屏/窄屏由 flex 让位给字幕。
+     尺寸上限同时受 vh 与 px 约束，避免在小屏上把下面三块挤没（踩过：曾把字幕压到 9px）。 */
+  position:relative;flex:0 1 auto;
+  /* 用 aspect-ratio 锁正方形：只给 width，让高度跟着宽度走。
+     若同时写死 width/height，flex 纵向收缩时只压 height，球会被压成椭圆（窄屏实测踩过）。 */
+  /* 桌面宽屏用 vh 算会随窗高无限长；上限锁在 320px 一档，避免大屏上球体大得压过内容。 */
+  width:min(38vh,320px);
+  aspect-ratio:1 / 1;
+  max-width:100%;
+  display:flex;align-items:center;justify-content:center;
+  /* --orb-k：音量驱动的统一缩放系数。只改这一个数，整颗球一起动；
+     写在 transform 上（合成期），不触发重排。speaking 时 voice.js 写 --voice-level 由它换算。 */
+  --orb-k:1;
+  transition:transform .14s linear;
+  transform:scale(var(--orb-k));
+  will-change:transform;
+  /* transform 不参与布局：speaking 时最大放大到 1.22 倍，视觉体积会超出自身盒子。
+     父级 .voice-stage 已按此预留了余量（见下方 padding），这里不额外撑高，避免挤压字幕。 */
+}
+/* 三层环用 inset 定位（0 / -14% / -30%），动画只改 scale —— 不用 translate(-50%,-50%) 居中，
+   否则 inset 与 left/top:50% 同时存在会过约束，动画里的 transform 也会把居中位移覆盖掉。 */
+.voice-orb-ring{
+  position:absolute;border-radius:50%;
+  will-change:transform,opacity;
+}
+.voice-orb-ring.r1{
+  inset:0;
+  border:1px solid rgba(var(--voice-rgb),.55);
+  /* 只留 inset 阴影（它被裁剪到元素内部，圆形边框内不会出直角）。
+     外发光不能用 box-shadow：模糊扩散会铺到元素盒子之外，被这一层的矩形边界裁成硬边（实测踩过）。 */
+  box-shadow:inset 0 0 60px rgba(var(--voice-rgb),.22);
+  opacity:.85;
+  animation:voiceRingIdle 6s ease-in-out infinite;
+}
+.voice-orb-ring.r2{
+  inset:-14%;
+  border:1px solid rgba(var(--voice-rgb),.22);
+  animation:voiceRingIdle 6s ease-in-out infinite .35s;
+  opacity:.55;
+}
+.voice-orb-ring.r3{
+  inset:-30%;
+  border:1px solid rgba(var(--voice-rgb),.1);
+  animation:voiceRingIdle 6s ease-in-out infinite .7s;
+  opacity:.4;
+}
+.voice-orb-core{
+  position:relative;z-index:1;
+  width:64%;height:64%;border-radius:50%;
+  display:flex;align-items:center;justify-content:center;
+  color:rgba(255,255,255,.85);
+  background:
+    radial-gradient(circle at 50% 42%,rgba(255,255,255,.16),rgba(255,255,255,0) 55%),
+    radial-gradient(circle at 50% 50%,rgba(var(--voice-rgb),.95),rgba(var(--voice-rgb),.55) 58%,rgba(var(--voice-rgb),.16) 100%);
+  /* 外发光一律不用大半径 box-shadow：模糊外溢会被元素盒子的矩形边界裁出直边。
+     这里只留近距离的柔光和 inset；大范围光晕交给下面的 ::after（纯径向渐变，天然无边界）。 */
+  box-shadow:
+    0 0 24px rgba(var(--voice-rgb),.4),
+    inset 0 -8px 28px rgba(0,0,0,.25);
+  transition:background .5s ease,box-shadow .5s ease;
+}
+/* 大范围光晕层：与 core 同心的圆形径向渐变，尺寸略大于 core，渐变在盒子内自然收尾 */
+.voice-orb-core::after{
+  content:'';position:absolute;
+  /* 用 inset 对称外扩，不用百分比 margin：margin 的百分比按**父宽**解析，
+     与 width:230% 的基准不一致，会把圆心顶偏、边缘被合成区切出直边。 */
+  inset:-65%;
+  border-radius:50%;
+  background:radial-gradient(circle closest-side,
+    rgba(var(--voice-rgb),.22) 0%,
+    rgba(var(--voice-rgb),.13) 38%,
+    rgba(var(--voice-rgb),.05) 62%,
+    rgba(var(--voice-rgb),0) 82%);
+  pointer-events:none;z-index:-1;
+  transition:background .5s ease,opacity .3s ease;
+}
+/* 内芯高光层：让球体有体积感（不做 backdrop-filter，避免叠多层高斯） */
+.voice-orb-core::before{
+  content:'';position:absolute;left:18%;right:18%;top:10%;height:36%;
+  border-radius:50%;
+  background:linear-gradient(to bottom,rgba(255,255,255,.5),rgba(255,255,255,0));
+  opacity:.5;filter:blur(6px);pointer-events:none;
+}
+.voice-orb-icon{width:26%;height:26%;opacity:.92;filter:drop-shadow(0 1px 2px rgba(0,0,0,.25));transition:opacity .3s ease}
+/* idle：麦克风图标低调地待着；一旦进入通话就隐去，让球体纯当“呼吸的活物” */
+.voice-orb.is-idle .voice-orb-icon{opacity:.55}
+.voice-orb.is-connecting .voice-orb-icon,
+.voice-orb.is-listening .voice-orb-icon,
+.voice-orb.is-thinking .voice-orb-icon,
+.voice-orb.is-speaking .voice-orb-icon,
+.voice-orb.is-error .voice-orb-icon{opacity:0}
+
+/* 环的通用呼吸：位移交给 r1/r2/r3 各自的延迟，形成涟漪错层 */
+@keyframes voiceRingIdle{
+  0%,100%{transform:scale(1);opacity:.7}
+  50%{transform:scale(1.035);opacity:.95}
+}
+/* ---- connecting：承认“还没接通”的慢呼吸，4s 一次，幅度小，不要像已经通了 ---- */
+.voice-orb.is-connecting .voice-orb-ring.r1{animation:voiceRingConnect 4s ease-in-out infinite}
+.voice-orb.is-connecting .voice-orb-ring.r2{animation:voiceRingConnect 4s ease-in-out infinite .5s}
+.voice-orb.is-connecting .voice-orb-ring.r3{animation:voiceRingConnect 4s ease-in-out infinite 1s}
+@keyframes voiceRingConnect{
+  0%,100%{transform:scale(.97);opacity:.35}
+  50%{transform:scale(1.06);opacity:.8}
+}
+
+/* ---- listening：缓慢呼吸（约 4s）。幅度比 connecting 更“有底气”，代表在等你开口 ---- */
+.voice-orb.is-listening .voice-orb-ring.r1{animation:voiceRingListen 4s ease-in-out infinite}
+.voice-orb.is-listening .voice-orb-ring.r2{animation:voiceRingListen 4s ease-in-out infinite .45s}
+.voice-orb.is-listening .voice-orb-ring.r3{animation:voiceRingListen 4s ease-in-out infinite .9s}
+@keyframes voiceRingListen{
+  0%,100%{transform:scale(1);opacity:.7}
+  50%{transform:scale(1.08);opacity:1}
+}
+/* 内核在 listening 时轻微起伏（1.6s 一次，比环快一档，暗示“活着”） */
+.voice-orb.is-listening .voice-orb-core{animation:voiceCoreBreathe 4s ease-in-out infinite}
+@keyframes voiceCoreBreathe{0%,100%{transform:scale(1)}50%{transform:scale(1.04)}}
+
+/* ---- thinking：快速、不规则脉动。用的是不等宽的百分比停顿，故意“不齐” ---- */
+.voice-orb.is-thinking .voice-orb-ring.r1{animation:voiceRingThink 1.1s ease-in-out infinite}
+.voice-orb.is-thinking .voice-orb-ring.r2{animation:voiceRingThink 1.1s ease-in-out infinite .17s}
+.voice-orb.is-thinking .voice-orb-ring.r3{animation:voiceRingThink 1.1s ease-in-out infinite .31s}
+@keyframes voiceRingThink{
+  0%{transform:scale(1);opacity:.85}
+  22%{transform:scale(1.09);opacity:1}
+  38%{transform:scale(1.02);opacity:.75}
+  55%{transform:scale(1.12);opacity:1}
+  71%{transform:scale(1.03);opacity:.7}
+  100%{transform:scale(1);opacity:.85}
+}
+.voice-orb.is-thinking .voice-orb-core{animation:voiceCoreThink .9s ease-in-out infinite}
+@keyframes voiceCoreThink{0%,100%{transform:scale(1);opacity:.9}50%{transform:scale(1.06);opacity:1}}
+
+/* ---- speaking：大幅波动。--voice-level(0~1) 由 voice.js 实时写入，只用于 transform 的 scale，
+        不加过渡时长让其跟手；级别越高，环外扩与内芯提亮越明显。 ---- */
+.voice-view.is-speaking .voice-orb,
+.voice-orb.is-speaking{
+  --orb-k:calc(1 + var(--voice-level,0) * .22);
+  transition:none;
+}
+.voice-orb.is-speaking .voice-orb-ring.r1{
+  transform:scale(calc(1 + var(--voice-level,0) * .18));
+  opacity:calc(.65 + var(--voice-level,0) * .35);
+  border-color:rgba(var(--voice-rgb),.85);
+  /* 同样只用 inset 阴影：外发光会越出盒子被裁成矩形 */
+  box-shadow:inset 0 0 calc(40px + var(--voice-level,0) * 80px) rgba(var(--voice-rgb),.34);
+  animation:none;
+}
+.voice-orb.is-speaking .voice-orb-ring.r2{
+  transform:scale(calc(1 + var(--voice-level,0) * .26));
+  opacity:calc(.3 + var(--voice-level,0) * .3);
+  animation:none;
+}
+.voice-orb.is-speaking .voice-orb-ring.r3{
+  transform:scale(calc(1 + var(--voice-level,0) * .34));
+  opacity:calc(.18 + var(--voice-level,0) * .22);
+  animation:none;
+}
+.voice-orb.is-speaking .voice-orb-core{
+  animation:none;
+  /* 近距离柔光可以随音量涨，但上限留在 24~40px，避免外溢；大范围光晕由 ::after 负责 */
+  box-shadow:
+    0 0 calc(24px + var(--voice-level,0) * 16px) rgba(var(--voice-rgb),.5),
+    inset 0 -8px 28px rgba(0,0,0,.25);
+}
+/* 兜底律动：万一 voice.js 只切了类、还没写 --voice-level（首帧/异常），球也不能僵住。
+   放在 .voice-orb-core 上，与外层 --orb-k 驱动的 scale 互不抢 transform。 */
+.voice-orb.is-speaking .voice-orb-core{animation:voiceSpeakFallback .78s ease-in-out infinite}
+@keyframes voiceSpeakFallback{0%,100%{transform:scale(1)}50%{transform:scale(1.05)}}
+
+/* ---- interrupted / bargein：骤停回弹。用一条“抽气”式关键帧：先急速缩，再略过冲，最后稳 ---- */
+/* 约 400ms 后 voice.js 摘掉该类，动画时长必须留在这个窗口内，否则会被硬切在半程 */
+.voice-orb.is-interrupted{animation:voiceOrbSnap .4s cubic-bezier(.22,.9,.28,1) both}
+@keyframes voiceOrbSnap{
+  0%{transform:scale(1);opacity:1}
+  16%{transform:scale(.87);opacity:.72}
+  48%{transform:scale(1.05);opacity:1}
+  72%{transform:scale(.985)}
+  100%{transform:scale(1)}
+}
+/* 打断反馈的光环爆开一下（voice.js 700ms 后自己摘类，这里动画更短，不会续不上） */
+.voice-orb.is-bargein .voice-orb-ring.r1{animation:voiceRingBarge .5s ease-out}
+.voice-orb.is-bargein .voice-orb-ring.r2{animation:voiceRingBarge .5s ease-out .04s}
+.voice-orb.is-bargein .voice-orb-ring.r3{animation:voiceRingBarge .5s ease-out .08s}
+@keyframes voiceRingBarge{
+  0%{transform:scale(1.06);opacity:.9}
+  60%{transform:scale(1.18);opacity:.25}
+  100%{transform:scale(1.1);opacity:.55}
+}
+
+/* ---- error：球体收成冷灰，不再抢注意力，把重点让给状态文案 ---- */
+/* error：内芯压成暗红并熄灭大半，代表“这条线断了”。
+   早先写的是冷灰，与“暗红”口径不符，已随六状态色板一起收敛。 */
+.voice-orb.is-error .voice-orb-core{
+  background:
+    radial-gradient(circle at 50% 42%,rgba(255,255,255,.1),rgba(255,255,255,0) 55%),
+    radial-gradient(circle at 50% 50%,rgba(var(--voice-rgb),.78),rgba(var(--voice-rgb),.4) 58%,rgba(var(--voice-rgb),.12) 100%);
+  box-shadow:0 0 24px rgba(var(--voice-rgb),.3),inset 0 -8px 28px rgba(0,0,0,.32);
+  opacity:.9;
+}
+
+/* ===== 状态文案：小而克制 + 细的动画省略号 ===== */
+.voice-state-text{
+  flex-shrink:0;margin-top:min(4.5vh,38px);
+  font-size:13px;letter-spacing:.14em;
+  color:rgba(233,230,244,.62);
+  text-align:center;min-height:1.4em;
+  /* 文案变化时只淡入，不撑动布局（min-height 已经占好位） */
+  animation:voiceTextIn .35s ease both;
+  transition:color .3s ease;
+}
+@keyframes voiceTextIn{from{opacity:0;transform:translateY(3px)}to{opacity:1;transform:translateY(0)}}
+/* 只在 connecting / thinking 时补省略号：文案末尾的“…”由 voice.js 给，这里不改内容，避免同一句话出现两套省略号 */
+.voice-view[data-state="connecting"] .voice-state-text,
+.voice-view[data-state="thinking"] .voice-state-text{color:rgba(233,230,244,.8)}
+.voice-view[data-state="error"] .voice-state-text{color:rgba(255,150,150,.92);letter-spacing:.06em}
+/* speaking 时 voice.js 把文案置空；空文本不留一块死白 */
+.voice-state-text:empty{min-height:0;margin-top:min(2vh,16px)}
+
+/* ===== 字幕：体验重点 =====
+   AI 在上、用户在下，字色/对齐区分；流式追加不能抖：固定两行最小高度 + 内容区平滑过渡 + 滚动隐藏滚动条。 */
+.voice-subtitle{
+  position:relative;
+  display:flex;flex-direction:column;
+  /* 行宽：手机上吃满屏宽，宽屏收到 640px —— 再宽一行就太长，眼睛要回扫。 */
+  width:min(100%,640px);
+  /* 关键：min-height 必须给足“AI 两行 + 用户一行”的高度并留余量，
+     否则它会在纵向 flex 里被压成几像素（实测被压到 9px，导致文字溢出压到下面的标签与计时器）。
+     超出部分由 overflow-y 兜住并隐藏滚动条，容器高度不随内容跳动。 */
+  /* 不拉伸：只按内容高度 + min-height 占位。若用 flex:1 吃满剩余高度，
+     内容少时字幕块会变成一大片空白（实测 287px 里只有 97px 有字）。 */
+  flex:0 1 auto;
+  min-height:118px;
+  max-height:38vh;
+  margin-top:min(4vh,30px);
+  padding:0 4px;
+  overflow-y:auto;overflow-x:hidden;
+  -webkit-overflow-scrolling:touch;
+  overscroll-behavior:contain;
+  overflow-anchor:none;
+  scroll-behavior:auto;
+  scrollbar-width:none;
+  /* 上下边缘做柔化，内容滚出时不是被硬切 */
+  -webkit-mask-image:linear-gradient(to bottom,transparent 0,#000 14px,#000 calc(100% - 14px),transparent 100%);
+  mask-image:linear-gradient(to bottom,transparent 0,#000 14px,#000 calc(100% - 14px),transparent 100%);
+}
+.voice-subtitle::-webkit-scrollbar{width:0;height:0;display:none}
+
+.voice-line{
+  /* 两行起步的占位，避免第一句到达时整块布局跳一下 */
+  min-height:2.9em;
+  padding:6px 2px;
+  word-break:break-word;overflow-wrap:anywhere;
+  transition:opacity .28s ease,transform .28s ease,color .28s ease;
+}
+/* AI 字幕：居中、浅紫白，字号最大，是“他正在说的这句话”。
+   注意 DOM 顺序是「用户行在前、AI 行在后」，而设计要求 AI 在上、用户在下，
+   故用 order 翻转视觉顺序（只改渲染顺序，不动 index.html 的结构）。 */
+.voice-line-assistant{
+  order:1;
+  font-size:clamp(17px,2.5vh,21px);
+  line-height:1.62;letter-spacing:.01em;
+  color:rgba(240,238,250,.96);
+  text-align:center;
+  text-wrap:pretty;
+}
+/* 流式追加时，光标般的呼吸提示只加在末尾，不挤动文本 */
+.voice-line-assistant.is-streaming::after{
+  content:'';display:inline-block;width:.42em;height:.42em;margin-left:.32em;
+  border-radius:50%;background:rgba(var(--voice-rgb),.9);
+  vertical-align:baseline;
+  animation:voiceDotBreathe 1.1s ease-in-out infinite;
+}
+@keyframes voiceDotBreathe{0%,100%{opacity:.25;transform:scale(.8)}50%{opacity:1;transform:scale(1)}}
+
+/* 用户字幕：偏下、偏右、更小更淡 —— “我刚说的话”是回声，不该抢 AI 的戏 */
+.voice-line-user{
+  order:2;
+  font-size:clamp(13px,1.7vh,15px);
+  line-height:1.55;
+  color:rgba(233,230,244,.46);
+  text-align:right;
+  padding-right:4px;
+  margin-top:6px;
+}
+/* 两行都在时，把用户那行推向底部区域 */
+.voice-line-user:not([style*="none"]){opacity:.95}
+/* 首次出现时轻微上浮，不是硬闪 */
+@keyframes voiceLineIn{from{opacity:0;transform:translateY(6px)}to{opacity:1;transform:translateY(0)}}
+.voice-line{animation:voiceLineIn .3s ease both}
+
+/* ===== 副语言标签：小胶囊横排、低饱和、克制、绝不溢出 ===== */
+.voice-signals{
+  /* 只占自身内容高度，不参与拉伸（否则空状态会白白吃掉半屏）。
+     margin-top:auto 把 stage 的剩余留白推到标签**下方**：标签紧贴字幕，
+     多余空白落在标签与控制区之间，视觉重心留在上半部。 */
+  display:flex;flex-wrap:wrap;align-items:center;justify-content:center;
+  align-content:flex-start;
+  gap:6px;
+  width:min(100%,560px);
+  flex:0 0 auto;
+  /* 固定占位：空的时候也留一行高度，出现/消失不会让整块上下跳（Lead 验收要求）。 */
+  min-height:26px;
+  max-height:58px;
+  margin-top:auto;
+  padding-top:min(3vh,22px);
+  overflow:hidden;
+}
+.voice-signal{
+  flex:0 0 auto;
+  display:inline-flex;align-items:center;
+  padding:3px 10px;border-radius:999px;
+  font-size:11px;line-height:1.5;letter-spacing:.03em;
+  color:rgba(233,230,244,.62);
+  background:rgba(255,255,255,.055);
+  border:1px solid rgba(255,255,255,.08);
+  white-space:nowrap;
+  animation:voiceSignalIn .32s cubic-bezier(.2,.8,.3,1) both;
+}
+@keyframes voiceSignalIn{from{opacity:0;transform:translateY(4px) scale(.94)}to{opacity:1;transform:none}}
+/* 标签轮换时轻微错峰，看起来是“一个个亮起来”而不是整排闪 */
+.voice-signal:nth-child(2){animation-delay:.05s}
+.voice-signal:nth-child(3){animation-delay:.1s}
+.voice-signal:nth-child(4){animation-delay:.15s}
+/* ===== 底部控制区 ===== */
+.voice-controls{
+  position:relative;z-index:2;flex-shrink:0;
+  display:flex;flex-direction:column;align-items:center;
+  padding:12px 20px calc(env(safe-area-inset-bottom,0px) + 20px);
+  background:linear-gradient(to top,rgba(6,6,10,.86),rgba(6,6,10,0));
+}
+/* 计时：等宽数字，秒数跳动时宽度不抖 */
+.voice-timer{
+  font-size:12px;letter-spacing:.16em;
+  font-variant-numeric:tabular-nums;-moz-font-feature-settings:"tnum";font-feature-settings:"tnum";
+  color:rgba(233,230,244,.42);
+  margin-bottom:16px;
+  min-height:1.2em;
+}
+.voice-timer:empty{display:none}
+
+.voice-control-row{
+  display:flex;align-items:flex-start;justify-content:center;
+  gap:clamp(22px,6vw,44px);
+}
+
+/* 通用控制键：图标 + 下方小字。按压反馈用 scale（transform 而非尺寸，不触发重排） */
+.voice-ctl{
+  display:flex;flex-direction:column;align-items:center;gap:7px;
+  min-width:56px;
+  background:none;border:none;padding:6px 2px;
+  color:rgba(233,230,244,.66);
+  font-family:inherit;
+  cursor:pointer;
+  transition:color .18s ease,transform .12s ease,opacity .18s ease;
+  -webkit-tap-highlight-color:transparent;
+  touch-action:manipulation;
+}
+/* 图标外圈做成一块玻璃，和顶栏按钮同一套语言 */
+.voice-ctl > svg{
+  box-sizing:content-box;
+  padding:13px;border-radius:50%;
+  background:rgba(255,255,255,.06);
+  border:1px solid rgba(255,255,255,.085);
+  -webkit-backdrop-filter:blur(10px);backdrop-filter:blur(10px);
+  transition:background .18s ease,border-color .18s ease,transform .12s ease,opacity .18s ease;
+}
+.voice-ctl:hover{color:rgba(233,230,244,.92)}
+.voice-ctl:hover > svg{background:rgba(255,255,255,.11)}
+.voice-ctl:active{transform:scale(.93)}
+.voice-ctl:active > svg{transform:scale(.96)}
+.voice-ctl-label{font-size:11px;letter-spacing:.06em;opacity:.9}
+/* 非激活态的功能键弱化：给主键让出视觉重量 */
+#btn-voice-interrupt:not(.is-active){opacity:.42}
+#btn-voice-interrupt:not(.is-active) > svg{background:rgba(255,255,255,.03)}
+/* AI 正在说话时，「打断」变实：琥珀色描边 + 轻微呼吸，告诉用户“现在按有用” */
+#btn-voice-interrupt.is-active{opacity:1;color:#fbbf24}
+#btn-voice-interrupt.is-active > svg{
+  background:rgba(245,158,11,.14);
+  border-color:rgba(245,158,11,.5);
+  animation:voiceInterruptReady 1.8s ease-in-out infinite;
+}
+@keyframes voiceInterruptReady{
+  0%,100%{box-shadow:0 0 0 0 rgba(245,158,11,.28)}
+  50%{box-shadow:0 0 0 6px rgba(245,158,11,0)}
+}
+/* 未开始通话时，静音/打断没有意义：压暗并禁点，避免误触后“按了没反应” */
+.voice-view[data-state="idle"] .voice-ctl:not(.voice-ctl-main),
+.voice-view[data-state="error"] .voice-ctl:not(.voice-ctl-main){opacity:.3;pointer-events:none}
+/* 静音：按下后变成“危险但不刺眼”的暗红（voice.js 只切类） */
+#btn-voice-mute.is-on{color:#f87171}
+#btn-voice-mute.is-on > svg{background:rgba(239,68,68,.16);border-color:rgba(239,68,68,.45)}
+
+/* 主键：开始通话。这一颗是“绿色接听”，比其余两个大一号、亮一档 */
+.voice-ctl-main > svg{
+  padding:16px;
+  background:linear-gradient(160deg,#34d399,#10b981 62%,#059669);
+  border-color:rgba(255,255,255,.22);
+  color:#04231a;
+  box-shadow:0 6px 22px rgba(16,185,129,.34),0 1px 0 rgba(255,255,255,.25) inset;
+}
+.voice-ctl-main{color:#d1fae5}
+.voice-ctl-main:hover > svg{background:linear-gradient(160deg,#4ade80,#10b981 62%,#059669);box-shadow:0 8px 26px rgba(16,185,129,.44),0 1px 0 rgba(255,255,255,.3) inset}
+.voice-ctl-main:active > svg{transform:scale(.94)}
+.voice-ctl-main .voice-ctl-label{color:#a7f3d0;opacity:1}
+
+/* 挂断：整行的胶囊键，暗红渐变，足够醒目但不荧光（“高级的断开”不是报警红灯） */
+.voice-hangup{
+  display:inline-flex;align-items:center;justify-content:center;gap:8px;
+  margin-top:18px;
+  padding:13px 44px;
+  border:none;border-radius:999px;
+  font-family:inherit;font-size:14px;letter-spacing:.06em;
+  color:#ffe4e6;
+  background:linear-gradient(160deg,#e11d48,#be123c 58%,#9f1239);
+  box-shadow:0 8px 26px rgba(190,18,60,.32),inset 0 1px 0 rgba(255,255,255,.18);
+  cursor:pointer;
+  transition:transform .12s ease,box-shadow .18s ease,filter .18s ease;
+  -webkit-tap-highlight-color:transparent;
+  touch-action:manipulation;
+}
+.voice-hangup:hover{filter:brightness(1.08);box-shadow:0 10px 30px rgba(190,18,60,.42),inset 0 1px 0 rgba(255,255,255,.22)}
+.voice-hangup:active{transform:scale(.96);filter:brightness(.96)}
+.voice-hangup svg{flex-shrink:0}
+/* 挂断瞬间的一次性收束。Lead 的口径把 is-hangup 列在一次性类里、归属含糊，
+   故 #voice-view 与 #voice-orb 两处都接住：挂哪都能收尾。 */
+.voice-view.is-hangup{animation:voiceViewOut .5s ease both}
+@keyframes voiceViewOut{0%{opacity:1}100%{opacity:.88;transform:scale(.995)}}
+.voice-orb.is-hangup{animation:voiceOrbHangup .45s cubic-bezier(.4,0,.2,1) both}
+@keyframes voiceOrbHangup{
+  0%{transform:scale(1);opacity:1}
+  60%{transform:scale(.9);opacity:.5}
+  100%{transform:scale(.84);opacity:0}
+}
+
+/* ---- 状态联动：整层色调随状态换（只重定义变量，子元素自动跟随，避免逐元素写颜色） ----
+   六个状态必须**一眼可分**，不能只靠细微色差。色相刻意拉开到 灰 / 蓝 / 青绿 / 琥珀 / 紫 / 红：
+     idle        冷灰   （没在听、待命）
+     connecting  暗蓝   （正在建立连接）
+     listening   青绿   （正在听你说）
+     thinking    琥珀   （正在想）
+     speaking    紫     （正在说）
+     error       暗红   （出错）
+   --voice-glow 决定背景光晕强度，也随状态变化，形成“呼吸力度”的额外区分。 */
+.voice-view[data-state="idle"]{--voice-rgb:150,158,176;--voice-glow:.12}
+.voice-view[data-state="connecting"]{--voice-rgb:72,96,190;--voice-glow:.2}
+.voice-view[data-state="listening"]{--voice-rgb:52,199,168;--voice-glow:.34}
+.voice-view[data-state="thinking"]{--voice-rgb:230,168,58;--voice-glow:.28}
+.voice-view[data-state="speaking"]{--voice-rgb:150,96,232;--voice-glow:.46}
+.voice-view[data-state="error"]{--voice-rgb:178,58,66;--voice-glow:.14}
+/* 光晕颜色跟随变量，但过渡放慢，切状态时是“换气”而不是“换灯” */
+.voice-ambient-glow{transition:opacity 1.1s ease,background 1.1s ease}
+.voice-orb-ring,.voice-orb-core{transition:border-color .6s ease,box-shadow .6s ease,background .6s ease}
+
+/* ===== 窄屏（≤768px）：orb 占更大比例，控制区更靠下，拇指可达 ===== */
+@media (max-width:768px){
+  /* 窄屏侧栏是 80vw 抽屉且 z-index:60（生图视图让位到 55），通话层必须压过它 */
+  .voice-view{z-index:65}
+  .voice-bar{padding:calc(env(safe-area-inset-top,0px) + 10px) 12px 6px}
+  .voice-stage{padding:3vh 16px 0}
+  /* 窄屏 orb 必须收小：它一旦占满，字幕/标签/计时器就会被挤到重叠（实测踩过）。 */
+  /* 尺寸同时受宽度与**可视高度**约束：只按 vw 算时，矮屏（如 390×844 的 WebView 实际可视 688px）
+     球会把 stage 顶出上边界。加 30vh 上限后，矮屏自动收小。 */
+  .voice-orb{width:min(52vw,26vh,240px);aspect-ratio:1 / 1;flex:0 1 auto;min-height:0}
+  .voice-state-text{margin-top:min(2.6vh,20px);font-size:12.5px}
+  .voice-subtitle{margin-top:12px;flex:0 1 auto;min-height:104px;max-height:30vh}
+  .voice-line{min-height:2.4em;padding:4px 2px}
+  .voice-line-assistant{font-size:clamp(15px,2.2vh,18px);line-height:1.55}
+  .voice-line-user{font-size:12.5px}
+  .voice-signals{margin-top:10px;gap:5px;min-height:24px;max-height:52px}
+  .voice-signal{font-size:10.5px;padding:3px 9px}
+  .voice-controls{padding:8px 16px calc(env(safe-area-inset-bottom,0px) + 16px)}
+  .voice-timer{margin-bottom:10px}
+  .voice-control-row{gap:clamp(18px,9vw,36px)}
+  /* 主键在窄屏再大一档，拇指按得到 */
+  .voice-ctl-main > svg{padding:18px}
+  .voice-hangup{margin-top:12px;padding:13px 46px;width:auto}
+}
+/* 极窄 / 矮屏（如 360×640）：先保住控制区与字幕，orb 让位 */
+@media (max-width:400px),(max-height:680px){
+  .voice-orb{width:min(46vw,26vh,190px);aspect-ratio:1 / 1}
+  .voice-state-text{margin-top:10px}
+  .voice-subtitle{margin-top:8px;flex:0 1 auto;min-height:92px;max-height:28vh}
+  .voice-line{min-height:2.2em}
+  .voice-signals{min-height:22px;padding-top:8px}
+  .voice-controls{padding-bottom:calc(env(safe-area-inset-bottom,0px) + 16px)}
+  .voice-ctl-label{font-size:10px}
+}
+/* 宽屏：内容聚拢到中间一条竖轴上，不要让 orb 和字幕拉得离得太远 */
+@media (min-width:769px){
+  .voice-stage{padding-top:min(4vh,34px)}
+  .voice-state-text{margin-top:min(3.4vh,30px)}
+  .voice-subtitle{margin-top:min(2.4vh,18px);max-height:22vh}
+  .voice-controls{padding-bottom:calc(env(safe-area-inset-bottom,0px) + 26px)}
+  /* 宽屏把控制区收进一条窄轴：三键间距固定，不与屏宽等比散开；
+     挂断键与上面一排保持同一视觉中轴。 */
+  .voice-control-row{gap:56px}
+  .voice-hangup{min-width:190px}
+  /* 宽屏 orb 用 CSS 尺寸 = 视觉尺寸 / 最大缩放倍数(1.22)：
+     想要视觉 ~350px，CSS 就取 288px；这样 speaking 放大后仍在 360~420 区间，
+     且**不超出 layout 盒**的溢出预算（transform 不参与布局，视觉体积会挤占 stage 空间）。 */
+  .voice-orb{width:min(34vh,288px);max-width:288px;max-height:none}
+  .voice-controls{max-width:none}
+}
+/* 横屏手机（高度很小）：把 orb 压扁成可呼吸的圆，而不是把控制区挤出屏幕 */
+@media (max-height:520px) and (orientation:landscape){
+  .voice-bar{padding-top:calc(env(safe-area-inset-top,0px) + 6px);padding-bottom:4px}
+  .voice-stage{flex-direction:row;align-items:center;justify-content:center;gap:24px;padding:0 24px}
+  .voice-orb{width:min(56vh,32vw);height:min(56vh,32vw)}
+  .voice-state-text,.voice-subtitle,.voice-signals{margin-top:0}
+  .voice-subtitle{flex:0 1 auto;max-height:38vh}
+  .voice-controls{padding:6px 16px calc(env(safe-area-inset-bottom,0px) + 8px)}
+  .voice-timer{margin-bottom:8px}
+  .voice-hangup{margin-top:10px;padding:10px 34px}
+}
+
+/* 降级：系统开了「减少动态效果」就不做持续动画（球体只保留状态色，不做律动） */
+@media (prefers-reduced-motion:reduce){
+  .voice-view,.voice-ambient-glow,.voice-orb,.voice-orb-ring,.voice-orb-core,
+  .voice-line,.voice-signal,.voice-state-text{animation:none!important}
+  .voice-orb.is-speaking{transform:scale(1.04)}
+}
+
+/* ===== 设置面板里的语音分组：沿用既有 .setting-* 规格，只补三处既有组件没覆盖到的细节 ===== */
+/* 1) .setting-row 里的 range 滑块：沿用数字项的等宽数字，但宽度自适应，并给一条低对比度轨道 */
+.setting-row input[type="range"]{
+  flex:1;min-width:0;
+  height:4px;border-radius:2px;
+  -webkit-appearance:none;appearance:none;
+  background:var(--bg);
+  border:1px solid var(--border);
+  accent-color:var(--primary);
+  cursor:pointer;
+}
+.setting-row input[type="range"]::-webkit-slider-thumb{
+  -webkit-appearance:none;appearance:none;
+  width:16px;height:16px;border-radius:50%;
+  background:var(--primary);
+  /* 环给的是“轨道底色”，滑块的浮起用外层阴影，不依赖 bg2 的具体色值 */
+  box-shadow:0 0 0 2px var(--bg2),0 1px 3px rgba(0,0,0,.3);
+  cursor:pointer;
+  transition:transform .12s ease;
+}
+.setting-row input[type="range"]:active::-webkit-slider-thumb{transform:scale(1.08)}
+/* 2) 取值回显（如 0.50）：等宽数字，避免拖动时右侧数字宽度跳动 */
+.setting-row input[type="range"] + span{
+  font-variant-numeric:tabular-nums;
+  font-feature-settings:"tnum";
+  flex-shrink:0;
+}
+/* 3) 只读小结果块（测试语音链路的输出）：沿用 hint 的低对比，但给一块底，让「结果」和「说明」分得开 */
+.voice-test-result{font-size:12px;line-height:1.55;color:var(--text2)}
+.voice-test-result.ok{color:var(--success)}
+.voice-test-result.err{color:var(--danger)}
+.voice-test-result.warn{color:var(--warning)}
+
+/* ===== 顶栏「可通话」入口：右上角一颗小点（只有相机/麦克风就绪时 voice.js 才需要管，这里纯静态提示） ===== */
+.btn-voice-entry{position:relative}
+.btn-voice-entry::after{
+  content:'';position:absolute;top:6px;right:6px;
+  width:6px;height:6px;border-radius:50%;
+  background:var(--success);
+  box-shadow:0 0 0 2px var(--glass-bg);
+  animation:voiceEntryDot 2.6s ease-in-out infinite;
+}
+@keyframes voiceEntryDot{0%,100%{opacity:.45}50%{opacity:1}}
+/* 通话层打开时，入口按钮不再需要提示 */
+body.voice-view-open .btn-voice-entry::after{display:none}

@@ -1196,3 +1196,49 @@ image: <reference.png Blob>
 **同步主仓库时注意**：以上全是 `www/` 下的共享文件改动，`sync.ps1` 可直接同步；**没有新增原生插件、没有新增权限**。`image-gen.js` 里凡是 `isCapacitor()` 分支都必须原样保留（缩略图、图片落盘、通知）。
 
 **cache-bust**：只升真正变了的三个 —— `image-gen.js` v123→v124、`db.js` v123→v124、`style.css` v123→v124；`app.js` 本次未改（保持 v123）。
+
+
+### 32. v125：语音通话模块（cache-bust 新模块 v125 / db.js v124→v125 / app.js v123→v125 / image-gen.js v124→v125 / style.css v124→v125）
+
+> 本节按铁律登记**所有与 APK / Capacitor 相关的改动**。纯 Web 逻辑（状态机、提示词、动效）不在此登记。
+
+**一、原生权限与插件（本次唯一的新增原生能力 = 麦克风）**
+
+| 文件 | 改动 | 为什么必须登记 |
+|---|---|---|
+| `android/app/src/main/AndroidManifest.xml` | 新增 `RECORD_AUDIO`、`MODIFY_AUDIO_SETTINGS`、`<uses-feature android:name="android.hardware.microphone" android:required="false"/>` | **getUserMedia 在 WebView 里的硬前提**。Capacitor 6.2.1 自身的 `BridgeWebChromeClient` 已实现 `onPermissionRequest` 对 `RESOURCE_AUDIO_CAPTURE` 申请授权，**真正缺的只有 manifest 这一行**；缺它时系统直接判「未声明」→ 拒绝 → `getUserMedia` 抛 `NotAllowedError`。这一条是本次最大的平台风险，已真机（22081212C / Android 15）实测排除 |
+| `.../java/com/avelec/chatlite/MainActivity.java` | 新增 `MicWebChromeClient extends BridgeWebChromeClient`，只覆盖 `onPermissionRequest` | 见下方「permissionListener 槽位冲突」——**不覆盖会偶发永久挂起**。与 `ChatStreamPlugin` / `MediaSaverPlugin` 同套路，`cap sync` / `npm install` 不覆盖 |
+
+**二、permissionListener 槽位冲突（源码级确定的缺陷，非运行时复现阶段）**
+
+Capacitor 6.2.1 `BridgeWebChromeClient` 用**单个成员变量** `permissionListener` 承接 ActivityResult 回调，`onPermissionRequest` 与 `onShowFileChooser` 都会先给它赋值：
+
+1. 点通话 → `getUserMedia({audio:true})` → `onPermissionRequest` → `permissionListener = {授予就 request.grant}` → `permissionLauncher.launch([RECORD_AUDIO])`
+2. 系统弹框还开着时用户去发一张图片 → `onShowFileChooser` 的 capture 分支 → `permissionListener` **被覆盖**成文件回调
+3. 第一个权限回调返回时 `permissionListener` 已指向第二个 → WebView 侧的 `PermissionRequest` **既没 grant 也没 deny** → **`getUserMedia` 的 Promise 永久 pending**，不抛错、不 reject、无超时
+
+JS 侧表现为「通话一直卡在连接中」，而日志里 `onPermissionRequest: wantsAudio=true` 看起来一切正常，**极难归因**。
+
+> **诚实标注**：这是**读源码得出的确定性缺陷**，并用「拒绝路径实测不挂起」侧面验证了自写实现正确；但**未在运行时复现**「通话中同时发图」（复现需要通话 UI 已可用）。
+> 修法：自写 `MicWebChromeClient` 用独立字段承接音频权限请求，与文件选择器隔离，并保证**每条分支都必定 grant 或 deny**，不留悬空路径。
+
+**三、Web 侧与 APK 相关的改动**
+
+| 改动 | 位置 | 说明 |
+|---|---|---|
+| 克隆参考音存储 | `voice-settings.js` `saveCloneRef()` / `loadCloneRef()` | APK 走 `CapFilesystem`（`Directory.CACHE`，文件名 `voice-clone-ref.<ext>`）；Web 走 IndexedDB（`chatlite_voice_clone_ref`）。**参考音绝不进 settings / localStorage**（base64 会把设置撑爆，同 §4.2 OOM 一类） |
+| 返回键层栈 | `image-gen.js` `App.addListener('backButton')` 最前面 | 新增 `if (state.voiceOpen) { VoiceCall.close(); return; }`。通话层在生图之上，**不接进这条链的话通话中按返回键会一路穿到底部触发 `App.exitApp()` 直接退出 App** |
+| 语音请求不可取消 | `voice.js` 全部请求 | `CapacitorHttp.enabled=true` 时 POST 走 `nativePromise`，**`AbortController` 无效**（§4.15）。所有请求用 `Promise.race(请求, 放弃计时器)`，放弃后仍必须 settle，不留悬挂 Promise |
+| debug 包 WebView 调试默认开 | Capacitor 上游默认行为 | `Bridge.initWebView()` 用 `config.isWebContentsDebuggingEnabled()`，默认值 = `isDebug`。**未覆盖**（覆盖会破坏真机 CDP 调试手段）；release 包默认关闭 |
+
+**四、cache-bust**
+
+只升真正变了的：`db.js` v124→v125、`app.js` v123→v125、`image-gen.js` v124→v125（返回键一行）、`style.css` v124→v125、`index.html`（引用）。
+新模块首发即 v125：`voice.js`、`voice-director.js`、`voice-settings.js`。
+**其余模块保持原值**（§4.7 铁律：不「顺手统一升号」）。
+
+**五、主仓库同步提示**
+
+`voice.js` / `voice-director.js` / `voice-settings.js` 是纯 Web 代码，可整体同步；
+但 `voice-settings.js` 里的 `isCapacitor()` 分支（`CapFilesystem` 存克隆参考音）**必须原样保留**，Web 侧自动降级到 IndexedDB。
+`MainActivity.java` / `AndroidManifest.xml` 属原生，**不推主仓库**。

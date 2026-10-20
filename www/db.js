@@ -140,7 +140,47 @@ function defaultSettings() {
     // F1: 生图 API 配置
     imageProviders: [],
     imageProviderId: null,
-    images: []
+    images: [],
+    // v125: 语音通话（详见 voice-模块-架构契约.md §3.1）
+    voice: defaultVoiceSettings()
+  };
+}
+
+// v125: 语音通话设置的默认值。
+//   独立成函数的原因：migrateSettings 也需要逐字段补默认（老用户没有 voice 字段），
+//   两处共用同一份真相，避免"默认值写了两次、改一处忘一处"。
+function defaultVoiceSettings() {
+  return {
+    enabled: true,
+    asrProviderId: '',      // 空 = 用内置 MiMo 兜底
+    asrModel: 'mimo-v2.5-asr',
+    ttsProviderId: '',
+    ttsModel: 'mimo-v2.5-tts',
+    brainProviderId: '',    // 空 = 跟随当前会话模型
+    brainModel: '',
+    voiceId: 'Mia',
+    voiceDesign: '',        // 非空则优先用声音设计模型
+    cloneRefName: '',       // 克隆参考音（存文件系统，不存 base64）
+    personaId: 'warm',
+    customPersona: '',
+    sensitivity: 0.5,
+    endpointSilenceMs: 700,
+    minUtteranceMs: 400,
+    bargeIn: true,
+    bargeInThreshold: 0.35,
+    showTranscript: true,
+    showSignals: true,
+    autoHangupSilenceMs: 45000,
+    ttsFormat: 'pcm16',
+    // v125 修（QA 发现）：契约 §3.1 里写了 rate 但这里漏了，
+    //   而 migrateVoiceSettings 只保留 defaultVoiceSettings() 里有的键 ——
+    //   于是用户手写 rate 也会被**静默丢掉**，voice.js 读 voiceCfg().rate 永远拿到默认 1。
+    //   这是「字段写了但用不了」的典型：没人报错，功能就是不存在。默认 1 = 正常速度。
+    rate: 1.0,
+    // v125 修（QA 发现）：契约里叫 haptics（复数），实现里读的是 haptic（单数）。
+    //   两个都保留以避免再踩：haptic 是实际生效字段，haptics 作为兼容别名同步。
+    haptic: true,
+    haptics: true
   };
 }
 
@@ -185,7 +225,51 @@ function migrateSettings(s) {
   if (typeof s.imageHaptic !== 'boolean') s.imageHaptic = true;
   if (!s.imageModelByProvider || typeof s.imageModelByProvider !== 'object') s.imageModelByProvider = {};
   if (!Array.isArray(s.imageRecentPrompts)) s.imageRecentPrompts = [];
+  // v125: 语音通话字段迁移 —— 逐字段补默认（只增不改）
+  //   不能整体用默认值覆盖：用户点过一次「音色」就只写了 voiceId，其余字段必须保住默认。
+  //   类型也要校验：前端数字输入框存回来是字符串（"700"），range 存回来可能 NaN。
+  s.voice = migrateVoiceSettings(s.voice);
   return s;
+}
+
+function migrateVoiceSettings(v) {
+  var def = defaultVoiceSettings();
+  if (!v || typeof v !== 'object') return def;
+  var out = {};
+  for (var k in def) {
+    if (!Object.prototype.hasOwnProperty.call(def, k)) continue;
+    out[k] = Object.prototype.hasOwnProperty.call(v, k) && v[k] !== undefined && v[k] !== null ? v[k] : def[k];
+  }
+  // 类型收敛
+  out.enabled = !!out.enabled;
+  out.bargeIn = !!out.bargeIn;
+  out.showTranscript = !!out.showTranscript;
+  out.showSignals = !!out.showSignals;
+  out.haptic = !!out.haptic;
+  out.sensitivity = clampNum(out.sensitivity, 0, 1, def.sensitivity);
+  out.bargeInThreshold = clampNum(out.bargeInThreshold, 0.05, 1, def.bargeInThreshold);
+  out.endpointSilenceMs = clampNum(out.endpointSilenceMs, 300, 3000, def.endpointSilenceMs);
+  out.minUtteranceMs = clampNum(out.minUtteranceMs, 200, 3000, def.minUtteranceMs);
+  out.autoHangupSilenceMs = clampNum(out.autoHangupSilenceMs, 5000, 600000, def.autoHangupSilenceMs);
+  ['asrProviderId','asrModel','ttsProviderId','ttsModel','brainProviderId','brainModel',
+   'voiceId','voiceDesign','cloneRefName','personaId','customPersona'].forEach(function(k) {
+    if (typeof out[k] !== 'string') out[k] = def[k];
+  });
+  // 模型名是必填项：空串会让上游报错，回落到默认
+  if (!out.asrModel.trim()) out.asrModel = def.asrModel;
+  if (!out.ttsModel.trim()) out.ttsModel = def.ttsModel;
+  if (!out.voiceId.trim()) out.voiceId = def.voiceId;
+  if (!out.personaId.trim()) out.personaId = def.personaId;
+  return out;
+}
+
+// 数字收敛：接受字符串（表单回填），非法值回落默认
+function clampNum(v, min, max, fallback) {
+  var n = typeof v === 'number' ? v : parseFloat(v);
+  if (!isFinite(n)) return fallback;
+  if (n < min) return min;
+  if (n > max) return max;
+  return n;
 }
 
 // 异步写入 IndexedDB（替代 localStorage.setItem）

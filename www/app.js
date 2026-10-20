@@ -70,6 +70,8 @@ const state = {
   _imagePageSize: 30,
   // v123: 窄屏打开生图时自动收起了侧栏，关闭时要还原（只还原自己收的那次）
   _imageSidebarAutoHidden: false,
+  // v125: 语音通话视图开关（运行时状态由 voice.js 私有持有，这里只留一个跨模块可读的开关标记）
+  voiceOpen: false,
 };
 
 // STORAGE_KEY / SETTINGS_KEY 已迁移到 db.js

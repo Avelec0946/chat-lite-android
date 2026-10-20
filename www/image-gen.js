@@ -662,6 +662,13 @@ function updateImageGalleryCount() {
 function toggleImageView(open) {
   var imageView = document.getElementById('image-view');
   if (!imageView) return;
+  // v125: 与语音通话互斥。voice.js 的 open() 会关掉生图，但此前**没有反向**——
+  //   导致通话中从侧栏点生图会出现两个全屏视图同时 display:flex 叠在一起
+  //   （QA 实测：两者都盖在屏幕上，elementFromPoint 命中的仍是 #voice-view）。
+  //   互斥必须是双向的，单向只做一半等于没做。
+  if (open && state.voiceOpen && window.VoiceCall && typeof window.VoiceCall.close === 'function') {
+    try { window.VoiceCall.close(); } catch (e) {}
+  }
   state.imageViewOpen = !!open;
   imageView.style.display = open ? 'flex' : 'none';
   // v123: 生图打开时侧栏保留可用，用 body class 让出宽度
@@ -3332,6 +3339,13 @@ function initImageView() {
     var App = Capacitor.Plugins.App;
     // v123: 返回键改成「层栈」——谁在最上层就关谁（此前菜单/预览不在这条链上，按返回键会直接跳出去）
     App.addListener('backButton', function() {
+      // v125: 语音通话层在整条返回链的最上面（它在生图之上、也是全屏），
+      //   所以必须最先判定 —— 否则通话中按返回键会一路穿到底部触发 exitApp（直接退出 App）。
+      //   注意 state.voiceOpen 由 voice.js 维护；voice.js 未加载时它是 undefined，不影响原逻辑。
+      if (state.voiceOpen) {
+        if (window.VoiceCall && typeof VoiceCall.close === 'function') VoiceCall.close();
+        return;
+      }
       var menu = document.getElementById('image-card-menu');
       if (menu) { closeImageCardMenu(); return; }
       var preview = document.querySelector('.image-preview-overlay');

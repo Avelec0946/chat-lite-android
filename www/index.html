@@ -7,7 +7,7 @@
 <title>chat-lite</title>
 <link rel="stylesheet" href="vendor/highlight/github-dark.min.css?v=116">
 <link rel="stylesheet" href="vendor/katex/katex.min.css?v=116">
-<link rel="stylesheet" href="style.css?v=124">
+<link rel="stylesheet" href="style.css?v=125">
   <meta name="theme-color" content="#7c3aed">
   <link rel="manifest" href="manifest.json">
 </head>
@@ -57,8 +57,9 @@
         <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="3 10 8 15 13 10"/><line x1="8" y1="15" x2="8" y2="3"/></svg>
       </button>
       <input type="file" id="import-file-input" accept=".json" style="display:none">
-      <button id="btn-open-image-view-top" class="btn btn-icon" title="生图">
-        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="18" height="18" rx="2"/><circle cx="8.5" cy="8.5" r="1.5"/><polyline points="21 15 16 10 5 21"/></svg>
+      <!-- v125: 顶栏生图入口改为「通话」入口（生图入口保留在左下侧栏） -->
+      <button id="btn-open-voice-view" class="btn btn-icon btn-voice-entry" title="语音通话">
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2a3 3 0 0 0-3 3v7a3 3 0 0 0 6 0V5a3 3 0 0 0-3-3z"/><path d="M19 10v2a7 7 0 0 1-14 0v-2"/><line x1="12" y1="19" x2="12" y2="22"/></svg>
       </button>
       <button id="btn-settings" class="btn btn-icon" title="设置">
         <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>
@@ -94,6 +95,73 @@
       </div>
     </div>
   </main>
+
+
+  <!-- v125: 语音通话界面（主视图，层级高于生图） -->
+  <section id="voice-view" class="voice-view" style="display:none">
+    <div class="voice-ambient" aria-hidden="true">
+      <div class="voice-ambient-glow"></div>
+    </div>
+
+    <div class="voice-bar">
+      <button id="btn-voice-back" class="btn btn-icon" title="返回对话">
+        <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="19" y1="12" x2="5" y2="12"/><polyline points="12 19 5 12 12 5"/></svg>
+      </button>
+      <div class="voice-bar-title">
+        <span class="voice-bar-name">语音通话</span>
+        <span class="voice-bar-sub" id="voice-voice-name">—</span>
+      </div>
+      <button id="btn-voice-settings" class="btn btn-icon" title="语音设置">
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>
+      </button>
+    </div>
+
+    <div class="voice-stage">
+      <div id="voice-orb" class="voice-orb is-idle">
+        <div class="voice-orb-ring r1"></div>
+        <div class="voice-orb-ring r2"></div>
+        <div class="voice-orb-ring r3"></div>
+        <div class="voice-orb-core">
+          <svg class="voice-orb-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M12 2a3 3 0 0 0-3 3v7a3 3 0 0 0 6 0V5a3 3 0 0 0-3-3z"/>
+            <path d="M19 10v2a7 7 0 0 1-14 0v-2"/>
+            <line x1="12" y1="19" x2="12" y2="22"/>
+          </svg>
+        </div>
+      </div>
+
+      <div id="voice-state-text" class="voice-state-text">准备就绪</div>
+
+      <div id="voice-subtitle" class="voice-subtitle">
+        <div class="voice-line voice-line-user" id="voice-line-user" style="display:none"></div>
+        <div class="voice-line voice-line-assistant" id="voice-line-assistant" style="display:none"></div>
+      </div>
+
+      <div id="voice-signals" class="voice-signals"></div>
+    </div>
+
+    <div class="voice-controls">
+      <div class="voice-timer" id="voice-timer">00:00</div>
+      <div class="voice-control-row">
+        <button id="btn-voice-mute" class="voice-ctl" title="静音麦克风">
+          <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="1" y1="1" x2="23" y2="23"/><path d="M9 9v3a3 3 0 0 0 5.12 2.12M15 9.34V5a3 3 0 0 0-5.94-.6"/><path d="M17 16.95A7 7 0 0 1 5 12v-2m14 0v2a7 7 0 0 1-.11 1.23"/><line x1="12" y1="19" x2="12" y2="22"/></svg>
+          <span class="voice-ctl-label">静音</span>
+        </button>
+        <button id="btn-voice-call" class="voice-ctl voice-ctl-main" title="开始通话">
+          <svg width="26" height="26" viewBox="0 0 24 24" fill="currentColor"><path d="M6.62 10.79a15.05 15.05 0 0 0 6.59 6.59l2.2-2.2a1 1 0 0 1 1.02-.24 11.36 11.36 0 0 0 3.57.57 1 1 0 0 1 1 1V20a1 1 0 0 1-1 1A17 17 0 0 1 3 4a1 1 0 0 1 1-1h3.5a1 1 0 0 1 1 1 11.36 11.36 0 0 0 .57 3.57 1 1 0 0 1-.25 1.02z"/></svg>
+          <span class="voice-ctl-label">开始通话</span>
+        </button>
+        <button id="btn-voice-interrupt" class="voice-ctl" title="打断">
+          <svg width="22" height="22" viewBox="0 0 24 24" fill="currentColor"><rect x="6" y="6" width="12" height="12" rx="2"/></svg>
+          <span class="voice-ctl-label">打断</span>
+        </button>
+      </div>
+      <button id="btn-voice-hangup" class="voice-hangup" title="挂断" style="display:none">
+        <svg width="24" height="24" viewBox="0 0 24 24" fill="currentColor"><path d="M12 9c-1.6 0-3.15.25-4.6.72v3.1c0 .39-.23.74-.56.9-.98.49-1.87 1.12-2.66 1.85-.18.18-.43.28-.7.28-.28 0-.53-.11-.71-.29L.29 13.08a.96.96 0 0 1-.29-.7c0-.28.11-.53.29-.71C3.34 8.78 7.46 7 12 7s8.66 1.78 11.71 4.67c.18.18.29.43.29.71 0 .27-.11.52-.29.7l-2.48 2.48a.996.996 0 0 1-1.41 0 11.65 11.65 0 0 0-2.66-1.85.98.98 0 0 1-.56-.9v-3.1C15.15 9.25 13.6 9 12 9z"/></svg>
+        <span>挂断</span>
+      </button>
+    </div>
+  </section>
 
   <!-- F1: 生图界面 -->
   <section id="image-view" class="image-view" style="display:none">
@@ -487,6 +555,117 @@
           </div>
         </details>
 
+        <!-- v125: ===== 语音通话 ===== -->
+        <details class="setting-group setting-group-collapsible" data-group-key="voice">
+          <summary class="setting-group-summary">语音通话 <span class="setting-scope">全局·所有会话可用</span></summary>
+          <div class="setting-group-body">
+          <span class="setting-hint">通话用三路模型：听（语音识别）、想（对话大脑）、说（语音合成）。三路都可以指向各自渠道，互不影响。密钥与地址在「接口管理」里维护，这里只做选择。</span>
+
+          <div class="setting-divider"></div>
+          <span class="setting-section-title">听 · 语音识别（ASR）</span>
+          <label class="setting-row setting-row-col">
+            <span>识别渠道</span>
+            <select id="voice-asr-provider" class="setting-select"></select>
+          </label>
+          <label class="setting-row setting-row-col">
+            <span>识别模型</span>
+            <input id="voice-asr-model" class="setting-select" type="text" placeholder="mimo-v2.5-asr" list="voice-asr-model-suggestions">
+          </label>
+          <datalist id="voice-asr-model-suggestions"></datalist>
+          <span class="setting-hint">只接受 wav / mp3。客户端会先做端点检测，静音片段不会送进识别（上游会把静音幻觉成文字）。</span>
+
+          <div class="setting-divider"></div>
+          <span class="setting-section-title">想 · 对话大脑</span>
+          <label class="setting-row setting-row-col">
+            <span>大脑渠道</span>
+            <select id="voice-brain-provider" class="setting-select"></select>
+          </label>
+          <span class="setting-hint">留空 = 跟随当前会话的模型。</span>
+          <label class="setting-row setting-row-col">
+            <span>大脑模型</span>
+            <input id="voice-brain-model" class="setting-select" type="text" placeholder="留空 = 跟随当前会话">
+          </label>
+          <label class="setting-row setting-row-col">
+            <span>人设</span>
+            <select id="voice-persona" class="setting-select"></select>
+          </label>
+          <label class="setting-row setting-row-col" id="voice-custom-persona-row" style="display:none">
+            <span>自定义人设补充</span>
+            <textarea id="voice-custom-persona" class="setting-textarea" rows="3" placeholder="如：说话带一点南方口音的感觉，偶尔会引用诗句"></textarea>
+          </label>
+
+          <div class="setting-divider"></div>
+          <span class="setting-section-title">说 · 语音合成（TTS）</span>
+          <label class="setting-row setting-row-col">
+            <span>合成渠道</span>
+            <select id="voice-tts-provider" class="setting-select"></select>
+          </label>
+          <label class="setting-row setting-row-col">
+            <span>合成模型</span>
+            <input id="voice-tts-model" class="setting-select" type="text" placeholder="mimo-v2.5-tts" list="voice-tts-model-suggestions">
+          </label>
+          <datalist id="voice-tts-model-suggestions"></datalist>
+          <label class="setting-row setting-row-col">
+            <span>音色</span>
+            <select id="voice-voice-id" class="setting-select"></select>
+          </label>
+          <span class="setting-hint" id="voice-voice-hint">9 个内置音色。想要独占音色可用「声音设计」（描述一个声音）或「声音克隆」（上传参考音频）。</span>
+          <label class="setting-row setting-row-col">
+            <span>声音设计（可选）</span>
+            <textarea id="voice-design" class="setting-textarea" rows="2" placeholder="如：一个温柔的女声，语速偏慢，带一点笑意。填了之后优先用声音设计模型"></textarea>
+          </label>
+          <div class="card-import-row">
+            <button id="btn-voice-clone-upload" class="btn btn-small">上传克隆参考音</button>
+            <button id="btn-voice-clone-clear" class="btn btn-small" style="background:var(--bg3);color:var(--text)">清除</button>
+            <input type="file" id="voice-clone-file" accept="audio/*" style="display:none">
+          </div>
+          <span class="setting-hint" id="voice-clone-hint">参考音建议 5~20 秒清晰单人语音。留空则用上面的音色。</span>
+
+          <div class="setting-divider"></div>
+          <span class="setting-section-title">对话手感</span>
+          <label class="setting-row">
+            <span>允许打断</span>
+            <label class="toggle-switch">
+              <input type="checkbox" id="voice-barge-in" checked>
+              <span class="toggle-slider"></span>
+            </label>
+          </label>
+          <span class="setting-hint">AI 说话时你一开口，它立刻停下来听你说。关掉则必须等它说完。</span>
+          <label class="setting-row">
+            <span>灵敏度</span>
+            <input type="range" id="voice-sensitivity" min="0" max="1" step="0.05" value="0.5" style="flex:1">
+            <span id="voice-sensitivity-value" style="font-size:12px;color:var(--text2);min-width:36px;text-align:right">0.50</span>
+          </label>
+          <span class="setting-hint">调高更容易被识别为「在说话」，嘈杂环境建议调低。</span>
+          <label class="setting-row">
+            <span>说完判定（毫秒）</span>
+            <input type="number" id="voice-endpoint-ms" class="setting-select setting-num" min="300" max="3000" step="50" placeholder="默认 700">
+          </label>
+          <span class="setting-hint">停顿多久算「你说完了」。数字小接话快但容易误抢，数字大更稳但会冷场。默认 700。</span>
+          <label class="setting-row">
+            <span>显示实时字幕</span>
+            <label class="toggle-switch">
+              <input type="checkbox" id="voice-show-transcript" checked>
+              <span class="toggle-slider"></span>
+            </label>
+          </label>
+          <label class="setting-row">
+            <span>显示声音状态</span>
+            <label class="toggle-switch">
+              <input type="checkbox" id="voice-show-signals" checked>
+              <span class="toggle-slider"></span>
+            </label>
+          </label>
+          <span class="setting-hint">把「语速偏快 · 音量偏低」这类声音状态显示出来，同时也会喂给大脑。</span>
+
+          <div class="setting-divider"></div>
+          <div class="card-import-row">
+            <button id="btn-voice-test" class="btn btn-small">测试语音链路</button>
+          </div>
+          <span class="setting-hint" id="voice-test-result">依次检查：识别渠道可达 → 合成渠道可达（各发一次极短请求）。不消耗对话额度。</span>
+          </div>
+        </details>
+
         <!-- F1: ===== 生图 API ===== -->
         <details class="setting-group setting-group-collapsible" data-group-key="image-provider">
           <summary class="setting-group-summary">生图 API <span class="setting-scope">全局·所有会话可用</span></summary>
@@ -589,7 +768,7 @@
 <script src="vendor/katex/katex.min.js?v=116"></script>
 <!-- LaTeX 渲染层：须在 katex.min.js 之后、chat.js 之前加载 -->
 <script src="latex.js?v=119"></script>
-<script src="db.js?v=124"></script>
+<script src="db.js?v=125"></script>
 <script src="haptics.js?v=115"></script>
 <script src="providers.js?v=102"></script>
 <script src="image-gen.js?v=124"></script>
@@ -597,6 +776,10 @@
 <script src="chat.js?v=122"></script>
 <script src="io.js?v=102"></script>
 <script src="gesture-helpers.js?v=102"></script>
-<script src="app.js?v=123"></script>
+<script src="app.js?v=125"></script>
+<!-- v125: 语音通话 —— voice-director 是纯函数层（无 DOM/无网络），voice.js 是运行时 -->
+<script src="voice-director.js?v=125"></script>
+<script src="voice-settings.js?v=125"></script>
+<script src="voice.js?v=125"></script>
 </body>
 </html>
