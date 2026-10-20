@@ -207,7 +207,21 @@ function defaultVoiceSettings() {
     routeMode: 'auto',
     // 双套微调预设：外放回声大需要更大的防自激窗口，耳机不需要。
     //   两套可以各调各的，也可以复制成一样（用户要求"可共享也可独立"）。
-    tuningPresets: { speaker: {}, headset: {} }
+    tuningPresets: { speaker: {}, headset: {} },
+
+    // ===== v128 新增 =====
+    // 句间静音上限（毫秒）。实测 MiMo TTS 逐句合成时每句自带首尾静音
+    //   （首 86ms / 尾 282ms，长句尾部可达 455ms），逐句串播就会出现 300~540ms
+    //   的纯静音 —— 用户听感是"磕巴"。这里把任意连续静音截到不超过该值。
+    //   140ms ≈ 句号换气的自然长度；填 0 关闭（保留原始音频）。
+    silenceCapMs: 140,
+    // 大脑的思考策略：follow = 跟随会话的「深度思考」开关（默认）/ on = 通话一律思考 /
+    //   off = 通话一律不思考。
+    //   为什么必须显式：v127.1 及之前**完全不传** thinking，等于把"要不要思考"交给上游默认。
+    //   实测（DeepSeek）：思考开着时 max_tokens=160 会把预算全吃在 reasoning 上，
+    //   正文 0 字符 → 每轮都只能说兜底句「嗯，我在。」；同时 reasoning_content 被丢掉，
+    //   界面上也就看不到思考过程。现在两条都要显式处理。
+    thinking: 'follow'
   };
 }
 

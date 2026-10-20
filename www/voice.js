@@ -31,7 +31,7 @@
   // 1. 常量与配置
   // =====================================================================================
 
-  var VERSION = 'v125';
+  var VERSION = 'v128';
 
   // 采集 / 播放
   var CAPTURE_RATE = 16000;   // ASR 只接受 16k 单声道 16bit wav（已实测）
@@ -39,6 +39,13 @@
   var SCRIPT_BUFFER = 2048;   // ScriptProcessorNode 缓冲（48k 下约 42ms，够低延迟又不爆 CPU）
   var PREROLL_MS = 320;       // speech-start 之前保留的"前摇"，避免吞掉第一个字
   var SCHEDULE_LEAD = 0.06;   // 排期提前量（秒），防止调度抖动造成咔哒
+  // 句间静音上限（毫秒）。v128：实测 MiMo TTS 逐句合成时**每句自带首尾静音**
+  //   （"嗯，我在。" 首 112ms / 尾 275ms；长句尾静音可达 455ms），而我们是逐句串起来播的，
+  //   于是每两句之间会出现 300~540ms 的纯静音 —— 用户听到的就是"磕巴"。
+  //   处理：把任意连续静音截到不超过这个长度（因果实现，不预读、不增延迟）。
+  //   140ms 刚好是"句号换气"的自然长度；设 0 可关闭（保留原始音频）。
+  var SILENCE_CAP_MS = 140;
+  var SILENCE_CAP_THR = 0.008;   // 静音判定：满量程的 0.8%（≈ -42dBFS）
 
   // 常见超时（毫秒）
   var T_ASR = 25000;
@@ -65,7 +72,27 @@
     minUtteranceMs: [100, 5000],
     leakFloor: [0.001, 0.05]
   };
-  var FILLER_DELAY_MS = 900;  // thinking 超过这么久没出第一句 → 先播语气词
+  // v128：900 → 1400。补白是"什么都没来"时的填充，太早插反而制造定格：
+  //   实测首句音频大约在 1.2~1.3s 到达，而预合成的"嗯……"只有 0.5~0.6s，
+  //   900ms 起播会在 1.5s 就播完，中间留下 0.5s 空白（量到过 560ms）。
+  //   1400ms 起播时首句通常已经在管道里（下面的 size() 守卫会直接跳过补白）。
+  var FILLER_DELAY_MS = 1400;
+  // v128：音频播完、队列空、TTS 也不在飞，但大脑既没结束也没报错 —— 等这么久就
+  //   判定本轮结束（而不是干等 45s watchdog × 2）。取 4s：正常多句回复的句间
+  //   间隔远小于此，不会误伤。
+  var STALL_END_MS = 4000;
+  // v128：允许思考时给思考留的额外 token 额度。实测 DeepSeek 一次思考 140~400 tokens，
+  //   而且它和正文**共享** max_tokens。1500 足够覆盖常见思考，又不会让"不思考时"的
+  //   首 token 变慢（max_tokens 是上限不是目标，不影响首 token 时间）。
+  var THINK_TOKEN_BUDGET = 1500;
+
+  // 正文预算 + 思考预留（纯函数，便于单测）。
+  //   为什么要把"正文预算"和"思考预算"分开看：两者共享 max_tokens，
+  //   任何一方的需求变大都会挤掉另一方，而挤掉正文的表现是"AI 不说话"。
+  function brainMaxTokens(firstTurn, thinkOn) {
+    var base = firstTurn ? 160 : 400;
+    return base + (thinkOn ? THINK_TOKEN_BUDGET : 0);
+  }
   var MAX_TTS_CHARS = 140;    // 单次 TTS 文本上限（太长首包太慢）
   var MIN_TTS_CHARS = 2;
   var STATES = ['idle', 'connecting', 'listening', 'thinking', 'speaking', 'error'];
@@ -313,6 +340,46 @@
     var even = buf.length & ~1;
     var nextCarry = (buf.length > even) ? buf.slice(even) : null;
     return { body: buf.subarray(0, even), carry: nextCarry };
+  }
+
+  // 静音上限压缩器（因果、跨块有状态）
+  //   为什么需要：TTS 是**逐句**合成的，每句都自带首尾静音（实测首 86ms / 尾 282ms，
+  //   长句尾静音 455ms）。逐句串播时，前句尾静音 + 后句首静音 = 300~540ms 的纯静音，
+  //   人耳听感就是"一句一顿"（用户反馈的"磕巴"）。
+  //   做法：任何连续静音输出到上限后就开始丢样本（静音丢样本听不出来），
+  //   一旦出现非静音立刻恢复。状态跨块保留，所以静音正好跨块时也数得对。
+  //   为什么不用"每句开头/结尾各裁一刀"：流式播放时句尾是边到边播的，
+  //   要裁尾巴就得把整句先缓存住 —— 那会把首字延迟拉长一整句，得不偿失。
+  function makeSilenceCap(maxSilentMs, sampleRate) {
+    var rate = num(sampleRate, TTS_RATE);
+    var capSamples = Math.max(0, Math.round(num(maxSilentMs, 0) / 1000 * rate));
+    var thr = Math.round(32768 * SILENCE_CAP_THR);
+    var run = 0;        // 已连续输出的静音样本数
+    var dropped = 0;    // 累计丢掉的静音样本数
+    function process(i16) {
+      if (!i16 || !i16.length) return { out: i16 || new Int16Array(0), dropped: 0 };
+      if (!capSamples) return { out: i16, dropped: 0 };
+      var out = new Int16Array(i16.length);
+      var n = 0, drop = 0;
+      for (var i = 0; i < i16.length; i++) {
+        var v = i16[i];
+        if (v > -thr && v < thr) {
+          if (run < capSamples) { out[n++] = v; run++; } else { drop++; }
+        } else {
+          run = 0;
+          out[n++] = v;
+        }
+      }
+      dropped += drop;
+      return { out: n === i16.length ? i16 : out.subarray(0, n), dropped: drop };
+    }
+    function reset() { run = 0; dropped = 0; }
+    return {
+      process: process,
+      reset: reset,
+      droppedMs: function () { return Math.round(dropped / rate * 1000); },
+      capSamples: function () { return capSamples; }
+    };
   }
 
   // 线性插值重采样器（带相位连续性 —— 分块调用不会在每个块边界产生咔哒）
@@ -1215,6 +1282,23 @@
     return n;
   }
 
+  // 思考策略（v128）。必须显式决定，不能像以前那样"什么都不传"把选择权交给上游默认：
+  //   follow = 跟随会话的「深度思考」开关（默认，和文字聊天一致）
+  //   on     = 通话里一律思考
+  //   off    = 通话里一律不思考
+  // 返回 { mode, on }。on 为 true 时 max_tokens 会额外留出思考预算。
+  function voiceThinking(conv) {
+    var mode = strOf(voiceCfg().thinking);
+    if (mode !== 'on' && mode !== 'off') mode = 'follow';
+    var convOn = true;
+    try { convOn = !conv || conv.thinkingEnabled !== false; } catch (e) { convOn = true; }
+    var on = (mode === 'on') ? true : (mode === 'off' ? false : convOn);
+    // explicit：用户明确选了"始终开"才主动发 thinking:{type:'enabled'}。
+    //   为什么 follow 不发：providers.js 的既有约定是"只有关的时候才发 disabled"，
+    //   跟着会话就意味着和文字聊天走同一条路（上游默认），行为一致才好排查。
+    return { mode: mode, on: on, explicit: (mode === 'on'), from: (mode === 'follow' ? 'session' : 'voice') };
+  }
+
   // 真机可调参数统一入口：读 settings.voice[key]，没有就用内置默认，并按 TUNING_RANGES 夹紧。
   //   范围夹紧很重要 —— 用户在设置面板填 30000 之类的值会把打断/端点彻底调死，
   //   到时候现象是"功能坏了"而不是"参数离谱"，排查成本极高。
@@ -1813,6 +1897,7 @@
     var idleMs = opts.idleMs || T_BRAIN_IDLE;
     var sawData = false;
     var rawText = '';
+    var finishReason = '';   // v128：把 finish_reason 透出来（length 是最常见的"正文被挤空"信号）
 
     function emit(delta) {
       if (delta) {
@@ -1838,7 +1923,7 @@
         settled = true;
         if (idleTimer) clearTimeout(idleTimer);
         if (cleanup) { try { cleanup(); } catch (e) {} }
-        if (err) reject(err); else resolve({ text: rawText, firstAt: firstAt, startAt: startAt });
+        if (err) reject(err); else resolve({ text: rawText, firstAt: firstAt, startAt: startAt, finishReason: finishReason });
       }
 
       function resetIdle() {
@@ -1865,6 +1950,7 @@
           var j = JSON.parse(jsonStr);
           var ch = j.choices && j.choices[0];
           if (!ch) return;
+          if (ch.finish_reason) finishReason = strOf(ch.finish_reason);
           var d = ch.delta || ch.message;
           emitChoice(ch, d);
           if (!d) return;
@@ -1890,7 +1976,7 @@
         if (hasStreamHttp()) {
           var streamId = null;
           var buf = '';
-          var early = [];
+          var early = [];        // 未拿到 streamId 之前到达的事件（含 chunk/end/error）
           var listeners = [];
           cleanup = function () {
             for (var i = 0; i < listeners.length; i++) { try { listeners[i].remove && listeners[i].remove(); } catch (e) {} }
@@ -1898,9 +1984,13 @@
             var idx = gate.waiters.indexOf(onAbort);
             if (idx >= 0) gate.waiters.splice(idx, 1);
           };
-          var onChunk = function (data) {
-            if (streamId !== null && data && data.id && data.id !== streamId) return;
-            if (streamId === null) { early.push(data); return; }
+          // 事件归属：原生插件是**全局广播**的，同一个 WebView 里可能还有别的流在跑
+          //   （例如文字聊天）。只认自己 id 的事件。
+          var own = function (data) {
+            return !(data && data.id && streamId !== null && data.id !== streamId);
+          };
+          var handleChunk = function (data) {
+            if (settled) return;
             resetIdle();
             buf += strOf(data && data.chunk);
             var lines = buf.split('\n');
@@ -1911,18 +2001,50 @@
               consumeLine(ln);
             }
           };
-          var onEnd = function (data) {
-            if (streamId !== null && data && data.id && data.id !== streamId) return;
+          var handleEnd = function () {
+            if (settled) return;
             if (buf) { consumeLine(buf.replace(/\r$/, '')); buf = ''; }
             finishAll();
           };
-          var onErr = function (data) {
-            if (streamId !== null && data && data.id && data.id !== streamId) return;
+          var handleErr = function (data) {
+            if (settled) return;
             done(makeErr('流式请求失败：' + errTextFrom(data && data.error), 'voice_stream'));
           };
-          Promise.resolve(CapStreamHttp.addListener('chunk', onChunk)).then(function (h) { if (h) listeners.push(h); });
-          Promise.resolve(CapStreamHttp.addListener('end', onEnd)).then(function (h) { if (h) listeners.push(h); });
-          Promise.resolve(CapStreamHttp.addListener('error', onErr)).then(function (h) { if (h) listeners.push(h); });
+          // v128 修：原来 chunk 会排队等 streamId，但 end / error 一进来就当场处理 ——
+          //   于是"别的流的 end"会被当成自己的收尾，表现为"话说半句就断"（TTS 少半句、
+          //   大脑少半段 JSON）。现在三类事件统一排队，拿到 id 后按序回放且逐条校验归属。
+          var onChunk = function (data) {
+            if (streamId === null) { early.push({ t: 'chunk', d: data }); return; }
+            if (!own(data)) return;
+            handleChunk(data);
+          };
+          var onEnd = function (data) {
+            if (streamId === null) { early.push({ t: 'end', d: data }); return; }
+            if (!own(data)) return;
+            handleEnd();
+          };
+          var onErr = function (data) {
+            if (streamId === null) { early.push({ t: 'error', d: data }); return; }
+            if (!own(data)) return;
+            handleErr(data);
+          };
+          Promise.resolve(CapStreamHttp.addListener('chunk', onChunk)).then(function (h) {
+            // v128：注册是异步的（返回 Promise）。若请求已经结束（cleanup 跑过了），
+            //   晚到的句柄必须立刻摘掉，否则每发起一次就永久漏一个原生监听器。
+            if (!h) return;
+            if (settled) { try { h.remove && h.remove(); } catch (e) {} return; }
+            listeners.push(h);
+          });
+          Promise.resolve(CapStreamHttp.addListener('end', onEnd)).then(function (h) {
+            if (!h) return;
+            if (settled) { try { h.remove && h.remove(); } catch (e) {} return; }
+            listeners.push(h);
+          });
+          Promise.resolve(CapStreamHttp.addListener('error', onErr)).then(function (h) {
+            if (!h) return;
+            if (settled) { try { h.remove && h.remove(); } catch (e) {} return; }
+            listeners.push(h);
+          });
           var payload = Object.assign({}, req.payload, { stream: true });
           CapStreamHttp.startStream({
             url: req.url,
@@ -1935,7 +2057,13 @@
             streamId = res && res.id;
             if (early.length) {
               var q = early.splice(0, early.length);
-              for (var i = 0; i < q.length; i++) onChunk(q[i]);
+              for (var i = 0; i < q.length; i++) {
+                var e = q[i];
+                if (!own(e.d)) continue;      // 别的流的事件，丢掉
+                if (e.t === 'chunk') handleChunk(e.d);
+                else if (e.t === 'end') { handleEnd(); break; }
+                else { handleErr(e.d); break; }
+              }
             }
           }).catch(function (e) { done(makeErr('无法开始流式请求：' + (e && e.message || e), 'voice_stream')); });
           return;
@@ -2034,6 +2162,10 @@
       rateMode: 'natural',
       playRate: 1,         // 真正交给 playbackRate 的倍数：natural 恒为 1（变速交给 WSOLA）
       stretcher: null,
+      silenceCap: null,
+      starve: { n: 0, totalMs: 0, maxMs: 0, lastMs: 0 },
+      gapLog: [],
+      silenceTrimmedMs: 0,
       scheduledMs: 0,
       startedAtMs: 0
     };
@@ -2074,6 +2206,22 @@
       var ctx = p.ctx;
       p.resampler = ctx ? new Resampler(TTS_RATE, ctx.sampleRate) : null;
       p.stretcher = null;   // 新的流：丢掉上一段残留相位，避免跨句拼接出咔哒
+      // 静音上限按"一条连续的流"计状态：跨句保留，才能把"前句尾 + 后句头"的静音一起截。
+      var capMs = cfgNum('silenceCapMs', SILENCE_CAP_MS, 0, 1000);
+      p.silenceCapMs = capMs;
+      p.silenceCap = capMs ? makeSilenceCap(capMs, TTS_RATE) : null;
+      // 注意：resetStream 在**每轮结束**都会调用（为了丢掉 WSOLA 相位），
+      //   所以取证计数不能在这里清零，否则永远读到 0。清零交给 resetStats()。
+      //   但排期游标必须清：留到下一轮会让"两块之间的空白"被误算成播放饥饿
+      //   （上一轮的 nextTime 早就过去了，差值等于整段休息时间）。
+      p.nextTime = 0;
+    };
+
+    // 取证计数清零：一通电话开始时调一次（见 start()）
+    p.resetStats = function () {
+      p.silenceTrimmedMs = 0;
+      p.starve = { n: 0, totalMs: 0, maxMs: 0, lastMs: 0 };
+      p.gapLog = [];
     };
 
     function pushFloat(out) {
@@ -2091,6 +2239,22 @@
       if (!p.ctx || !bytes || !bytes.length) return;
       if (!p.resampler) p.resetStream();
       var i16 = bytesToInt16(bytes);
+      if (!i16.length) return;
+      // v128：先把超长静音压掉，再进重采样/伸缩（顺序很重要：静音在 24k 域判定最准，
+      //   而且重采样后样本数变了，静音计时会跟着漂）。
+      //   上限每块读一次：用户在设置里改完下一块就生效（不需要重连）。
+      var wantCap = cfgNum('silenceCapMs', SILENCE_CAP_MS, 0, 1000);
+      if (p.silenceCapMs !== wantCap) {
+        p.silenceCapMs = wantCap;
+        p.silenceCap = wantCap ? makeSilenceCap(wantCap, TTS_RATE) : null;
+      }
+      if (p.silenceCap) {
+        try {
+          var capRes = p.silenceCap.process(i16);
+          if (capRes.dropped) p.silenceTrimmedMs += Math.round(capRes.dropped / TTS_RATE * 1000);
+          i16 = capRes.out;
+        } catch (e) { warn('silence cap failed', e); }
+      }
       if (!i16.length) return;
       var f32 = int16ToFloat32(i16);
       try { p.syncRate(); } catch (e) { p.rate = 1; p.rateMode = 'natural'; p.playRate = 1; p.stretcher = null; }
@@ -2122,6 +2286,22 @@
       // natural 模式下 playRate 恒为 1（时长已在 WSOLA 里改过），pitch 模式才交给 playbackRate
       var pr = (p.playRate && p.playRate > 0) ? p.playRate : 1;
       var dur = buf.duration / pr;
+      // v128 取证字段：播放排期是否"饿死"。
+      //   p.nextTime 是上一块的结束时刻；若 now + 提前量 已经超过了它，说明这一块来晚了，
+      //   中间那段空白就是用户听到的"磕巴"。以前只有感官描述，没有数字可查。
+      if (p.nextTime > 0) {
+        var late = (now + SCHEDULE_LEAD) - p.nextTime;
+        if (late > 0.004) {
+          var lateMs = late * 1000;
+          p.starve.n++;
+          p.starve.totalMs += lateMs;
+          p.starve.lastMs = Math.round(lateMs);
+          if (lateMs > p.starve.maxMs) p.starve.maxMs = Math.round(lateMs);
+          // 留下时间线：光知道"总共饿了多少"没法定位是哪一段（句间？补白后？）
+          p.gapLog.push({ at: Math.round(now * 1000), ms: Math.round(lateMs) });
+          if (p.gapLog.length > 40) p.gapLog.shift();
+        }
+      }
       var at = Math.max(p.nextTime, now + SCHEDULE_LEAD);
       var src;
       try { src = ctx.createBufferSource(); } catch (e) { warn('createBufferSource failed', e); return; }
@@ -2227,6 +2407,9 @@
   // 必须在用户手势里同步调用（第一个 await 之前就拿到 getUserMedia 的 promise）
   function beginCapture() {
     var ctx = ensureAudioCtx();
+    // v128：开新采集前先把旧图关掉 —— 否则重连时会两套图并存，
+    //   每个音频块被处理两遍（VAD 的 dt 互相覆盖，端点判定随机漂移）。
+    try { stopCapture(); } catch (e) {}
     var md = root.navigator && root.navigator.mediaDevices;
     if (!md || typeof md.getUserMedia !== 'function') {
       return Promise.reject(makeErr(
@@ -2256,26 +2439,46 @@
 
   function attachStream(stream) {
     var ctx = _vc.audioCtx;
+    // v128：迟到的授权结果。用户在系统权限弹窗上停留、中途挂了电话，这个 stream
+    //   才回来 —— 以前它照样建出一整套采集图（麦克风常亮、没人关），再点一次通话
+    //   就有两套图并存（每个音频块被处理两遍，VAD 的 dt 全乱）。
+    if (!_vc.running) {
+      try {
+        var late = stream.getTracks ? stream.getTracks() : [];
+        for (var li = 0; li < late.length; li++) { try { late[li].stop(); } catch (e) {} }
+      } catch (e) {}
+      log('授权结果迟到（通话已结束），已丢弃并关闭麦克风');
+      return { stream: stream, ctx: ctx, sampleRate: ctx.sampleRate, discarded: true };
+    }
+    // 采集图代际：旧图的回调即使没被 disconnect 干净，也会因为代际不符而自行失效
+    var gen = (_vc.captureGen || 0) + 1;
+    _vc.captureGen = gen;
     _vc.mediaStream = stream;
     var track = stream.getAudioTracks && stream.getAudioTracks()[0];
     if (track) {
       // 真机 WebView 的 track.label 是空串，不要用它做任何判断/显示
       try {
         track.onended = function () {
-          if (_vc.running) {
-            toast('麦克风已断开', 'warn');
-            setState('error', '麦克风已断开');
-          }
+          if (!_vc.running) return;
+          // v128：这里是"麦克风被拔掉/被系统收回"。以前只把状态改成 error 就完了 ——
+          //   _vc.running 仍是 true、采集图没停、也没有任何出口，
+          //   而 UI 在 error 状态显示的是「开始通话」，点了 start() 又因 running=true 直接返回。
+          toast('麦克风已断开，通话已结束', 'warn');
+          try { hangup(true); } catch (e) {}
+          setState('error', '麦克风已断开，点「开始通话」可重连');
         };
       } catch (e) {}
     }
     var src;
     try { src = ctx.createMediaStreamSource(stream); } catch (e) {
+      // v128：失败路径必须把轨道关掉，否则这条流再没人持有 → 录音指示灯常亮
+      try { if (track) track.stop(); } catch (x) {}
       throw makeErr('无法读取麦克风音频流：' + (e && e.message || e), 'voice_media');
     }
     var proc;
     try { proc = ctx.createScriptProcessor(SCRIPT_BUFFER, 1, 1); } catch (e) {
       try { proc = ctx.createJavaScriptNode(SCRIPT_BUFFER, 1, 1); } catch (e2) {
+        try { if (track) track.stop(); } catch (x) {}
         throw makeErr('当前环境不支持音频采集节点', 'voice_noaudio');
       }
     }
@@ -2305,6 +2508,7 @@
 
     proc.onaudioprocess = function (ev) {
       if (!_vc.capturing) return;
+      if (gen !== _vc.captureGen) return;    // 旧图（v128：代际令牌）
       var block = ev && ev.inputBuffer ? ev.inputBuffer.getChannelData(0) : null;
       if (!block) return;
       var t = nowMs();
@@ -2354,7 +2558,9 @@
     }
 
     // ---- barge-in：AI 说话时麦克风还在采 ----
-    if (_vc.state === 'speaking' && voiceCfg().bargeIn !== false) {
+    //   v128：静音时不做打断判定。原来这条在 mute 判断之前，用户只是清了清嗓子
+    //   就把 AI 打断并让本轮作废（提示写着"AI 听不到你"，实际它听见了）。
+    if (_vc.state === 'speaking' && voiceCfg().bargeIn !== false && !_vc.muted) {
       var sinceSpeak = nowMs() - _vc.speakStartAt;
       // 三个量都可在设置里调：抑制窗口 / 持续时长 / 回漏系数
       // 每块 PCM 读一次 → 外放/耳机预置切换后，下一块就按新参数判定，不影响这通电话
@@ -2382,7 +2588,12 @@
     }
 
     // ---- VAD ----
-    if (_vc.state !== 'listening' && _vc.state !== 'speaking') return;
+    //   v128：speaking 期间**不跑 VAD**。这段时间"用户开口"的唯一出口是上面的 barge-in；
+    //   以前 VAD 同时在跑，端点一到就 finishUtterance → runTurn 直接开新轮，
+    //   而旧轮既没被 abort 也没停播 —— 两套 pipeline 抢同一个播放器与 onDrained 单槽，
+    //   表现为"AI 说话中途突然重来一句 / 之后整通不再有反应"。
+    if (_vc.state === 'speaking') return;
+    if (_vc.state !== 'listening') return;
     if (_vc.muted) return;
     var vad = _vc.vad;
     if (!vad) return;
@@ -2436,7 +2647,10 @@
       var PD = root.VoiceDirector;
       if (PD && typeof PD.turnPolicy === 'function') {
         decision = PD.turnPolicy(
-          { phase: 'user-paused', hasSpeech: true, endpointSilenceMs: _vc.vad.cfg.endpointSilenceMs },
+          // v128 修：第一个参数必须是**状态字符串**。以前传的是对象，director 里
+          //   str(state) 对非字符串一律返回 ''，于是 `st === 'speaking'/'thinking'`
+          //   那些分支全是死代码 —— 「AI 说话时这段声音交给打断判定」从来没生效过。
+          _vc.state,
           { signals: signals, silenceMs: stats.silenceMs, speechMs: stats.speechMs, speechRateCps: signals.speechRateCps },
           { endpointSilenceMs: effectiveTuning('endpointSilenceMs', 700), action: suggestion, minUtteranceMs: effectiveTuning('minUtteranceMs', 400) }
         );
@@ -2501,13 +2715,17 @@
 
   function stopCapture() {
     _vc.capturing = false;
+    _vc.captureGen = (_vc.captureGen || 0) + 1;   // 让旧图的回调立即失效（哪怕没断开）
     try { if (_vc.procNode) { _vc.procNode.onaudioprocess = null; _vc.procNode.disconnect(); } } catch (e) {}
     try { if (_vc.sourceNode) _vc.sourceNode.disconnect(); } catch (e) {}
     try { if (_vc.silentGain) _vc.silentGain.disconnect(); } catch (e) {}
     try {
       if (_vc.mediaStream) {
         var tracks = _vc.mediaStream.getTracks ? _vc.mediaStream.getTracks() : [];
-        for (var i = 0; i < tracks.length; i++) tracks[i].stop();
+        for (var i = 0; i < tracks.length; i++) {
+          try { tracks[i].onended = null; } catch (e2) {}
+          tracks[i].stop();
+        }
       }
     } catch (e) {}
     _vc.procNode = null;
@@ -2516,6 +2734,11 @@
     _vc.mediaStream = null;
     _vc.vad = null;
     _vc.preroll = [];
+    // v128：这几个计数以前不清 → 下一通电话的 __debug() 会带到上一通的幽灵数字
+    _vc.prerollSamples = 0;
+    _vc.segSamples = 0;
+    _vc.resampler = null;
+    _vc.lastFrameAt = 0;
   }
 
   // =====================================================================================
@@ -2646,7 +2869,11 @@
         if (gotAudio) return { firstChunkMs: firstChunkMs, totalBytes: totalBytes, cancelled: false };
         // 流式没给音频（对端忽略 stream:true）→ 回退非流式整段
         return ttsOnce(built, gate, t0).then(function (r) {
-          return { firstChunkMs: r.firstChunkMs, totalBytes: r.totalBytes, cancelled: false };
+          // v128 修：这里原来直接 return，**拿到 PCM 却从不喂给 onPcm** ——
+          //   对端不支持流式时表现为「有字幕没声音」，而且 pipeline 认为合成完毕，
+          //   一轮就这么静悄悄地结束了（连错误都没有）。必须把整段 PCM 交给播放侧。
+          feed(r.pcm);
+          return { firstChunkMs: r.firstChunkMs, totalBytes: r.totalBytes, cancelled: false, fallback: true };
         });
       });
     });
@@ -2699,6 +2926,38 @@
     UI.btnMute = el('btn-voice-mute');
     UI.btnCall = el('btn-voice-call');
     UI.btnInterrupt = el('btn-voice-interrupt');
+    // v128：思考过程标签（会话开着深度思考时，通话里也要能看见）
+    UI.think = el('voice-think');
+    UI.thinkBody = el('voice-think-body');
+    UI.thinkSummary = el('voice-think-summary');
+  }
+
+  // 思考过程：流式追加到折叠块里。
+  //   streaming=true 时标题显示「思考中…」，结束后变成「思考过程（N 字）」。
+  //   只在真的有 reasoning 时才创建/显示 —— 没有思考的模型不该凭空多出一块 UI。
+  function setThinkingBlock(text, streaming) {
+    if (!UI.think) uiCache();
+    var node = UI.think, body = UI.thinkBody;
+    if (!node || !body) return;
+    var t = strOf(text);
+    if (!t) {
+      node.style.display = 'none';
+      body.textContent = '';
+      _vc.thinkText = '';
+      return;
+    }
+    _vc.thinkText = t;
+    node.style.display = '';
+    // 只保留尾部：思考可能很长，整段塞进 DOM 会把通话界面挤爆
+    body.textContent = t.length > 1500 ? '…' + t.slice(-1500) : t;
+    if (UI.thinkSummary) {
+      UI.thinkSummary.textContent = streaming ? '思考中…（' + t.length + ' 字）' : '思考过程（' + t.length + ' 字）';
+    }
+    node.classList.toggle('is-streaming', !!streaming);
+  }
+
+  function clearThinkingBlock() {
+    setThinkingBlock('', false);
   }
 
   function setStateText(text) {
@@ -3012,12 +3271,35 @@
     '【输出格式（强制）】你正在打电话，回复会被直接念出来。只输出一个 JSON 对象，不要任何解释、不要代码块。',
     '字段顺序必须是这样，第一个字段永远是 speech：',
     '{"speech":"你要说出口的原话","emotion":"情绪","tone":"语气","pace":1.0,"volume":"中","nonverbals":["笑"]}',
-    'speech 里只用口语短句，句末用中文标点；不要 Markdown、不要列表、不要括号里的动作描写。'
+    'speech 里只用口语短句，句末用中文标点；不要 Markdown、不要列表、不要括号里的动作描写。',
+    // v128：实测（DeepSeek + json_object）对方只回"嗯。"这类极短话时，模型会输出
+    //   一串空白字符当作"没什么可说的"（finish_reason=stop，content 只有空格）。
+    //   对电话来说这是致命的：用户听到的永远是兜底句。必须明确禁止空 speech。
+    'speech 绝不能为空：哪怕对方只"嗯"了一声，也要自然地接一句（可以是一个反应、一句追问，或顺着刚才的话题说下去）。'
   ].join('\n');
 
   function plainMsgContent(m) {
     var c = strOf(m && m.content);
     return c.replace(/<status>[\s\S]*?<\/status>/g, '').trim();
+  }
+
+  // v128 ★ 关键修复：历史的 assistant 消息必须**包装成 JSON**。
+  //   实测（DeepSeek + response_format:json_object）只要历史里出现一条"纯文本"的
+  //   assistant 消息，模型就会只吐一串空格（finish_reason=stop，content="         "）——
+  //   于是 voice.js 解析不出 speech，走兜底「嗯，我在。」，从第二轮起每轮都是这一句。
+  //   Node 侧对照实验（tools/t-empty.js）：
+  //     A 只有一轮 user            → 正常返回 JSON
+  //     B 两轮 + assistant 存纯文本 → content="       "（复现故障）
+  //     C 两轮 + assistant 存 JSON 原文 → 正常返回 JSON
+  //   App 里会话存的是"说出口的原话"（回看要可读），所以转发给大脑时在这里补一层壳。
+  function brainHistoryContent(role, text) {
+    var t = strOf(text);
+    if (role !== 'assistant') return t;
+    if (!t) return t;
+    // 已经是 JSON 就原样（用户可能手工编辑过，或者上游给了完整对象）
+    var head = t.replace(/^\s+/, '').charAt(0);
+    if (head === '{') return t;
+    try { return '{"speech":' + JSON.stringify(t) + '}'; } catch (e) { return t; }
   }
 
   function historyMessages(conv, limit) {
@@ -3034,7 +3316,10 @@
       });
       var slice = chain.slice(-(limit || 16));
       for (var i = 0; i < slice.length; i++) {
-        out.push({ role: slice[i].role, content: plainMsgContent(slice[i]) });
+        out.push({
+          role: slice[i].role,
+          content: brainHistoryContent(slice[i].role, plainMsgContent(slice[i]))
+        });
       }
     } catch (e) { warn('history', e); }
     return out;
@@ -3200,18 +3485,27 @@
 
   // 语音大脑：流式；失败自动回退非流式
   // onSentence(text)   —— 已成型的一句，立刻送 TTS
-  // 返回 {speech, plan, firstTokenMs, json}
+  // 返回 {speech, plan, firstTokenMs, json, reasoning, diagnosis}
   function callBrain(conv, userText, signals, gate, onSentence) {
     var t0 = nowMs();
     var firstTurn = (_vc.metrics.turns === 0);
     var messages = buildBrainMessages(conv, userText, signals);
+    var think = voiceThinking(conv);
     // 首轮抢时间：上下文最短（本来也就一两句），把 max_tokens 压下来以缩短首 token。
     //   实测首 token 对 prompt 长度很敏感（732ms ↔ 1033ms）。
-    var maxTokens = firstTurn ? 160 : 400;
+    // v128 关键修正：**思考与正文共享 max_tokens**。实测（DeepSeek）thinking 开着时
+    //   max_tokens=160 → reasoning 吃满 160、正文 0 字符、finish_reason=length，
+    //   于是 res.speech 为空 → 每轮都只能兜底说「嗯，我在。」。
+    //   所以只要允许思考，就必须在正文预算之外额外留出思考的额度。
+    var contentBudget = firstTurn ? 160 : 400;
+    var maxTokens = brainMaxTokens(firstTurn, think.on);
     var firstTokenMs = 0;
+    var firstThinkMs = 0;
+    var reasoningText = '';
     var extractor = createSpeechExtractor();
     var fullSpeechSeen = '';
-    var aborted = false;
+    var finishReason = '';
+    var thinkShown = false;
 
     function pushSentence(s) {
       if (!s) return;
@@ -3226,26 +3520,52 @@
       try { onSentence(clean); } catch (e) { warn('onSentence', e); }
     }
 
-    function streamAttempt() {
-      var built = buildReq('brain', {
+    function brainBody() {
+      var body = {
         messages: messages,
         temperature: 0.85,
         max_tokens: maxTokens,
         response_format: { type: 'json_object' }
-      });
+      };
+      // 显式表态：off 时一定要发 disabled（这是唯一有效的手段），
+      //   on 时不发 thinking 字段，交给上游默认（与文字聊天一致，兼容性最好）。
+      if (!think.on) body.thinkingEnabled = false;
+      return body;
+    }
+
+    function onThinkChunk(rc) {
+      if (typeof rc !== 'string' || !rc) return;
+      if (!firstThinkMs) firstThinkMs = Math.round(nowMs() - t0);
+      reasoningText += rc;
+      thinkShown = true;
+      setThinkingBlock(reasoningText, true);
+    }
+
+    function streamAttempt() {
+      var built = buildReq('brain', brainBody());
+      // "始终开"必须真的发出去（providers.js 只在 disabled 时写 thinking 字段，
+      //   所以这里在 buildUpstreamPayload 之后补上）。上游不认这个字段会报错，
+      //   错误是可见的 —— 比"设置了但什么也没发生"好。
+      if (think.explicit) built.req.payload.thinking = { type: 'enabled' };
       return ssePost(built.req, {
         gate: gate,
         idleMs: T_BRAIN_IDLE,
         onJson: function (choice, delta) {
-          var c = delta && delta.content;
+          if (choice && choice.finish_reason) finishReason = strOf(choice.finish_reason);
+          if (!delta) return;
+          // v128：`reasoning_content` 以前被完全丢弃 —— 界面上自然看不到思考过程。
+          //   不同上游字段名不同（reasoning / thinking 都有），一并接住。
+          onThinkChunk(delta.reasoning_content || delta.reasoning || delta.thinking);
+          var c = delta.content;
           if (typeof c !== 'string' || !c) return;
           if (!firstTokenMs) firstTokenMs = Math.round(nowMs() - t0);
           var sents = extractor.push(c);
           for (var i = 0; i < sents.length; i++) pushSentence(sents[i]);
         }
-      }).then(function () {
+      }).then(function (r) {
         var rest = extractor.flush();
         for (var i = 0; i < rest.length; i++) pushSentence(rest[i]);
+        if (r && r.finishReason) finishReason = strOf(r.finishReason);
         // 取证：把这一轮大脑的原始返回与解析结果留下来。
         //   "AI 只会说兜底句"这类问题，光看 metrics 看不出是没解析出来还是压根没返回。
         _vc.lastBrain = {
@@ -3253,19 +3573,20 @@
           raw: strOf(extractor.raw()).slice(0, 1200),
           rawLen: strOf(extractor.raw()).length,
           speechSeen: strOf(fullSpeechSeen),
-          firstTokenMs: firstTokenMs
+          firstTokenMs: firstTokenMs,
+          // v128 新增取证：思考是否开启、思考吃了多少、被谁截断
+          thinkOn: think.on, thinkMode: think.mode,
+          maxTokens: maxTokens, contentBudget: contentBudget,
+          thinkingChars: reasoningText.length, firstThinkMs: firstThinkMs,
+          finishReason: finishReason
         };
         return { json: extractor.raw(), firstTokenMs: firstTokenMs };
       });
     }
 
     function nonStreamAttempt() {
-      var built = buildReq('brain', {
-        messages: messages,
-        temperature: 0.85,
-        max_tokens: maxTokens,
-        response_format: { type: 'json_object' }
-      });
+      var built = buildReq('brain', brainBody());
+      if (think.explicit) built.req.payload.thinking = { type: 'enabled' };
       var p = httpPost(built.req, T_BRAIN_FIRST);
       var raced = gate ? gate.race(p, T_BRAIN_FIRST, '大脑') : withTimeout(p, T_BRAIN_FIRST, '大脑');
       return raced.then(function (resp) {
@@ -3275,7 +3596,17 @@
         var ch = data && data.choices && data.choices[0];
         var msg = ch && (ch.message || ch.delta);
         var raw = msg ? strOf(msg.content) : '';
+        if (ch && ch.finish_reason) finishReason = strOf(ch.finish_reason);
+        onThinkChunk(msg && (msg.reasoning_content || msg.reasoning || msg.thinking));
         if (!firstTokenMs) firstTokenMs = Math.round(nowMs() - t0);
+        _vc.lastBrain = {
+          mode: 'non-stream',
+          raw: raw.slice(0, 1200), rawLen: raw.length,
+          firstTokenMs: firstTokenMs,
+          thinkOn: think.on, thinkMode: think.mode,
+          maxTokens: maxTokens, contentBudget: contentBudget,
+          thinkingChars: reasoningText.length, finishReason: finishReason
+        };
         return { json: raw, firstTokenMs: firstTokenMs };
       });
     }
@@ -3295,10 +3626,32 @@
       var finalSpeech = plan && plan.speech ? strOf(plan.speech) : speech;
       var emitted = fullSpeechSeen.replace(/\s+/g, '');
       var finalNorm = finalSpeech.replace(/\s+/g, '');
-      if (finalNorm && emitted.indexOf(finalNorm) < 0 && emitted.replace(/[。！？…，、；：,.!?;:]/g, '').indexOf(finalNorm.replace(/[。！？…，、；：,.!?;:]/g, '')) < 0) {
+      if (finalNorm && emitted.indexOf(finalNorm) < 0 && emitted.replace(/[。！？…，、；：,.!?;:]/g, '').indexOf(finalNorm.replace(/[。！？…、；：,.!?;:]/g, '')) < 0) {
         pushSentence(firstSentence(finalSpeech));
       }
-      return { speech: finalSpeech, plan: plan, firstTokenMs: r.firstTokenMs || firstTokenMs, json: r.json };
+      // 如果整段没有正文但思考有内容，至少把思考显示出来（不是"什么都没发生"）
+      if (!finalSpeech && reasoningText) setThinkingBlock(reasoningText, false);
+      // 空回复的诊断：把"为什么空"说清楚，别让兜底句冒充正常回复
+      var diagnosis = '';
+      if (!finalSpeech) {
+        if (finishReason === 'length') {
+          diagnosis = think.on
+            ? '输出被 max_tokens 截断（思考吃掉了预算）'
+            : '输出被 max_tokens 截断';
+        } else if (!strOf(r.json) && !reasoningText) {
+          diagnosis = '模型没有返回任何内容（HTTP 正常但 content 为空）';
+        } else if (!strOf(r.json)) {
+          diagnosis = '模型只返回了思考、没有正文';
+        } else {
+          diagnosis = '返回了内容但解析不出 speech 字段';
+        }
+        if (_vc.lastBrain) _vc.lastBrain.diagnosis = diagnosis;
+      }
+      return {
+        speech: finalSpeech, plan: plan, firstTokenMs: r.firstTokenMs || firstTokenMs,
+        json: r.json, reasoning: reasoningText, diagnosis: diagnosis,
+        finishReason: finishReason, thinkOn: think.on
+      };
     });
   }
 
@@ -3306,16 +3659,54 @@
   // 19. TTS 流水线（边合成边播；句子级并发，前一句在播时后一句已经发出去了）
   // =====================================================================================
 
-  function createPipeline(gate) {
+  function createPipeline(gate, guard) {
     var q = {
       queue: [],          // 待合成的句子
       active: 0,          // 正在合成的个数
-      maxActive: 2,       // 允许"下一句预合成"
+      maxActive: 3,       // 允许"下一句预合成"。v128：2 → 3。
+                          //   实测每句 TTS 首包 ≈0.55s，而短句音频只有 0.8~1.5s；
+                          //   只预取 1 句时，句间很容易出现 0.5~0.9s 的空白（真机/无头都量到过）。
+                          //   多预取 1 句的代价只是多一个并发请求，对上游无压力。
       done: false,
       closed: false,
+      stalled: false,     // v128：大脑卡住导致的"被收尾"，与正常收尾区分开
+      stallTimer: null,
       onIdle: null,
       firstChunkMs: 0
     };
+
+    // 这一轮还该不该出声音（token 是否过期、通话是否还在进行）
+    function alive() {
+      if (q.closed) return false;
+      if (!guard) return true;
+      try { return !!guard(); } catch (e) { return false; }
+    }
+
+    // v128 新增：**大脑卡死检测**。
+    //   场景：模型吐了两句后既不发 [DONE] 也不报错。此时 queue 空、active 0、
+    //   播放器也播完了，但 q.done 还是 false（done 只由 finish() 设置），
+    //   maybeIdle 永远不成立 → 界面停在 speaking，直到 45s watchdog。
+    //   这里给一个"没有新句子也没有声音"的静默窗口，超时即视为本轮结束（不报错，
+    //   已经说出去的内容保留），并把原因记进 lastBrain 便于取证。
+    function armStall() {
+      clearStall();
+      if (q.closed || q.done) return;
+      q.stallTimer = setTimeout(function () {
+        q.stallTimer = null;
+        if (q.closed || q.done) return;
+        if (q.queue.length || q.active > 0) { armStall(); return; }
+        var pl = _vc.player;
+        if (pl && !pl.isIdle()) { armStall(); return; }   // 还在播 → 等播完再看
+        q.stalled = true;
+        warn('大脑静默超时：音频已播完但没有后续内容，按本轮结束处理');
+        _vc.lastBrain = Object.assign({}, _vc.lastBrain || {}, { stalled: true });
+        q.done = true;
+        pump();
+      }, STALL_END_MS);
+    }
+    function clearStall() {
+      if (q.stallTimer) { clearTimeout(q.stallTimer); q.stallTimer = null; }
+    }
 
     // 排空判定。注意：这是被"两件不同的事"触发的 ——
     //   ① TTS 请求结束（pump 时调用）  ② 播放队列真的播完了（player.onDrained 回调）
@@ -3348,6 +3739,10 @@
       var p = ttsStream(text, {
         gate: gate,
         onPcm: function (bytes) {
+          // v128：晚到的音频必须自己闭嘴。打断/挂断/换轮之后，原生流里已经排队的
+          //   分片还会继续投递进来 —— 以前它们会被塞进播放器（用户听到 AI 又冒一句），
+          //   并把状态从 idle/error 拉回 speaking（此后没有任何路径能把它收回去）。
+          if (!alive()) return;
           if (!_vc.player) { try { ensurePlayer(); } catch (e) { return; } }
           _vc.player.appendPcm24(bytes);
           if (_vc.state !== 'speaking') enterSpeaking();
@@ -3373,6 +3768,9 @@
       while (q.queue.length && q.active < q.maxActive) {
         startOne(q.queue.shift());
       }
+      // 没有待合成的、也没有在飞的 → 开始计"大脑是不是卡住了"
+      if (!q.queue.length && q.active === 0) armStall();
+      else clearStall();
       maybeIdle();
     }
 
@@ -3381,6 +3779,7 @@
         if (q.closed) return;
         var t = strOf(text).trim();
         if (!t) return;
+        clearStall();     // 有新句子进来 → 重新开始计"静默"
         // 太长的句子拆开，缩短首包时间
         if (t.length > SOFT_MAX) {
           var parts = splitSentences(t, { minLen: 1 });
@@ -3414,8 +3813,10 @@
       },
       firstChunkMs: function () { return q.firstChunkMs; },
       size: function () { return q.queue.length + q.active; },
+      stalled: function () { return !!q.stalled; },
       stop: function () {
         q.closed = true;
+        clearStall();
         q.queue.length = 0;
         q.onIdle = null;
         if (_vc.player && _vc.player.onDrained === maybeIdle) _vc.player.onDrained = null;
@@ -3424,6 +3825,9 @@
   }
 
   function enterSpeaking() {
+    // v128：挂断/失败之后不该再进 speaking —— 迟到的 TTS 分片会把状态钉在一个
+    //   没有任何出口的状态里（watchdog 因 !running 提前 return）。
+    if (!_vc.running) return;
     if (_vc.state === 'speaking') { armSpeakWatchdog(); return; }
     setState('speaking');
     _vc.speaking = true;
@@ -3518,6 +3922,10 @@
     _vc.fillerTimer = setTimeout(function () {
       if (token !== _vc.turnId) return;
       if (_vc.state !== 'thinking') return;
+      // v128：已经有句子进管道（TTS 正在合成）就不要补白了 ——
+      //   补白本来是为了填"什么都没有"的空档，这时再插一句"嗯……"反而会把
+      //   真正的那句话往后挤，造成"嗯……[停顿]正式内容"的两段式停顿。
+      if (_vc.pipeline && _vc.pipeline.size() > 0) return;
       if (playFiller()) log('补白：播放预合成语气词');
     }, FILLER_DELAY_MS);
   }
@@ -3549,6 +3957,16 @@
 
   function runTurn(pcm, durMs, why) {
     if (!_vc.running) return;
+    // v128：上一轮还没收尾又来新一轮（例如大脑迟迟不返回，用户又说了一句）→
+    //   先把旧轮**干净地**收掉再开新轮。以前是直接覆盖 _vc.gate / _vc.pipeline，
+    //   旧 gate 变成孤儿（没人 abort，请求还在跑）、旧 pipeline 继续往同一个播放器塞音频，
+    //   两份 maybeIdle 还会抢 player.onDrained 那个单槽回调。
+    if (_vc.state === 'thinking' || _vc.state === 'speaking') {
+      log('上一轮尚未收尾（' + _vc.state + '），先中止');
+      try { abortCurrentTurn('superseded'); } catch (e) {}
+      try { if (_vc.player) _vc.player.hardStop(); } catch (e) {}
+      setAssistantLine(_vc.saidText || '', false);
+    }
     var token = ++_vc.turnId;
     var turnStart = nowMs();
     _vc.lastTurnAt = Date.now();   // 时间感知：这一轮是什么时候说的
@@ -3556,6 +3974,8 @@
     _vc.gate = gate;
     _vc.interrupted = false;
     _vc.saidText = '';
+    _vc.thinkText = '';
+    clearThinkingBlock();
     setState('thinking');
     clearTimeout(_vc.autoHangTimer);
     startFillerTimer(token);
@@ -3584,9 +4004,12 @@
       if (token !== _vc.turnId) return;
       if (isAbort(e)) { log('本轮被放弃/打断'); return; }
       warn('本轮失败:', e && e.message);
-      _vc.turnId++;   // 让后续回调全部失效
+      // v128：失败也要走**同一条**收尾路径。以前只 turnId++ 而不 abort gate，
+      //   在飞的 TTS 流没人取消，晚到的音频会被塞回播放器、把状态从 error 拉回 speaking，
+      //   然后 fail 里那个「2.5s 后回 listening」因为状态已不是 error 而失效。
+      try { abortCurrentTurn('fail'); } catch (x) {}
       try { if (_vc.player) _vc.player.hardStop(); } catch (x) {}
-      if (_vc.pipeline) { try { _vc.pipeline.stop(); } catch (x) {} _vc.pipeline = null; }
+      clearSpeakWatchdog();
       clearFillerTimer();
       var msg = (e && e.message) ? e.message : '出了点问题';
       if (e && e.code === 'voice_noasr') {
@@ -3641,32 +4064,50 @@
       }
       return callBrain(conv, text, signals, gate, function (sentence) {
         if (token !== _vc.turnId) return;
-        if (!pipeline) pipeline = startPipeline(token, gate, conv, assistantMsg);
+        if (!pipeline) pipeline = startPipeline(token, gate, conv, assistantMsg, turnStart);
         pipeline.push(sentence);
       }).then(function (res) {
         if (token !== _vc.turnId) throw abortErr();
         _vc.metrics.brainFirstTokenMs = res.firstTokenMs || 0;
         if (!pipeline) {
-          // 完全没有句子（模型返回空）→ 兜底说一句
+          // 完全没有句子（模型返回空）→ 兜底说一句。
+          //   v128：兜底**不再掩盖真实原因** —— 同时在 lastBrain 里留 diagnosis，
+          //   并在界面上说明"这轮没拿到内容"，否则"解析失败"看起来就像"正常回复"。
           var fallback = res.speech || '嗯，我在。';
-          pipeline = startPipeline(token, gate, conv, assistantMsg);
+          if (!res.speech) {
+            var why = (res.diagnosis || '大脑没返回可用内容');
+            warn('大脑返回空，使用兜底话术：' + why);
+            _vc.lastBrain = Object.assign({}, _vc.lastBrain || {}, { fallbackUsed: true, diagnosis: why });
+            setStateText('没收到内容（' + why + '），先说了句兜底');
+            if (!_vc.fallbackWarned) {
+              _vc.fallbackWarned = true;
+              toast('这一轮没拿到回复内容：' + why, 'warn');
+            }
+          }
+          pipeline = startPipeline(token, gate, conv, assistantMsg, turnStart);
           pipeline.push(firstSentence(fallback));
         }
-        if (conv && assistantMsg && res.speech) {
-          var full = res.speech;
-          if (res.plan && res.plan.emotion) assistantMsg.voicePlan = res.plan;
-          updateAssistantMsg(conv, assistantMsg, full === _vc.saidText ? full : (_vc.saidText || full));
+        if (conv && assistantMsg) {
+          // v128：思考内容落进消息的 reasoningContent —— 文字界面本来就会把它渲染成
+          //   「思考过程」折叠块，所以通话里想到的东西回看会话时不会凭空消失。
+          if (res.reasoning) {
+            assistantMsg.reasoningContent = strOf(res.reasoning).slice(0, 8000);
+            assistantMsg.voiceThinkMs = res.firstThinkMs || undefined;
+          }
+          if (res.speech) {
+            var full = res.speech;
+            if (res.plan && res.plan.emotion) assistantMsg.voicePlan = res.plan;
+            updateAssistantMsg(conv, assistantMsg, full === _vc.saidText ? full : (_vc.saidText || full));
+          }
         }
+        // 思考结束时把标题从「思考中…」切成最终字数
+        if (res.reasoning) setThinkingBlock(res.reasoning, false);
         return res;
       });
     }).then(function () {
       if (token !== _vc.turnId) return;
       if (pipeline) {
-        // 先注册排空回调，再 finish —— 顺序反了就会漏掉"已经播完"这个单次事件
-        pipeline.whenIdle(function () {
-          if (token !== _vc.turnId) return;
-          endTurn(token, turnStart, conv, assistantMsg);
-        });
+        // 排空回调已经在 startPipeline 里注册过了（v128），这里只负责"上游结束了"这个信号。
         pipeline.finish();
       } else {
         endTurn(token, turnStart, conv, assistantMsg);
@@ -3674,10 +4115,21 @@
     }).catch(fail);
   }
 
-  function startPipeline(token, gate, conv, assistantMsg) {
-    var pl = createPipeline(gate);
+  function startPipeline(token, gate, conv, assistantMsg, turnStart) {
+    // v128：把「这一轮还活着吗」做成一个判据传给 pipeline —— 晚到的 TTS 音频
+    //   必须能自己判断出来不该播，否则打断/挂断之后又冒出半句话、还把状态拉回 speaking。
+    var pl = createPipeline(gate, function () {
+      return token === _vc.turnId && _vc.running;
+    });
     _vc.pipeline = pl;
     pl._said = '';
+    // v128：排空回调**在这里**注册，不再等 callBrain resolve。
+    //   以前它挂在 callBrain 之后，一旦大脑流卡住（既不结束也不报错），音频早就播完了
+    //   却没人收尾，界面停在 speaking 直到 45s watchdog —— 用户看到的就是"说着说着不动了"。
+    pl.whenIdle(function () {
+      if (token !== _vc.turnId) return;
+      endTurn(token, turnStart, conv, assistantMsg);
+    });
     var origPush = pl.push;
     pl.push = function (text) {
       if (token !== _vc.turnId) return;
@@ -3865,6 +4317,8 @@
     // 轮次按"这一通电话"算：不清零的话第二通电话的轮次会接着上一通数，
     //   时间感知和结束标注都会说出错误的"第几轮 / 共几轮"
     _vc.metrics.turns = 0;
+    // v128：播放取证计数按"一通电话"重置（静音压缩量 / 排期饥饿）
+    try { if (_vc.player) _vc.player.resetStats(); } catch (e) {}
     try { hookRouteChange(); } catch (e) {}
     refreshVoiceName();
     tickTimer();
@@ -3924,6 +4378,17 @@
     _vc.autoHangTimer = null;
     _vc.segChunks = [];
     _vc.saidText = '';
+    // v128：跨通话残留清理。muted 不清最阴 —— 第二通电话默认静音，
+    //   UI 上看不出异常（按钮 class 仍可能被重置），状态一直是 listening 却永远识别不到。
+    _vc.muted = false;
+    _vc.bargeAboveMs = 0;
+    _vc.interrupted = false;
+    _vc.signalHistory = [];
+    _vc.fallbackWarned = false;
+    _vc.metrics.asrMs = 0;
+    _vc.metrics.brainFirstTokenMs = 0;
+    _vc.metrics.ttsFirstChunkMs = 0;
+    try { if (UI.btnMute) UI.btnMute.classList.remove('is-on'); } catch (e) {}
     if (!silent && _vc.callMarked) {
       // 先写标注再清状态：标注要用到 startedAt / turns
       appendCallMarker('end');
@@ -4442,11 +4907,23 @@
       }
     } catch (e) {}
 
-    // 页面卸载时释放麦克风（否则系统会一直显示录音中）
+    // 页面卸载 / 切后台时释放麦克风（否则系统会一直显示录音中）
+    //   v128：以前只 stopCapture()，留下 _vc.running=true、state=listening、watchdog/计时器
+    //   全活着。回到前台后麦克风已经没了、_vc.vad=null → 界面显示"请说话"但永远识别不到；
+    //   更糟的是残留的 45s watchdog 会在下一通电话里突然 hardStop()。
+    //   现在按"挂断"处理：一次通话跟着页面的可见性走，回来重新点通话即可。
+    function onPageHide() {
+      try { if (_vc.running) hangup(true); } catch (e) {}
+      try { stopCapture(); } catch (e) {}
+      clearSpeakWatchdog();
+      clearFillerTimer();
+      clearTimeout(_vc.autoHangTimer);
+      _vc.autoHangTimer = null;
+    }
     try {
       if (root.addEventListener) {
-        root.addEventListener('pagehide', function () { stopCapture(); });
-        root.addEventListener('beforeunload', function () { stopCapture(); });
+        root.addEventListener('pagehide', onPageHide);
+        root.addEventListener('beforeunload', onPageHide);
       }
     } catch (e) {}
 
@@ -4525,6 +5002,14 @@
           sensitivity: effectiveTuning('sensitivity', 0.5)
         },
         rate: { value: _vc.player ? _vc.player.rate : clampRate(voiceCfg().rate), mode: _vc.player ? _vc.player.rateMode : (strOf(voiceCfg().rateMode) === 'pitch' ? 'pitch' : 'natural') },
+        // v128 取证：播放排期饥饿（= 用户听到的"磕巴"）+ 静音压缩量
+        playback: _vc.player ? {
+          starve: _vc.player.starve,
+          gaps: _vc.player.gapLog,
+          silenceTrimmedMs: _vc.player.silenceTrimmedMs,
+          silenceCapMs: cfgNum('silenceCapMs', SILENCE_CAP_MS, 0, 1000),
+          scheduledMs: Math.round(_vc.player.scheduledMs || 0)
+        } : null,
         lastBrain: _vc.lastBrain || null,
         leakRms: Math.round((_vc.leakRms || 0) * 10000) / 10000,
         fillers: _vc.fillerBuffers.filter(Boolean).length,
@@ -4569,6 +5054,25 @@
     encodeWav: encodeWav,
     parseWavHeader: parseWavHeader,
     splitPcmTail: splitPcmTail,
+    // v128：静音上限压缩（句间"磕巴"的修复核心，纯函数、跨块有状态，可单测）
+    makeSilenceCap: makeSilenceCap,
+    SILENCE_CAP_MS: SILENCE_CAP_MS,
+    // v128：播放路径的取证入口 —— 喂一段裸 PCM 走真实的 appendPcm24（含静音压缩 + 排期），
+    //   再看 silenceTrimmedMs / starve 有没有变。没有这个钩子就只能靠听感说"好像好点了"。
+    appendPcm24: function (bytes) {
+      var p = ensurePlayer();
+      p.appendPcm24(bytes);
+      return { trimmedMs: p.silenceTrimmedMs, starve: p.starve };
+    },
+    playerStats: function () {
+      var p = _vc.player;
+      if (!p) return null;
+      return { trimmedMs: p.silenceTrimmedMs, starve: p.starve, gaps: p.gapLog, capMs: cfgNum('silenceCapMs', SILENCE_CAP_MS, 0, 1000) };
+    },
+    // v128：思考策略与 token 预算（纯函数）
+    voiceThinking: voiceThinking,
+    brainMaxTokens: brainMaxTokens,
+    THINK_TOKEN_BUDGET: THINK_TOKEN_BUDGET,
     // 回归测试用：任意 PCM 字节 → 合法 16k WAV（两条分支都必须产出带 RIFF 头的真 WAV）
     pcmBytesToWav16k: pcmBytesToWav16k,
     // VAD

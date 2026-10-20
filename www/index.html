@@ -7,7 +7,7 @@
 <title>chat-lite</title>
 <link rel="stylesheet" href="vendor/highlight/github-dark.min.css?v=116">
 <link rel="stylesheet" href="vendor/katex/katex.min.css?v=116">
-<link rel="stylesheet" href="style.css?v=126">
+<link rel="stylesheet" href="style.css?v=128">
   <meta name="theme-color" content="#7c3aed">
   <link rel="manifest" href="manifest.json">
 </head>
@@ -138,6 +138,13 @@
       </div>
 
       <div id="voice-signals" class="voice-signals"></div>
+
+      <!-- v128：思考过程。会话开了深度思考时，通话里也看得见模型在想什么。
+           默认隐藏，只有真的收到 reasoning_content 才出现（没有思考的模型不该多出一块 UI）。 -->
+      <details id="voice-think" class="voice-think" style="display:none">
+        <summary id="voice-think-summary" class="voice-think-summary">思考过程</summary>
+        <div id="voice-think-body" class="voice-think-body"></div>
+      </details>
     </div>
 
     <div class="voice-controls">
@@ -691,6 +698,15 @@
             </label>
           </label>
           <span class="setting-hint">把「语速偏快 · 音量偏低」这类声音状态显示出来，同时也会喂给大脑。</span>
+          <label class="setting-row">
+            <span>深度思考</span>
+            <select id="voice-thinking" class="setting-select">
+              <option value="follow">跟随会话</option>
+              <option value="on">通话中始终开</option>
+              <option value="off">通话中始终关</option>
+            </select>
+          </label>
+          <span class="setting-hint" id="voice-thinking-hint">跟随会话＝用这个会话自己的「深度思考」开关。开着更慢（实测首字约 +0.9 秒）但想得更细，思考过程会显示在通话界面里；关掉最快。</span>
 
           <div class="setting-divider"></div>
           <span class="setting-section-title">时间与语速</span>
@@ -846,7 +862,7 @@
 <script src="vendor/katex/katex.min.js?v=116"></script>
 <!-- LaTeX 渲染层：须在 katex.min.js 之后、chat.js 之前加载 -->
 <script src="latex.js?v=119"></script>
-<script src="db.js?v=127"></script>
+<script src="db.js?v=128"></script>
 <script src="haptics.js?v=115"></script>
 <script src="providers.js?v=102"></script>
 <script src="image-gen.js?v=124"></script>
@@ -859,7 +875,7 @@
 <!-- v127: voice-provider 管独立的语音接口（地址+密钥+模型），与「接口管理」的聊天渠道无关 -->
 <script src="voice-director.js?v=126"></script>
 <script src="voice-provider.js?v=127"></script>
-<script src="voice-settings.js?v=127"></script>
-<script src="voice.js?v=127"></script>
+<script src="voice-settings.js?v=128"></script>
+<script src="voice.js?v=128"></script>
 </body>
 </html>

@@ -207,6 +207,11 @@
     if ($('voice-barge-in')) $('voice-barge-in').checked = !!st.bargeIn;
     if ($('voice-show-transcript')) $('voice-show-transcript').checked = !!st.showTranscript;
     if ($('voice-show-signals')) $('voice-show-signals').checked = !!st.showSignals;
+    // v128：思考策略（follow / on / off），老用户没有该键 → 显示「跟随会话」
+    if ($('voice-thinking')) {
+      var tk = (st.thinking === 'on' || st.thinking === 'off') ? st.thinking : 'follow';
+      $('voice-thinking').value = tk;
+    }
     if ($('voice-sensitivity')) $('voice-sensitivity').value = String(st.sensitivity);
     var sv = $('voice-sensitivity-value');
     if (sv) sv.textContent = Number(st.sensitivity).toFixed(2);
@@ -294,6 +299,14 @@
     bindToggle('voice-barge-in', 'bargeIn');
     bindToggle('voice-show-transcript', 'showTranscript');
     bindToggle('voice-show-signals', 'showSignals');
+
+    // v128：思考策略。改动即时落盘 —— 用户会在通话中调它来比较手感。
+    var thinkSel = $('voice-thinking');
+    if (thinkSel) thinkSel.addEventListener('change', function () {
+      var v = thinkSel.value;
+      st().thinking = (v === 'on' || v === 'off') ? v : 'follow';
+      persistVoice();
+    });
 
     var sens = $('voice-sensitivity');
     if (sens) sens.addEventListener('input', function () {

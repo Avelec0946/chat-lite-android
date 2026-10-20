@@ -1421,3 +1421,31 @@ body.voice-view-open .btn-voice-entry::after{display:none}
 .voice-adv[open] .voice-adv-summary::after{transform:rotate(180deg)}
 .voice-adv-body{padding:0 12px 12px}
 .voice-adv-body .setting-row{padding:6px 0}
+
+/* ===== v128：通话里的「思考过程」折叠块 =====
+   AI 说话时它按流式增长；说完折叠成一行字数。
+   视觉上压得比字幕小、比副语言标签重一点 —— 它是旁注，不是台词。 */
+.voice-think{
+  margin-top:10px;max-height:22vh;overflow:hidden;
+  border-radius:10px;background:rgba(255,255,255,.045);
+  border:1px solid rgba(255,255,255,.07);
+  font-size:12.5px;color:rgba(226,224,240,.62);
+}
+.voice-think.is-streaming{border-color:rgba(var(--voice-rgb),.32)}
+.voice-think-summary{
+  padding:8px 12px;cursor:pointer;list-style:none;
+  display:flex;align-items:center;gap:6px;
+  font-weight:500;color:rgba(226,224,240,.78);
+}
+.voice-think-summary::-webkit-details-marker{display:none}
+.voice-think-summary::before{content:'▸';font-size:11px;transition:transform .18s}
+.voice-think[open] .voice-think-summary::before{transform:rotate(90deg)}
+.voice-think.is-streaming .voice-think-summary::after{
+  content:'';width:.4em;height:.4em;border-radius:50%;
+  background:rgba(var(--voice-rgb),.9);animation:voiceDotBreathe 1.1s ease-in-out infinite;
+}
+.voice-think-body{
+  padding:0 12px 10px;line-height:1.6;white-space:pre-wrap;
+  max-height:16vh;overflow:auto;word-break:break-word;
+}
+.voice-think-body::-webkit-scrollbar{width:0;height:0;display:none}

@@ -1043,6 +1043,145 @@ console.log('\n[15] 大脑跟随会话 / 通话标注不污染历史');
 })();
 
 // =====================================================================================
+console.log('\n[v128] 句间静音上限（"磕巴"修复）');
+// =====================================================================================
+(function () {
+  var RATE = 24000;
+  var THR = 32768 * T.SILENCE_CAP_MS * 0 + 32768 * 0.008;   // 与实现同源：满量程 0.8%
+  function silent(ms) { return new Int16Array(Math.round(ms / 1000 * RATE)); }
+  function tone(ms) {
+    var n = Math.round(ms / 1000 * RATE), a = new Int16Array(n);
+    for (var i = 0; i < n; i++) a[i] = Math.round(8000 * Math.sin(i / 12));
+    return a;
+  }
+  function concat(list) {
+    var total = 0, i;
+    for (i = 0; i < list.length; i++) total += list[i].length;
+    var out = new Int16Array(total), off = 0;
+    for (i = 0; i < list.length; i++) { out.set(list[i], off); off += list[i].length; }
+    return out;
+  }
+  function msOf(arr) { return Math.round(arr.length / RATE * 1000); }
+
+  // ① 一段 500ms 静音 + 300ms 声音 → 静音被截到 140ms
+  var cap = T.makeSilenceCap(140, RATE);
+  var r1 = cap.process(concat([silent(500), tone(300)]));
+  ok('超长静音被截到上限（500→140ms）', msOf(r1.out) === 440, msOf(r1.out) + 'ms');
+  ok('丢弃量记在 dropped', Math.abs(r1.dropped / RATE * 1000 - 360) < 2, String(r1.dropped));
+
+  // ② 上限以内的自然停顿原样保留（不把正常换气压掉）
+  var cap2 = T.makeSilenceCap(140, RATE);
+  var r2 = cap2.process(concat([tone(200), silent(90), tone(200)]));
+  ok('上限内的停顿不被动（90ms 原样保留）', msOf(r2.out) === 490, msOf(r2.out) + 'ms');
+  ok('没有丢弃', r2.dropped === 0, String(r2.dropped));
+
+  // ③ 跨块连续：静音被拆成 3 块（70+70+70）时也要算总长，而不是每块各自从头计
+  var cap3 = T.makeSilenceCap(140, RATE);
+  var out3 = [], dropped3 = 0, k;
+  var blocks = [silent(70), silent(70), silent(70), tone(200)];
+  for (k = 0; k < blocks.length; k++) {
+    var rr = cap3.process(blocks[k]);
+    out3.push(rr.out); dropped3 += rr.dropped;
+  }
+  var joined3 = concat(out3.filter(function (x) { return x.length; }));
+  ok('跨块静音合并计量（210ms → 140ms）', msOf(joined3) === 340, msOf(joined3) + 'ms');
+  ok('跨块累计丢弃 ≈ 70ms', Math.abs(dropped3 / RATE * 1000 - 70) < 2, String(dropped3));
+
+  // ④ cap = 0 时完全直通（用户想听原始音频）
+  var cap0 = T.makeSilenceCap(0, RATE);
+  var raw = concat([silent(500), tone(200)]);
+  var r4 = cap0.process(raw);
+  ok('上限 0 = 直通，不丢任何样本', r4.out.length === raw.length && r4.dropped === 0, r4.out.length + '');
+
+  // ⑤ 全部是声音时，输出必须与原样本逐样本相同（不能改动波形）
+  var cap5 = T.makeSilenceCap(140, RATE);
+  var voiceOnly = tone(400);
+  var r5 = cap5.process(voiceOnly);
+  var same = r5.out.length === voiceOnly.length;
+  for (var m = 0; m < voiceOnly.length && same; m++) if (r5.out[m] !== voiceOnly[m]) same = false;
+  ok('全是声音时逐样本不变（不改音质）', same, 'len ' + r5.out.length);
+  ok('静音阈值与实现一致（THR≈满量程0.8%）', THR > 200 && THR < 300, String(THR));
+})();
+
+// =====================================================================================
+console.log('\n[v128] 思考策略与 token 预算');
+// =====================================================================================
+(function () {
+  var hadSettings = Object.prototype.hasOwnProperty.call(globalThis, 'settings');
+  var origin = globalThis.settings;
+
+  // ① 没有 settings（老环境）→ 跟随会话
+  try { delete globalThis.settings; } catch (e) {}
+  var t1 = T.voiceThinking({ thinkingEnabled: true });
+  ok('无设置时默认 follow', t1.mode === 'follow' && t1.on === true, JSON.stringify(t1));
+  var t2 = T.voiceThinking({ thinkingEnabled: false });
+  ok('会话关掉思考 → follow 时不开', t2.on === false, JSON.stringify(t2));
+
+  // ② 显式关 / 显式开覆盖会话
+  globalThis.settings = { voice: { thinking: 'off' } };
+  ok('thinking=off 覆盖会话（会话开着也不思考）', T.voiceThinking({ thinkingEnabled: true }).on === false);
+  globalThis.settings = { voice: { thinking: 'on' } };
+  ok('thinking=on 覆盖会话（会话关着也思考）', T.voiceThinking({ thinkingEnabled: false }).on === true);
+
+  // ③ 乱填的值不能把功能调死 → 退回 follow
+  globalThis.settings = { voice: { thinking: 'yes-please' } };
+  var t3 = T.voiceThinking({ thinkingEnabled: true });
+  ok('非法值退回 follow', t3.mode === 'follow' && t3.on === true, JSON.stringify(t3));
+
+  // ④ 预算：思考必须额外留额度，否则正文会被 reasoning 挤空（实测 160 全被吃掉）
+  ok('首轮不思考 = 160', T.brainMaxTokens(true, false) === 160, String(T.brainMaxTokens(true, false)));
+  ok('后续不思考 = 400', T.brainMaxTokens(false, false) === 400, String(T.brainMaxTokens(false, false)));
+  ok('首轮思考 = 160 + 思考预算',
+    T.brainMaxTokens(true, true) === 160 + T.THINK_TOKEN_BUDGET, String(T.brainMaxTokens(true, true)));
+  ok('思考预算足以覆盖实测 reasoning（≥1400）', T.THINK_TOKEN_BUDGET >= 1400, String(T.THINK_TOKEN_BUDGET));
+
+  if (hadSettings) globalThis.settings = origin; else { try { delete globalThis.settings; } catch (e) {} }
+})();
+
+// =====================================================================================
+console.log('\n[v128] 历史消息必须带 JSON 壳（否则上游只吐空格）');
+// =====================================================================================
+(function () {
+  // 故障原样：会话里存的 assistant 是"说出口的原话"（回看要可读），
+  //   而大脑要求 json_object 输出 → 历史里出现纯文本 assistant，DeepSeek 会返回
+  //   一串空白字符（content="       "，finish_reason=stop），语音解析不出 speech，
+  //   于是每轮都走兜底「嗯，我在。」。Node 对照实验见 tools/t-empty.js。
+  var conv = { id: 'hc', rootId: 'r', messageMap: {}, activePath: [] };
+  var u1 = { id: 'u1', role: 'user', content: '嗯。' };
+  var a1 = { id: 'a1', role: 'assistant', content: '我在听。' };
+  var u2 = { id: 'u2', role: 'user', content: '今天有点累。' };
+  conv.messageMap = { u1: u1, a1: a1, u2: u2 };
+  conv.activePath = ['u1', 'a1', 'u2'];
+
+  var hist = T.historyMessages(conv, 8);
+  ok('user 历史原样透传', hist[0].content === '嗯。' && hist[2].content === '今天有点累。',
+    JSON.stringify(hist));
+  ok('assistant 历史被包成 {"speech":…}',
+    hist[1].content === '{"speech":"我在听。"}', JSON.stringify(hist[1].content));
+  var parsed = null;
+  try { parsed = JSON.parse(hist[1].content); } catch (e) {}
+  ok('包出来的壳是合法 JSON（上游能按 json_object 接）', !!parsed && parsed.speech === '我在听。',
+    JSON.stringify(parsed));
+
+  // 已经是 JSON 的历史不要重复包（用户可能手工编辑过，或来自上游原文）
+  var rawJson = '{"speech":"好的。","emotion":"平静"}';
+  var conv2 = { id: 'hc2', rootId: 'r', messageMap: {}, activePath: [] };
+  conv2.messageMap = { a2: { id: 'a2', role: 'assistant', content: rawJson } };
+  conv2.activePath = ['a2'];
+  var hist2 = T.historyMessages(conv2, 4);
+  ok('已经是 JSON 的 assistant 不重复包装', hist2[0].content === rawJson, JSON.stringify(hist2[0].content));
+
+  // 引号/换行必须转义，否则发给模型的 messages 本身就不是合法 JSON
+  var conv3 = { id: 'hc3', rootId: 'r', messageMap: {}, activePath: [] };
+  conv3.messageMap = { a3: { id: 'a3', role: 'assistant', content: '他说"别急"\n然后笑了' } };
+  conv3.activePath = ['a3'];
+  var hist3 = T.historyMessages(conv3, 4);
+  var ok3 = null;
+  try { ok3 = JSON.parse(hist3[0].content); } catch (e) {}
+  ok('含引号/换行的原话转义正确', !!ok3 && ok3.speech === '他说"别急"\n然后笑了', JSON.stringify(hist3[0].content));
+})();
+
+// =====================================================================================
 var total = passes + failures;
 console.log('\n' + '='.repeat(58));
 console.log((failures === 0 ? '全部通过' : '有失败') + '：' + passes + '/' + total + ' 通过，' + failures + ' 失败');
