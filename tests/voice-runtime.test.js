@@ -714,7 +714,8 @@ console.log('\n[12] 通话提示词 = 会话人设 + 通话层');
   var sys = msgs[0].content;
   ok('首条是 system 消息', msgs[0].role === 'system');
   ok('会话人设排在通话层之前', sys.indexOf('你是猫娘') >= 0 && sys.indexOf('你是猫娘') < sys.indexOf('通话层'), sys);
-  ok('JSON 输出格式指令在最后', sys.indexOf('【输出格式（强制）】') > sys.indexOf('通话层'), sys);
+  // v129：输出改成纯文本后，指令头从「【输出格式（强制）】」变成「【怎么输出】」
+  ok('输出格式指令在最后（纯文本路线）', sys.indexOf('【怎么输出】') > sys.indexOf('通话层'), sys);
   ok('clock 传给通话层（enabled/now/callStartedAt/lastTurnAt/turnIndex）',
     !!seen && !!seen.clock && seen.clock.enabled === true &&
     typeof seen.clock.now === 'number' && typeof seen.clock.callStartedAt === 'number' &&
@@ -736,9 +737,9 @@ console.log('\n[12] 通话提示词 = 会话人设 + 通话层');
   ok('本轮用户话只出现一次（不被 buildTurnMessages 重复追加）',
     msgs.filter(function (m) { return m.role === 'user' && m.content === '你好'; }).length === 1,
     JSON.stringify(msgs.map(function (m) { return m.role + ':' + String(m.content).slice(0, 8); })));
-  ok('提示词里 JSON 格式说明只有一份',
-    (sys.split('【输出格式').length - 1) === 1,
-    String(sys.split('【输出格式').length - 1));
+  ok('提示词里输出格式说明只有一份（v129：不再要求 JSON）',
+    (sys.split('【怎么输出】').length - 1) === 1 && sys.indexOf('response_format') < 0,
+    String(sys.split('【怎么输出】').length - 1));
 
   globalThis.settings.voice.timestamps = false;
   T.buildBrainMessages(conv, '你好', null);
@@ -1139,13 +1140,13 @@ console.log('\n[v128] 思考策略与 token 预算');
 })();
 
 // =====================================================================================
-console.log('\n[v128] 历史消息必须带 JSON 壳（否则上游只吐空格）');
+console.log('\n[v129] 历史消息原样透传（纯文本路线）');
 // =====================================================================================
 (function () {
-  // 故障原样：会话里存的 assistant 是"说出口的原话"（回看要可读），
-  //   而大脑要求 json_object 输出 → 历史里出现纯文本 assistant，DeepSeek 会返回
-  //   一串空白字符（content="       "，finish_reason=stop），语音解析不出 speech，
-  //   于是每轮都走兜底「嗯，我在。」。Node 对照实验见 tools/t-empty.js。
+  // v129：历史**原样透传**。
+  //   v128 曾把 assistant 包成 {"speech":…} 来迁就"要求 JSON 输出"的上游；
+  //   v129 输出改纯文本后，历史也必须纯文本 —— 两边格式一致，模型不会因为
+  //   "看见 JSON 就继续写 JSON、看不见就罢工"而吐空格（实测见 tools/t-matrix.js 的 [F]）。
   var conv = { id: 'hc', rootId: 'r', messageMap: {}, activePath: [] };
   var u1 = { id: 'u1', role: 'user', content: '嗯。' };
   var a1 = { id: 'a1', role: 'assistant', content: '我在听。' };
@@ -1156,29 +1157,59 @@ console.log('\n[v128] 历史消息必须带 JSON 壳（否则上游只吐空格�
   var hist = T.historyMessages(conv, 8);
   ok('user 历史原样透传', hist[0].content === '嗯。' && hist[2].content === '今天有点累。',
     JSON.stringify(hist));
-  ok('assistant 历史被包成 {"speech":…}',
-    hist[1].content === '{"speech":"我在听。"}', JSON.stringify(hist[1].content));
-  var parsed = null;
-  try { parsed = JSON.parse(hist[1].content); } catch (e) {}
-  ok('包出来的壳是合法 JSON（上游能按 json_object 接）', !!parsed && parsed.speech === '我在听。',
-    JSON.stringify(parsed));
+  ok('assistant 历史原样透传（不再包 JSON 壳）',
+    hist[1].content === '我在听。', JSON.stringify(hist[1].content));
+  ok('历史里不出现 speech 字段名（纯文本路线的关键）',
+    JSON.stringify(hist).indexOf('speech') < 0, JSON.stringify(hist));
 
-  // 已经是 JSON 的历史不要重复包（用户可能手工编辑过，或来自上游原文）
-  var rawJson = '{"speech":"好的。","emotion":"平静"}';
-  var conv2 = { id: 'hc2', rootId: 'r', messageMap: {}, activePath: [] };
-  conv2.messageMap = { a2: { id: 'a2', role: 'assistant', content: rawJson } };
-  conv2.activePath = ['a2'];
-  var hist2 = T.historyMessages(conv2, 4);
-  ok('已经是 JSON 的 assistant 不重复包装', hist2[0].content === rawJson, JSON.stringify(hist2[0].content));
-
-  // 引号/换行必须转义，否则发给模型的 messages 本身就不是合法 JSON
+  // 引号/换行不需要转义了 —— 它现在就是普通字符串，直接进 messages
   var conv3 = { id: 'hc3', rootId: 'r', messageMap: {}, activePath: [] };
   conv3.messageMap = { a3: { id: 'a3', role: 'assistant', content: '他说"别急"\n然后笑了' } };
   conv3.activePath = ['a3'];
   var hist3 = T.historyMessages(conv3, 4);
-  var ok3 = null;
-  try { ok3 = JSON.parse(hist3[0].content); } catch (e) {}
-  ok('含引号/换行的原话转义正确', !!ok3 && ok3.speech === '他说"别急"\n然后笑了', JSON.stringify(hist3[0].content));
+  ok('含引号/换行的原话原样保留', hist3[0].content === '他说"别急"\n然后笑了', JSON.stringify(hist3[0].content));
+})();
+
+// =====================================================================================
+// v129：纯文本分句器 / 表演提示 / 空正文兜底（纯文本路线的心脏）
+// =====================================================================================
+(function () {
+  var st = T.createTextStreamer();
+
+  // 流式增量：一句没说完不能吐，句末标点到了才吐
+  var a = st.push('嗯，我在呢');
+  ok('半句不吐（等句末标点）', a.length === 0, JSON.stringify(a));
+  var b = st.push('。这么晚还没睡啊？');
+  ok('跨块拼出两句', b.length === 2 && b[0] === '嗯，我在呢。' && b[1] === '这么晚还没睡啊？', JSON.stringify(b));
+  ok('text() 是完整原文（存会话用）', st.text() === '嗯，我在呢。这么晚还没睡啊？', st.text());
+
+  var st2 = T.createTextStreamer();
+  st2.push('第一句。第二句没说完');
+  var rest = st2.flush();
+  ok('flush 吐出没标点的尾巴', rest.length === 1 && rest[0] === '第二句没说完', JSON.stringify(rest));
+  ok('flush 之后再 flush 不重复吐', st2.flush().length === 0);
+
+  // 连标点不拆开（"是吗？！" 是一句）
+  var st3 = T.createTextStreamer();
+  var c = st3.push('是吗？！');
+  ok('连续句末标点归到同一句', c.length === 1 && c[0] === '是吗？！', JSON.stringify(c));
+
+  // 表演提示：只在 mimo 下生效，按声音状态分档
+  var fakeProvider = { model: 'mimo-v2.5-tts' };
+  ok('perfPrefix 在无 provider 时返回空串（不炸）', typeof T.perfPrefix({}, {}) === 'string');
+  ok('perfPrefix 关掉时返回空串', T.perfPrefix({ loudness: '低' }, { perfHint: false }) === '');
+  ok('PERF_PREFIXES 全部是中文括注', Object.keys(T.PERF_PREFIXES).every(function (k) {
+    return /^（.+）$/.test(T.PERF_PREFIXES[k]);
+  }), JSON.stringify(T.PERF_PREFIXES));
+
+  // 兜底话术：不能是空应答，且要能让人听出"没接上"
+  var line = T.pickNoContentLine();
+  ok('兜底话术不是「嗯，我在」这类空应答',
+    !!line && ['嗯，我在。', '嗯，我在', '我在。', '嗯。'].indexOf(line) < 0, line);
+  ok('兜底话术数量 ≥3（轮换用，避免又变成"每次一样"）', T.NO_CONTENT_LINES.length >= 3, String(T.NO_CONTENT_LINES.length));
+  var seen = {};
+  for (var i = 0; i < 40; i++) seen[T.pickNoContentLine()] = 1;
+  ok('兜底话术真的在轮换（40 次至少命中 2 条）', Object.keys(seen).length >= 2, JSON.stringify(Object.keys(seen)));
 })();
 
 // =====================================================================================

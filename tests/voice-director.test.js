@@ -92,7 +92,7 @@ describe('UMD 加载', function () {
   if (browserLike) {
     ok(typeof browserLike.buildSystemPrompt === 'function', 'window 版暴露 buildSystemPrompt');
     ok(typeof browserLike.VERSION === 'string', 'window 版带 VERSION');
-    eq(browserLike.VERSION, '125', 'VERSION 应为 v125');
+    eq(browserLike.VERSION, '129', 'VERSION 应为 v129');
   }
   VD = browserLike || nodeLike;
   ok(!!VD, '至少有一种加载方式可用');

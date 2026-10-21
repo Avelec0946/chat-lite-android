@@ -221,7 +221,17 @@ function defaultVoiceSettings() {
     //   实测（DeepSeek）：思考开着时 max_tokens=160 会把预算全吃在 reasoning 上，
     //   正文 0 字符 → 每轮都只能说兜底句「嗯，我在。」；同时 reasoning_content 被丢掉，
     //   界面上也就看不到思考过程。现在两条都要显式处理。
-    thinking: 'follow'
+    thinking: 'follow',
+
+    // ===== v129 新增 =====
+    // 篇幅档位：short 12~40 字 / normal 20~70 字 / chatty 50~120 字。
+    //   默认 normal —— 以前默认 short（8~35 字）叠加"常用嗯/我在听"的人设，
+    //   模型就只会挤出一句语气词，用户听到的是「不管我说什么都一样」。
+    brevity: 'normal',
+    // 客户端表演提示：把这一轮用户声音状态（音量/语速/句尾）映射成给 TTS 的中文括注，
+    //   例如「（温和地，像平常说话）」。MiMo 会把它当表演方向吃掉不念、但会改变音频。
+    //   默认开；只在 TTS 模型是 mimo 时生效（别的 TTS 会把括注念出来）。
+    perfHint: true
   };
 }
 

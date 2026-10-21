@@ -31,7 +31,7 @@
   // 1. 常量与配置
   // =====================================================================================
 
-  var VERSION = 'v128';
+  var VERSION = 'v129';
 
   // 采集 / 播放
   var CAPTURE_RATE = 16000;   // ASR 只接受 16k 单声道 16bit wav（已实测）
@@ -1168,6 +1168,47 @@
       speech: function () { return extractJsonString(st.json, 'speech').value; },
       raw: function () { return st.json; },
       reset: function () { st.json = ''; st.consumed = 0; st.emitted = []; }
+    };
+    return api;
+  }
+
+  // v129：纯文本流式分句器。
+  //   和 createSpeechExtractor 的区别：它不再从 JSON 里抠 speech，直接对文本流按句末标点切。
+  //   状态只有"已收全文 + 已消费到哪"，没有解析失败这种状态 —— 这是纯文本路线的最大好处。
+  function createTextStreamer() {
+    var st = { buf: '', consumed: 0 };
+    function pending() { return st.buf.slice(st.consumed); }
+    var api = {
+      push: function (delta) {
+        if (!delta) return [];
+        st.buf += delta;
+        var out = [];
+        // 一次增量里可能一次到两句（上游把整段吐在一个 chunk 里），必须全部吐出去，
+        //   否则第二句要等到下一次 push 才合成 —— 听起来就是"前一句说完停一下"。
+        for (;;) {
+          var p = pending();
+          var cut = -1;
+          for (var i = 0; i < p.length; i++) {
+            if (HARD_BREAK.indexOf(p.charAt(i)) >= 0) { cut = i; break; }
+          }
+          if (cut < 0) break;
+          var rest = p.slice(cut + 1);
+          var extra = 0;
+          while (extra < rest.length && HARD_BREAK.indexOf(rest.charAt(extra)) >= 0) extra++;
+          var head = p.slice(0, cut + 1) + rest.slice(0, extra);
+          st.consumed += head.length;
+          var t = head.trim();
+          if (t) out.push(t);
+        }
+        return out;
+      },
+      flush: function () {
+        var rest = pending().trim();
+        st.consumed = st.buf.length;
+        return rest ? [rest] : [];
+      },
+      text: function () { return st.buf; },
+      reset: function () { st.buf = ''; st.consumed = 0; }
     };
     return api;
   }
@@ -3266,16 +3307,27 @@
   // 18. 大脑请求：流式 JSON 增量解析 → 句子立刻进 TTS 流水线
   // =====================================================================================
 
-  var JSON_DIRECTIVE = [
+  // =====================================================================================
+  // v129 ★ 通话输出改成**纯文本**，不再要求模型吐 JSON。
+  //
+  //   为什么（三条都是实测，不是推测）：
+  //     ① 历史里只要有一条"纯文本"的 assistant 消息，上游（DeepSeek + json_object）
+  //        就直接吐一串空格（finish_reason=stop、content="        "）。
+  //        而会话里存的恰恰是"说出口的原话"（回看要可读）→ v128 只能在发请求时补一层
+  //        {"speech":…} 的壳，壳一漏（老版本/手工编辑/分支切换）就复发。
+  //     ② 思考与正文共享 max_tokens，思考一长正文被挤空。
+  //     ③ 流式半截 JSON 可能解析不出 speech。
+  //   三者任一发生 → 兜底「嗯，我在。」→ 用户听到的就是"不管我说什么都一样"。
+  //
+  //   而 JSON 里那些字段（emotion/tone/pace/nonverbals）**从来没有被真正用上**：
+  //   voice.js 里只写进 assistantMsg.voicePlan，TTS 拿到的一直是纯文本。
+  //   → 纯文本出话 + 客户端按声音信号生成表演提示，功能不减，故障面少一大半。
+  // =====================================================================================
+  var SPEECH_DIRECTIVE = [
     '',
-    '【输出格式（强制）】你正在打电话，回复会被直接念出来。只输出一个 JSON 对象，不要任何解释、不要代码块。',
-    '字段顺序必须是这样，第一个字段永远是 speech：',
-    '{"speech":"你要说出口的原话","emotion":"情绪","tone":"语气","pace":1.0,"volume":"中","nonverbals":["笑"]}',
-    'speech 里只用口语短句，句末用中文标点；不要 Markdown、不要列表、不要括号里的动作描写。',
-    // v128：实测（DeepSeek + json_object）对方只回"嗯。"这类极短话时，模型会输出
-    //   一串空白字符当作"没什么可说的"（finish_reason=stop，content 只有空格）。
-    //   对电话来说这是致命的：用户听到的永远是兜底句。必须明确禁止空 speech。
-    'speech 绝不能为空：哪怕对方只"嗯"了一声，也要自然地接一句（可以是一个反应、一句追问，或顺着刚才的话题说下去）。'
+    '【怎么输出】直接说你要说出口的话本身：不要 JSON、不要字段名、不要引号包裹、不要解释你在做什么。',
+    '【必须有内容】每轮都要说出**具体的东西**：先接住对方刚说的，再往前推一点 —— 一个具体反应、一句追问、或你自己的看法。',
+    '禁止只回一句语气词或空应答（「嗯」「我在」「嗯，我在」「嗯，我在听」）—— 那不是回应，等于没说话。'
   ].join('\n');
 
   function plainMsgContent(m) {
@@ -3283,23 +3335,12 @@
     return c.replace(/<status>[\s\S]*?<\/status>/g, '').trim();
   }
 
-  // v128 ★ 关键修复：历史的 assistant 消息必须**包装成 JSON**。
-  //   实测（DeepSeek + response_format:json_object）只要历史里出现一条"纯文本"的
-  //   assistant 消息，模型就会只吐一串空格（finish_reason=stop，content="         "）——
-  //   于是 voice.js 解析不出 speech，走兜底「嗯，我在。」，从第二轮起每轮都是这一句。
-  //   Node 侧对照实验（tools/t-empty.js）：
-  //     A 只有一轮 user            → 正常返回 JSON
-  //     B 两轮 + assistant 存纯文本 → content="       "（复现故障）
-  //     C 两轮 + assistant 存 JSON 原文 → 正常返回 JSON
-  //   App 里会话存的是"说出口的原话"（回看要可读），所以转发给大脑时在这里补一层壳。
+  // v129：历史**原样透传**。
+  //   v128 曾在这里给 assistant 补一层 {"speech":…} 的壳，是为了迁就"要求 JSON 输出"的
+  //   上游行为；v129 输出改纯文本后，历史也必须是纯文本 —— 两边格式一致，模型不会
+  //   "看见 JSON 就继续写 JSON、看不见就罢工"。函数保留（测试/兼容），行为是恒等。
   function brainHistoryContent(role, text) {
-    var t = strOf(text);
-    if (role !== 'assistant') return t;
-    if (!t) return t;
-    // 已经是 JSON 就原样（用户可能手工编辑过，或者上游给了完整对象）
-    var head = t.replace(/^\s+/, '').charAt(0);
-    if (head === '{') return t;
-    try { return '{"speech":' + JSON.stringify(t) + '}'; } catch (e) { return t; }
+    return strOf(text);
   }
 
   function historyMessages(conv, limit) {
@@ -3421,7 +3462,11 @@
           channel: 'voice',
           clock: clock,
           rate: clampRate(cfg.rate),
-          rateMode: (strOf(cfg.rateMode) === 'pitch') ? 'pitch' : 'natural'
+          rateMode: (strOf(cfg.rateMode) === 'pitch') ? 'pitch' : 'natural',
+          // v129：篇幅档位默认 normal（2~3 句 / 20~70 字）。以前默认 short（8~35 字）
+          //   叠加"常用嗯/我在听"的人设，模型就只会挤出一句语气词 —— 那正是用户听到的
+          //   "不管说什么都一样"。设置里仍可切回 short / chatty。
+          brevity: strOf(cfg.brevity) || 'normal'
         });
         layer = (typeof raw === 'string') ? strOf(raw)
           : strOf(raw && (raw.systemPrompt || raw.text || raw.content));
@@ -3466,7 +3511,7 @@
       joined = sysParts.join('\n\n');
       if (clockText && joined.indexOf(clockText) < 0) sysParts.push(clockText);
     }
-    var sys = sysParts.join('\n\n') + '\n' + JSON_DIRECTIVE;
+    var sys = sysParts.join('\n\n') + '\n' + SPEECH_DIRECTIVE;
 
     var msgs = [{ role: 'system', content: sys }];
     var hist = historyMessages(conv, 14);
@@ -3483,110 +3528,173 @@
     return msgs;
   }
 
-  // 语音大脑：流式；失败自动回退非流式
-  // onSentence(text)   —— 已成型的一句，立刻送 TTS
-  // 返回 {speech, plan, firstTokenMs, json, reasoning, diagnosis}
+  // v129：空正文重试用的**极简**消息。
+  //   为什么丢历史：实测上游偶发的"只吐空格/只吐思考"与上下文长度和格式高度相关，
+  //   把历史全去掉 + 关掉思考是命中率最高的一次性补救；宁可这轮少一点上下文，
+  //   也不能让用户听到一句和内容无关的兜底话。
+  function buildRetryMessages(conv, userText, signals) {
+    var full = [];
+    try { full = buildBrainMessages(conv, userText, signals); } catch (e) { full = []; }
+    var sys = (full[0] && full[0].role === 'system') ? full[0] : { role: 'system', content: '你在打电话，说人话。' };
+    return [sys, {
+      role: 'user',
+      content: strOf(userText) + '\n\n（就这一句，直接说你要说的话。不要用语气词应付，不要 JSON。）'
+    }];
+  }
+
+  // =====================================================================================
+  // 18.5 大脑请求（v129：纯文本 → 逐句进 TTS）
+  //
+  //   onSentence(text) —— 已成型的一句，立刻送 TTS
+  //   返回 { speech, firstTokenMs, json, reasoning, diagnosis, finishReason, thinkOn, retried }
+  //
+  //   和 v128 的区别只有一件事：**不再要求模型吐 JSON**。
+  //   换来的收益：没有"解析不出 speech"、没有"历史格式不对就吐空格"、token 也省一截。
+  //   代价：模型不再告诉我们 emotion —— 但那玩意以前只被塞进 assistantMsg.voicePlan，
+  //   TTS 从来没用到（见 perfPrefix 的注释），所以等于没代价。
+  // =====================================================================================
+
+  // 客户端表演提示：按这一轮**用户的声音状态**给 TTS 一个括注。
+  //   MiMo 的 TTS 会把中文括注当表演方向吃掉不念、但会改变音频（契约 §1.1 实测），
+  //   所以情绪表达不再依赖模型输出结构，而是我们的信号层的确定性映射。
+  //   只在 TTS 模型确实是 mimo 时启用 —— 换成别的 OpenAI 兼容 TTS，括注会被念出来。
+  var PERF_PREFIXES = {
+    soft: '（声音放轻，语速慢一点）',
+    warm: '（温和地，像平常说话）',
+    bright: '（语速稍快，语气轻快）',
+    low: '（声音低沉，慢一点）',
+    hesitant: '（有点迟疑，尾音轻）',
+    plain: '（自然地）'
+  };
+
+  // 空正文时的"承认没接上"话术。
+  //   **故意不用「嗯，我在」这类空应答**：兜底的目的不是维持角色，而是让用户**听见**
+  //   "这轮出问题了"。用一句和内容无关的空应答遮住故障，是 v125~v128 最大的体验坑。
+  var NO_CONTENT_LINES = [
+    '哎，我这边卡了一下，你再说一遍？',
+    '稍等，我这儿没接上，你刚说什么？',
+    '嗯？信号好像抖了一下，再说一次。'
+  ];
+
+  function pickNoContentLine() {
+    var i = Math.floor(Math.random() * NO_CONTENT_LINES.length);
+    return NO_CONTENT_LINES[i] || NO_CONTENT_LINES[0];
+  }
+
+  function perfPrefix(signals, cfg) {
+    try {
+      if (cfg && (cfg.perfHint === false || cfg.perfHint === 0 || strOf(cfg.perfHint).toLowerCase() === 'false')) return '';
+      var r = resolveVoiceProvider('tts');
+      if (!/mimo/i.test(strOf(r && r.model))) return '';
+    } catch (e) { return ''; }
+    var s = signals || {};
+    var loud = strOf(s.loudness);
+    var rate = num(s.speechRateCps, 0);
+    var pitchStd = num(s.pitchStdHz, 0);
+    var key = 'warm';
+    if (s.trailingOff) key = 'hesitant';
+    else if (loud === '低') key = 'low';
+    else if (loud === '高' && rate >= 4.6) key = 'bright';
+    else if (loud === '低' && rate > 0 && rate < 3.6) key = 'soft';
+    else if (pitchStd > 45) key = 'bright';
+    return PERF_PREFIXES[key] || PERF_PREFIXES.warm;
+  }
+
   function callBrain(conv, userText, signals, gate, onSentence) {
     var t0 = nowMs();
     var firstTurn = (_vc.metrics.turns === 0);
-    var messages = buildBrainMessages(conv, userText, signals);
     var think = voiceThinking(conv);
-    // 首轮抢时间：上下文最短（本来也就一两句），把 max_tokens 压下来以缩短首 token。
-    //   实测首 token 对 prompt 长度很敏感（732ms ↔ 1033ms）。
-    // v128 关键修正：**思考与正文共享 max_tokens**。实测（DeepSeek）thinking 开着时
-    //   max_tokens=160 → reasoning 吃满 160、正文 0 字符、finish_reason=length，
-    //   于是 res.speech 为空 → 每轮都只能兜底说「嗯，我在。」。
-    //   所以只要允许思考，就必须在正文预算之外额外留出思考的额度。
-    var contentBudget = firstTurn ? 160 : 400;
+    // 纯文本比 JSON 省 token（没有字段名/引号/转义），但思考仍然要单独留预算。
+    var contentBudget = firstTurn ? 200 : 460;
     var maxTokens = brainMaxTokens(firstTurn, think.on);
+    var cfg = voiceCfg();
+    var prefix = perfPrefix(signals, cfg);
+    // 表演提示交给 TTS 层（pipeline 建的时候读这个值），不进副标题/会话正文
+    _vc.turnPerf = prefix;
+
+    var reasoningText = '';
     var firstTokenMs = 0;
     var firstThinkMs = 0;
-    var reasoningText = '';
-    var extractor = createSpeechExtractor();
-    var fullSpeechSeen = '';
     var finishReason = '';
-    var thinkShown = false;
+    var retried = false;
 
-    function pushSentence(s) {
-      if (!s) return;
-      var clean = s;
+    function cleanSentence(s) {
+      var clean = strOf(s);
       try {
         var PD = root.VoiceDirector;
-        if (PD && typeof PD.sanitizeForTTS === 'function') clean = strOf(PD.sanitizeForTTS(s)) || s;
+        if (PD && typeof PD.sanitizeForTTS === 'function') clean = strOf(PD.sanitizeForTTS(clean)) || clean;
       } catch (e) {}
-      clean = clean.trim();
-      if (!clean) return;
-      fullSpeechSeen += clean;
-      try { onSentence(clean); } catch (e) { warn('onSentence', e); }
+      return clean.trim();
     }
 
-    function brainBody() {
+    // 一次"尝试"的公共出口：把成句送 TTS，并记录这一轮到底说出了什么
+    function makeEmitter() {
+      var st = { said: '' };
+      st.emit = function (sentence) {
+        var clean = cleanSentence(sentence);
+        if (!clean) return;
+        st.said += clean;
+        // 注意：**不要**把表演提示拼进这里的文本 —— 这份文本会落进会话、
+        //   也会显示在字幕上（v129 第一版就犯了这个错，字幕里冒出「（语速稍快，语气轻快）」）。
+        //   括注只在 TTS 请求那一刻加（见 createPipeline 的 q.perf）。
+        try { onSentence(clean); } catch (e) { warn('onSentence', e); }
+      };
+      return st;
+    }
+
+    function brainBody(lean, forceNoThink) {
+      var messages = lean
+        ? buildRetryMessages(conv, userText, signals)
+        : buildBrainMessages(conv, userText, signals);
       var body = {
         messages: messages,
-        temperature: 0.85,
-        max_tokens: maxTokens,
-        response_format: { type: 'json_object' }
+        temperature: 0.9,
+        max_tokens: forceNoThink ? 400 : maxTokens
       };
-      // 显式表态：off 时一定要发 disabled（这是唯一有效的手段），
-      //   on 时不发 thinking 字段，交给上游默认（与文字聊天一致，兼容性最好）。
-      if (!think.on) body.thinkingEnabled = false;
+      // 显式表态：不思考时一定要发 disabled（这是唯一有效的手段）；
+      //   思考时按原约定不发字段（follow/on 都交给上游默认），只有 on 才额外补 enabled。
+      if (forceNoThink || !think.on) body.thinkingEnabled = false;
       return body;
     }
 
-    function onThinkChunk(rc) {
-      if (typeof rc !== 'string' || !rc) return;
-      if (!firstThinkMs) firstThinkMs = Math.round(nowMs() - t0);
-      reasoningText += rc;
-      thinkShown = true;
-      setThinkingBlock(reasoningText, true);
-    }
-
-    function streamAttempt() {
-      var built = buildReq('brain', brainBody());
-      // "始终开"必须真的发出去（providers.js 只在 disabled 时写 thinking 字段，
-      //   所以这里在 buildUpstreamPayload 之后补上）。上游不认这个字段会报错，
-      //   错误是可见的 —— 比"设置了但什么也没发生"好。
-      if (think.explicit) built.req.payload.thinking = { type: 'enabled' };
+    function attemptStream(lean, forceNoThink) {
+      var built = buildReq('brain', brainBody(lean, forceNoThink));
+      if (think.explicit && !forceNoThink) built.req.payload.thinking = { type: 'enabled' };
+      var st = createTextStreamer();
+      var em = makeEmitter();
+      var rsn = '';
+      var fin = '';
+      var firstTok = 0;
       return ssePost(built.req, {
         gate: gate,
         idleMs: T_BRAIN_IDLE,
         onJson: function (choice, delta) {
-          if (choice && choice.finish_reason) finishReason = strOf(choice.finish_reason);
+          if (choice && choice.finish_reason) fin = strOf(choice.finish_reason);
           if (!delta) return;
-          // v128：`reasoning_content` 以前被完全丢弃 —— 界面上自然看不到思考过程。
-          //   不同上游字段名不同（reasoning / thinking 都有），一并接住。
-          onThinkChunk(delta.reasoning_content || delta.reasoning || delta.thinking);
+          // 思考内容仍然收：界面上要能看到"它想了什么"，不然用户以为卡住了
+          var rc = delta.reasoning_content || delta.reasoning || delta.thinking;
+          if (typeof rc === 'string' && rc) {
+            if (!firstThinkMs) firstThinkMs = Math.round(nowMs() - t0);
+            rsn += rc;
+            setThinkingBlock(rsn, true);
+          }
           var c = delta.content;
           if (typeof c !== 'string' || !c) return;
-          if (!firstTokenMs) firstTokenMs = Math.round(nowMs() - t0);
-          var sents = extractor.push(c);
-          for (var i = 0; i < sents.length; i++) pushSentence(sents[i]);
+          if (!firstTok) { firstTok = Math.round(nowMs() - t0); if (!firstTokenMs) firstTokenMs = firstTok; }
+          var sents = st.push(c);
+          for (var i = 0; i < sents.length; i++) em.emit(sents[i]);
         }
       }).then(function (r) {
-        var rest = extractor.flush();
-        for (var i = 0; i < rest.length; i++) pushSentence(rest[i]);
-        if (r && r.finishReason) finishReason = strOf(r.finishReason);
-        // 取证：把这一轮大脑的原始返回与解析结果留下来。
-        //   "AI 只会说兜底句"这类问题，光看 metrics 看不出是没解析出来还是压根没返回。
-        _vc.lastBrain = {
-          mode: 'stream',
-          raw: strOf(extractor.raw()).slice(0, 1200),
-          rawLen: strOf(extractor.raw()).length,
-          speechSeen: strOf(fullSpeechSeen),
-          firstTokenMs: firstTokenMs,
-          // v128 新增取证：思考是否开启、思考吃了多少、被谁截断
-          thinkOn: think.on, thinkMode: think.mode,
-          maxTokens: maxTokens, contentBudget: contentBudget,
-          thinkingChars: reasoningText.length, firstThinkMs: firstThinkMs,
-          finishReason: finishReason
-        };
-        return { json: extractor.raw(), firstTokenMs: firstTokenMs };
+        var rest = st.flush();
+        for (var i = 0; i < rest.length; i++) em.emit(rest[i]);
+        if (r && r.finishReason) fin = strOf(r.finishReason);
+        return { mode: 'stream', raw: st.text(), said: em.said, reasoning: rsn, finish: fin, firstTokenMs: firstTok || firstTokenMs };
       });
     }
 
-    function nonStreamAttempt() {
-      var built = buildReq('brain', brainBody());
-      if (think.explicit) built.req.payload.thinking = { type: 'enabled' };
+    function attemptOnce(lean, forceNoThink) {
+      var built = buildReq('brain', brainBody(lean, forceNoThink));
+      if (think.explicit && !forceNoThink) built.req.payload.thinking = { type: 'enabled' };
       var p = httpPost(built.req, T_BRAIN_FIRST);
       var raced = gate ? gate.race(p, T_BRAIN_FIRST, '大脑') : withTimeout(p, T_BRAIN_FIRST, '大脑');
       return raced.then(function (resp) {
@@ -3596,72 +3704,103 @@
         var ch = data && data.choices && data.choices[0];
         var msg = ch && (ch.message || ch.delta);
         var raw = msg ? strOf(msg.content) : '';
-        if (ch && ch.finish_reason) finishReason = strOf(ch.finish_reason);
-        onThinkChunk(msg && (msg.reasoning_content || msg.reasoning || msg.thinking));
+        var rsn = msg ? strOf(msg.reasoning_content || msg.reasoning || msg.thinking) : '';
+        if (rsn) {
+          reasoningText += rsn;
+          setThinkingBlock(reasoningText, false);
+        }
         if (!firstTokenMs) firstTokenMs = Math.round(nowMs() - t0);
-        _vc.lastBrain = {
-          mode: 'non-stream',
-          raw: raw.slice(0, 1200), rawLen: raw.length,
-          firstTokenMs: firstTokenMs,
-          thinkOn: think.on, thinkMode: think.mode,
-          maxTokens: maxTokens, contentBudget: contentBudget,
-          thinkingChars: reasoningText.length, finishReason: finishReason
-        };
-        return { json: raw, firstTokenMs: firstTokenMs };
+        if (ch && ch.finish_reason) finishReason = strOf(ch.finish_reason);
+        // v129 修 v128 遗留：非流式分支以前**没有把正文交给分句器**，
+        //   于是回退到非流式时 res.speech 恒为空 → 又走兜底。这条路径等于白写。
+        var st = createTextStreamer();
+        var em = makeEmitter();
+        var sents = st.push(raw);
+        for (var i = 0; i < sents.length; i++) em.emit(sents[i]);
+        var rest = st.flush();
+        for (var j = 0; j < rest.length; j++) em.emit(rest[j]);
+        return { mode: 'non-stream', raw: raw, said: em.said, reasoning: rsn, finish: strOf(ch && ch.finish_reason), firstTokenMs: firstTokenMs };
       });
     }
 
-    return streamAttempt().catch(function (e) {
-      if (isAbort(e)) throw e;
-      warn('大脑流式失败，回退非流式：', e && e.message);
-      return nonStreamAttempt();
+    function tryStream(lean, forceNoThink) {
+      return attemptStream(lean, forceNoThink).catch(function (e) {
+        if (isAbort(e)) throw e;
+        warn('大脑流式失败，回退非流式：', e && e.message);
+        return attemptOnce(lean, forceNoThink);
+      });
+    }
+
+    return tryStream(false, false).then(function (r1) {
+      if (r1 && strOf(r1.said).trim()) return r1;
+      // 空正文（上游偶发只吐空格、或只吐思考）→ **重试一次**：
+      //   丢掉历史 + 关掉思考 + 加一句硬指令。实测这是最有效的一次性补救，
+      //   既不改变本轮语义，也不会把"坏了"直接甩给用户。
+      warn('大脑返回空正文，重试一次（丢历史 + 关思考）');
+      retried = true;
+      return tryStream(true, true).then(function (r2) {
+        // 重试里若吐了思考，也留着给界面看
+        if (r2 && r2.reasoning) reasoningText = r2.reasoning;
+        return r2 || r1;
+      }, function (e) {
+        if (isAbort(e)) throw e;
+        warn('大脑重试失败：', e && e.message);
+        return r1;
+      });
     }).then(function (r) {
-      var speech = extractor.speech();
-      var plan = null;
-      try {
-        var PD = root.VoiceDirector;
-        if (PD && typeof PD.parseDirective === 'function') plan = PD.parseDirective(r.json || ('{"speech":' + JSON.stringify(speech) + '}'));
-      } catch (e) { plan = null; }
-      // 完整 JSON 到齐后校正：流式增量可能少吐或多吐了句子
-      var finalSpeech = plan && plan.speech ? strOf(plan.speech) : speech;
-      var emitted = fullSpeechSeen.replace(/\s+/g, '');
-      var finalNorm = finalSpeech.replace(/\s+/g, '');
-      if (finalNorm && emitted.indexOf(finalNorm) < 0 && emitted.replace(/[。！？…，、；：,.!?;:]/g, '').indexOf(finalNorm.replace(/[。！？…、；：,.!?;:]/g, '')) < 0) {
-        pushSentence(firstSentence(finalSpeech));
-      }
-      // 如果整段没有正文但思考有内容，至少把思考显示出来（不是"什么都没发生"）
-      if (!finalSpeech && reasoningText) setThinkingBlock(reasoningText, false);
-      // 空回复的诊断：把"为什么空"说清楚，别让兜底句冒充正常回复
+      var speech = strOf(r && r.said).trim();
+      if (r && r.reasoning) reasoningText = r.reasoning;
+      if (r && r.finish) finishReason = r.finish;
+      // 只有思考、没有正文：至少把思考显示出来（不让界面"什么都没发生"）
+      if (!speech && reasoningText) setThinkingBlock(reasoningText, false);
+
       var diagnosis = '';
-      if (!finalSpeech) {
+      if (!speech) {
+        var rawLen = strOf(r && r.raw).length;
         if (finishReason === 'length') {
-          diagnosis = think.on
-            ? '输出被 max_tokens 截断（思考吃掉了预算）'
-            : '输出被 max_tokens 截断';
-        } else if (!strOf(r.json) && !reasoningText) {
-          diagnosis = '模型没有返回任何内容（HTTP 正常但 content 为空）';
-        } else if (!strOf(r.json)) {
+          diagnosis = think.on ? '输出被 max_tokens 截断（思考吃掉了预算）' : '输出被 max_tokens 截断';
+        } else if (!rawLen && !reasoningText) {
+          diagnosis = '模型没有返回任何内容（HTTP 正常但正文为空）';
+        } else if (!rawLen) {
           diagnosis = '模型只返回了思考、没有正文';
         } else {
-          diagnosis = '返回了内容但解析不出 speech 字段';
+          diagnosis = '模型返回了内容但只有空白/标点';
         }
-        if (_vc.lastBrain) _vc.lastBrain.diagnosis = diagnosis;
       }
+
+      _vc.lastBrain = {
+        mode: (r && r.mode) || 'stream',
+        raw: strOf(r && r.raw).slice(0, 1200),
+        rawLen: strOf(r && r.raw).length,
+        speechSeen: speech,
+        firstTokenMs: (r && r.firstTokenMs) || firstTokenMs,
+        thinkOn: think.on, thinkMode: think.mode,
+        maxTokens: maxTokens, contentBudget: contentBudget,
+        thinkingChars: reasoningText.length, firstThinkMs: firstThinkMs,
+        finishReason: finishReason, retried: retried,
+        prefix: prefix,
+        diagnosis: diagnosis || undefined
+      };
+
       return {
-        speech: finalSpeech, plan: plan, firstTokenMs: r.firstTokenMs || firstTokenMs,
-        json: r.json, reasoning: reasoningText, diagnosis: diagnosis,
-        finishReason: finishReason, thinkOn: think.on
+        speech: speech,
+        firstTokenMs: (r && r.firstTokenMs) || firstTokenMs,
+        firstThinkMs: firstThinkMs,
+        json: strOf(r && r.raw), reasoning: reasoningText, diagnosis: diagnosis,
+        finishReason: finishReason, thinkOn: think.on, retried: retried
       };
     });
   }
+
 
   // =====================================================================================
   // 19. TTS 流水线（边合成边播；句子级并发，前一句在播时后一句已经发出去了）
   // =====================================================================================
 
-  function createPipeline(gate, guard) {
+  function createPipeline(gate, guard, perf) {
     var q = {
       queue: [],          // 待合成的句子
+      perf: strOf(perf),  // v129：这一轮的表演提示（只加在送 TTS 的文本上）
       active: 0,          // 正在合成的个数
       maxActive: 3,       // 允许"下一句预合成"。v128：2 → 3。
                           //   实测每句 TTS 首包 ≈0.55s，而短句音频只有 0.8~1.5s；
@@ -3736,7 +3875,10 @@
 
     function startOne(text) {
       q.active++;
-      var p = ttsStream(text, {
+      // v129：表演提示只加在**送去合成**的那一份文本上（MiMo 会把中文括注当表演方向吃掉）。
+      //   队列里的 text 与写回会话的文本始终是干净的。
+      var speak = (q.perf || '') + text;
+      var p = ttsStream(speak, {
         gate: gate,
         onPcm: function (bytes) {
           // v128：晚到的音频必须自己闭嘴。打断/挂断/换轮之后，原生流里已经排队的
@@ -3975,6 +4117,7 @@
     _vc.interrupted = false;
     _vc.saidText = '';
     _vc.thinkText = '';
+    _vc.turnPerf = '';   // v129：新一轮先清掉上一轮的表演提示，避免串到兜底句
     clearThinkingBlock();
     setState('thinking');
     clearTimeout(_vc.autoHangTimer);
@@ -4070,15 +4213,16 @@
         if (token !== _vc.turnId) throw abortErr();
         _vc.metrics.brainFirstTokenMs = res.firstTokenMs || 0;
         if (!pipeline) {
-          // 完全没有句子（模型返回空）→ 兜底说一句。
-          //   v128：兜底**不再掩盖真实原因** —— 同时在 lastBrain 里留 diagnosis，
-          //   并在界面上说明"这轮没拿到内容"，否则"解析失败"看起来就像"正常回复"。
-          var fallback = res.speech || '嗯，我在。';
+          // 完全没有句子（模型两次都返回空）→ 说一句**明确是"没接上"的话**。
+          //   v128 的兜底是「嗯，我在。」—— 它和模型爱说的空应答长得一模一样，
+          //   用户根本分不清是"坏了"还是"它就这性格"，于是体验到"不管说什么都一样"。
+          //   v129 起兜底只用来**承认故障**，并且同时把原因写到界面和 lastBrain。
+          var why = (res.diagnosis || '大脑没返回可用内容');
+          var fallback = res.speech || pickNoContentLine();
           if (!res.speech) {
-            var why = (res.diagnosis || '大脑没返回可用内容');
-            warn('大脑返回空，使用兜底话术：' + why);
+            warn('大脑两次都是空正文，说一句承认没接上的话：' + why);
             _vc.lastBrain = Object.assign({}, _vc.lastBrain || {}, { fallbackUsed: true, diagnosis: why });
-            setStateText('没收到内容（' + why + '），先说了句兜底');
+            setStateText('没收到内容（' + why + '）');
             if (!_vc.fallbackWarned) {
               _vc.fallbackWarned = true;
               toast('这一轮没拿到回复内容：' + why, 'warn');
@@ -4096,7 +4240,6 @@
           }
           if (res.speech) {
             var full = res.speech;
-            if (res.plan && res.plan.emotion) assistantMsg.voicePlan = res.plan;
             updateAssistantMsg(conv, assistantMsg, full === _vc.saidText ? full : (_vc.saidText || full));
           }
         }
@@ -4120,7 +4263,7 @@
     //   必须能自己判断出来不该播，否则打断/挂断之后又冒出半句话、还把状态拉回 speaking。
     var pl = createPipeline(gate, function () {
       return token === _vc.turnId && _vc.running;
-    });
+    }, _vc.turnPerf);
     _vc.pipeline = pl;
     pl._said = '';
     // v128：排空回调**在这里**注册，不再等 callBrain resolve。
@@ -5088,6 +5231,13 @@
     jsonUnescape: jsonUnescape,
     extractJsonString: extractJsonString,
     createSpeechExtractor: createSpeechExtractor,
+    // v129：纯文本分句器（大脑输出走这条路，不再需要 JSON）
+    createTextStreamer: createTextStreamer,
+    // v129：表演提示映射与空正文兜底（纯函数，可单测）
+    perfPrefix: perfPrefix,
+    PERF_PREFIXES: PERF_PREFIXES,
+    pickNoContentLine: pickNoContentLine,
+    NO_CONTENT_LINES: NO_CONTENT_LINES,
     // v127 诊断：把采集块处理函数暴露出来，便于用合成音频走**真实** VAD 路径做验证。
     //   为什么需要：自动化测试没法真的对着麦克风说话，而 __injectUtterance 绕过了 VAD ——
     //   那条路径永远测不出「VAD 判了 speech 却攒不到样本」这类问题。
