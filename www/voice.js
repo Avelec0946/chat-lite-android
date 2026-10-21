@@ -31,7 +31,7 @@
   // 1. 常量与配置
   // =====================================================================================
 
-  var VERSION = 'v129';
+  var VERSION = 'v129.1';
 
   // 采集 / 播放
   var CAPTURE_RATE = 16000;   // ASR 只接受 16k 单声道 16bit wav（已实测）
@@ -4521,6 +4521,13 @@
     _vc.autoHangTimer = null;
     _vc.segChunks = [];
     _vc.saidText = '';
+    _vc.turnPerf = '';
+    // v129：挂断后把「思考过程」折叠块也收掉。
+    //   它以前只在"下一轮开始"时被清 —— 挂断后就一直挂在通话界面上，
+    //   看起来像"还在想"，其实早就不动了。
+    try { clearThinkingBlock(); } catch (e) {}
+    try { setAssistantLine('', false); } catch (e) {}
+    try { setUserLine(''); } catch (e) {}
     // v128：跨通话残留清理。muted 不清最阴 —— 第二通电话默认静音，
     //   UI 上看不出异常（按钮 class 仍可能被重置），状态一直是 listening 却永远识别不到。
     _vc.muted = false;
