@@ -39,6 +39,9 @@ public class MainActivity extends BridgeActivity {
         registerPlugin(ChatStreamPlugin.class);
         // v126: 注册音频路由插件——voice.js 据此在「外放 / 耳机」两套调参预设间切换
         registerPlugin(AudioRoutePlugin.class);
+        // v132: 注册通话保活插件——局部唤醒锁 + Wi-Fi 高性能锁 + 前台服务，
+        //   让息屏之后 CPU / 网络 / 采集都不被系统掐断（实测息屏后 DNS 会直接失败）
+        registerPlugin(CallKeepAlivePlugin.class);
         super.onCreate(savedInstanceState);
         // v71: 创建 WakeLock，用于后台期间保持 CPU 活跃
         PowerManager pm = (PowerManager) getSystemService(POWER_SERVICE);

@@ -31,7 +31,7 @@
   // 1. 常量与配置
   // =====================================================================================
 
-  var VERSION = 'v131';
+  var VERSION = 'v132';
 
   // 采集 / 播放
   var CAPTURE_RATE = 16000;   // ASR 只接受 16k 单声道 16bit wav（已实测）
@@ -1238,6 +1238,14 @@
     turnId: 0,
     route: '',               // 当前音频路由缓存：'speaker' | 'headset'，见 currentRoute()
     routeAt: 0,
+    // v132：息屏保活
+    keepAlive: false,        // 原生保活（唤醒锁 + Wi-Fi 锁 + 前台服务）是否已开
+    keepAliveInfo: null,     // 插件回报的明细（wakeLock/wifiLock/service），只给诊断看
+    screenLock: null,        // 网页端的屏幕唤醒锁（Screen Wake Lock）
+    captureWatchTimer: null, // v132：采集看门狗（定时器）
+    lastBlockAt: 0,          // v132：最近一次收到音频块的时刻
+    ctxResumes: 0,           // v132：AudioContext 被救活的次数
+    captureRevives: 0,       // v132：采集链路被重建的次数
 
     // 音频
     audioCtx: null,          // 播放用的 AudioContext（24k 播放 / 也做采集解码）
@@ -1518,6 +1526,150 @@
     try {
       var args = ['[voice]'].concat(copyArray(arguments));
       console.warn.apply(console, args);
+    } catch (e) {}
+  }
+
+  // v132 诊断：通话期间的事件时间线，留在页内（__debug().events 可读）。
+  //   为什么需要：息屏长测里"通话自己断了"，但日志拿不到 —— 控制台不进 logcat、
+  //   页面又不该在后台发网络请求。把关键事件（pagehide / track ended / hangup /
+  //   保活开关 / 采集重建）按时间记在内存里，事后一次读出来就能定位是谁挂的。
+  function pushEvent(what) {
+    try {
+      _vc.events = _vc.events || [];
+      _vc.events.push({
+        at: Date.now(),
+        what: String(what).slice(0, 80),
+        state: _vc.state,
+        hidden: (root.document && root.document.hidden) ? 1 : 0
+      });
+      if (_vc.events.length > 80) _vc.events.shift();
+    } catch (e) {}
+  }
+
+  // =====================================================================================
+  // v132 通话保活：息屏之后，这通电话凭什么还活着
+  //
+  //   真机实测（小米 / MIUI，起通话后按电源键，息屏 35 秒）：
+  //     · 采集**没断**：35s 内仍收到 820 个音频块（≈23/s）—— 麦克风与 AudioContext 都正常；
+  //     · 定时器被节流：250ms 的 interval 只跑了 38 次（本该 141 次），约 1 次/秒；
+  //     · **网络断了**：API 调用报 "Unable to resolve host api.xiaomimimo.com:
+  //       No address associated with hostname" —— 连 DNS 都解析不了。
+  //   也就是说：息屏后第一句话就听不见回复，不是因为麦克风，而是因为这个进程被系统
+  //   当成"后台应用"：无线进了省电、后台网络受限、进程随时可被冻结。
+  //
+  //   所以保活必须在原生侧做（见 CallKeepAlivePlugin / CallKeepService）：
+  //   局部唤醒锁（CPU 不睡）+ Wi-Fi 高性能锁（无线不省电，DNS 才解析得动）+ 前台服务（进程不被回收）。
+  //   浏览器/PWA 没有前台服务，只能退一步申请「屏幕唤醒锁」—— 让屏幕别自己灭。
+  //
+  //   原则：**保活失败绝不能影响通话**。这里全部 catch，插件不存在就静默跳过。
+  // =====================================================================================
+  function keepAlivePlugin() {
+    try {
+      var C = root.Capacitor;
+      if (!C || typeof C.isNativePlatform !== 'function' || !C.isNativePlatform()) return null;
+      var p = C.Plugins && C.Plugins.CallKeepAlive;
+      return (p && typeof p.start === 'function') ? p : null;
+    } catch (e) { return null; }
+  }
+
+  function keepAliveStart() {
+    if (_vc.keepAlive) return;
+    pushEvent('keepAlive start');
+    startAudibleKeepAlive();
+    var p = keepAlivePlugin();
+    if (p) {
+      _vc.keepAlive = true;   // 先置位：失败也不反复重试，避免每轮都打一次桥
+      try {
+        p.start().then(function (r) {
+          _vc.keepAliveInfo = r || null;
+          log('保活已开启', JSON.stringify(r || {}));
+        }).catch(function (e) {
+          _vc.keepAlive = false;
+          warn('保活开启失败（通话继续，但息屏可能被系统掐断）', e && e.message);
+        });
+      } catch (e) {
+        _vc.keepAlive = false;
+        warn('保活开启异常', e);
+      }
+      return;
+    }
+    // 浏览器 / PWA：没有前台服务可用，退而求其次 —— 拿屏幕唤醒锁（Screen Wake Lock）
+    keepScreenAwake(true);
+  }
+
+  function keepAliveStop() {
+    if (_vc.keepAlive) pushEvent('keepAlive stop');
+    var wasOn = _vc.keepAlive;
+    _vc.keepAlive = false;
+    _vc.keepAliveInfo = null;
+    stopAudibleKeepAlive();
+    var p = keepAlivePlugin();
+    if (p && typeof p.stop === 'function') {
+      try { p.stop().catch(function () {}); } catch (e) {}
+    }
+    keepScreenAwake(false);
+    if (wasOn) log('保活已关闭');
+  }
+
+  // =====================================================================================
+  // v132 「让系统认为这页在出声」—— 对抗隐藏页冻结的最后一张牌
+  //
+  //   实测（带前台服务 + 唤醒锁 + 原生每 5s 心跳）息屏后仍有：
+  //     `108s document freeze` → `543s document resume`（亮屏才解冻）
+  //   冻结期间麦克风回调与定时器全停 = 用户说什么都听不到，而界面还显示"聆听中"。
+  //   Chromium 对「正在出声的页面」不冻结、也不做密集节流 —— 所以这里挂一个
+  //   **40Hz、约 -54dBFS 的正弦**：手机扬声器在这个频段基本没有响应，人耳也几乎听不见，
+  //   但对调度器来说这是一条活跃的音频输出。
+  //   它只影响"页面会不会被降级"，不影响通话本身；关掉/挂断即停。
+  // =====================================================================================
+  function startAudibleKeepAlive() {
+    try {
+      if (_vc.keepAliveOsc) return;
+      var ctx = ensureAudioCtx();
+      if (!ctx) return;
+      var osc = ctx.createOscillator();
+      var gain = ctx.createGain();
+      osc.type = 'sine';
+      osc.frequency.value = 40;
+      gain.gain.value = 0.002;
+      osc.connect(gain);
+      gain.connect(ctx.destination);
+      try { osc.start(); } catch (e) {}
+      _vc.keepAliveOsc = osc;
+      _vc.keepAliveGain = gain;
+      pushEvent('audible keepalive on');
+    } catch (e) { warn('audible keepalive', e); }
+  }
+
+  function stopAudibleKeepAlive() {
+    try {
+      if (_vc.keepAliveOsc) {
+        try { _vc.keepAliveOsc.stop(); } catch (e) {}
+        try { _vc.keepAliveOsc.disconnect(); } catch (e) {}
+        _vc.keepAliveOsc = null;
+      }
+      if (_vc.keepAliveGain) {
+        try { _vc.keepAliveGain.disconnect(); } catch (e) {}
+        _vc.keepAliveGain = null;
+      }
+    } catch (e) {}
+  }
+
+  function keepScreenAwake(on) {
+    try {
+      var wl = root.navigator && root.navigator.wakeLock;
+      if (!wl) return;
+      if (on) {
+        if (_vc.screenLock) return;
+        wl.request('screen').then(function (s) {
+          _vc.screenLock = s;
+          try { s.addEventListener('release', function () { _vc.screenLock = null; }); } catch (e) {}
+          log('屏幕唤醒锁已获取（网页端防息屏）');
+        }).catch(function () { /* 不支持/被拒：静默 */ });
+      } else if (_vc.screenLock) {
+        try { _vc.screenLock.release(); } catch (e) {}
+        _vc.screenLock = null;
+      }
     } catch (e) {}
   }
 
@@ -2500,6 +2652,7 @@
       // 真机 WebView 的 track.label 是空串，不要用它做任何判断/显示
       try {
         track.onended = function () {
+          pushEvent('track ended');
           if (!_vc.running) return;
           // v128：这里是"麦克风被拔掉/被系统收回"。以前只把状态改成 error 就完了 ——
           //   _vc.running 仍是 true、采集图没停、也没有任何出口，
@@ -2572,6 +2725,7 @@
     //   "重采样→Int16" 这一步，而不是 VAD 判定。没有这个计数器只能靠猜。
     _vc.diag = _vc.diag || { blocks: 0, resSamples: 0, i16Samples: 0, segPushes: 0, lastRms: 0 };
     _vc.diag.blocks++;
+    _vc.lastBlockAt = nowMs();   // v132：采集看门狗用它判断"音频流是不是被系统挂了"
     _vc.diag.lastRms = rms;
     _vc.diag.lastDt = dtMs;
     if (!isFinite(dtMs) || dtMs <= 0) _vc.diag.badDt = (_vc.diag.badDt || 0) + 1;
@@ -2743,7 +2897,11 @@
     var pcm = concatInt16(chunks);
     _vc.segChunks = [];
     _vc.segSamples = 0;
-    _vc.vad.reset();
+    // v132：采集链路可能正在被看门狗重建（此刻 _vc.vad 短暂为 null）。
+    //   这里原来不判空 —— 一次重建就能让整轮抛 TypeError，用户听到的是"突然哑了"。
+    if (_vc.vad) {
+      try { _vc.vad.reset(); } catch (e) { warn('vad reset', e); }
+    }
     if (!pcm.length) return;
     var durMs = Math.round(pcm.length / CAPTURE_RATE * 1000);
     var minMs = cfgNum('minUtteranceMs', 400, 50, 5000);
@@ -2780,6 +2938,71 @@
     _vc.segSamples = 0;
     _vc.resampler = null;
     _vc.lastFrameAt = 0;
+  }
+
+  // =====================================================================================
+  // v132 采集看门狗 —— 「麦克风明明开着，却再也不来音频块」
+  //
+  //   真机复现（小米 / MIUI，息屏后 3~6 分钟）：`capture.blocks` 从 4492 起再也不涨，
+  //   而 JS 定时器仍以约 1 次/30 秒的节奏在跑 —— 说明**页面还活着，是音频流停了**：
+  //   AudioContext 被系统/浏览器挂起，或麦克风流被收回。表现就是"你说什么都没反应"
+  //   （VAD 拿不到输入，永远不进 speech），而界面还老老实实显示"聆听中"。
+  //
+  //   修法：一旦"正在通话 + 采集开着"却连续 STALL 秒没有音频块：
+  //     ① AudioContext 不是 running → resume（最常见，挂起而已）；
+  //     ② resume 也不见效 → 整条采集图重建（重新 getUserMedia）。
+  //   检测靠两种时钟：页面里的 setInterval（后台被节流到 1/30s）+ 原生每 5 秒的
+  //   __callTick（见 CallKeepAlivePlugin），后者在息屏时不受节流影响，是主时钟。
+  // =====================================================================================
+  var CAPTURE_STALL_MS = 6000;
+
+  function startCaptureWatchdog() {
+    stopCaptureWatchdog();
+    _vc.lastBlockAt = nowMs();
+    _vc.captureWatchTimer = setInterval(captureWatchTick, 2000);
+  }
+
+  function stopCaptureWatchdog() {
+    if (_vc.captureWatchTimer) { clearInterval(_vc.captureWatchTimer); _vc.captureWatchTimer = null; }
+  }
+
+  function captureWatchTick() {
+    if (!_vc.running || !_vc.capturing) return;
+    var since = _vc.lastBlockAt ? (nowMs() - _vc.lastBlockAt) : CAPTURE_STALL_MS + 1;
+    if (since < CAPTURE_STALL_MS) return;
+    var ctx = _vc.audioCtx;
+    // ① 先试 resume：后台被挂起是常态，resume 一次就回来了
+    if (ctx && ctx.state !== 'running') {
+      _vc.ctxResumes = (_vc.ctxResumes || 0) + 1;
+      _vc.lastBlockAt = nowMs();     // 给它一个观察窗，别在同一秒里连开两次
+      try {
+        ctx.resume().then(function () { log('AudioContext 已恢复', ctx.state); }).catch(function () {});
+      } catch (e) {}
+      warn('采集停摆 ' + since + 'ms（ctx=' + ctx.state + '）→ 尝试 resume');
+      return;
+    }
+    // ② 还有块不来 → 重建采集链路。可能失败（非手势触发 getUserMedia 在部分机型会被拒），
+    //   但**失败也必须继续重试**：一次失败就放弃，用户会对着"聆听中"永久等下去。
+    _vc.captureRevives = (_vc.captureRevives || 0) + 1;
+    _vc.lastBlockAt = nowMs();
+    pushEvent('capture revive #' + _vc.captureRevives + ' after ' + Math.round(since) + 'ms');
+    warn('采集停摆 ' + since + 'ms → 重建采集（第 ' + _vc.captureRevives + ' 次）');
+    try {
+      var wasMuted = _vc.muted;
+      stopCapture();
+      beginCapture().then(function (info) {
+        if (info && info.discarded) return;
+        _vc.muted = wasMuted;
+        startCaptureWatchdog();
+        log('采集链路已重建', info && info.sampleRate);
+      }).catch(function (e) {
+        // 不关 capturing 标志：留着它，看门狗下一轮还会再来一次（指数退避由 tick 间隔兜着）
+        _vc.capturing = true;
+        _vc.reviveFails = (_vc.reviveFails || 0) + 1;
+        setStateText('麦克风被系统暂时收回，正在重连…');
+        warn('重建采集失败（第 ' + _vc.reviveFails + ' 次）', e && e.message);
+      });
+    } catch (e) { warn('重建采集异常', e); }
   }
 
   // =====================================================================================
@@ -4756,6 +4979,13 @@
       ensurePlayer();
       // 麦克风真的拿到了才算接通：在这条时间线上留一条标注
       _vc.callMarked = !!appendCallMarker('start');
+      // v132：先把保活打开再宣布"接通"。实测息屏 35s 后：采集还在（音频线程照跑），
+      //   但定时器被节流到 ~1 次/秒，**网络直接断**（DNS 解析失败）——
+      //   所以"息屏还能通话"不是 JS 努力能解决的，得让系统承认这个进程在为用户工作。
+      keepAliveStart();
+      // v132：采集看门狗 —— 息屏几分钟后系统会把 AudioContext 挂起（实测 blocks 不再增长），
+      //   界面仍显示"聆听中"但永远听不到。看门狗负责自愈。
+      startCaptureWatchdog();
       setState('listening');
       haptic('connect');          // 接通：轻振一下，告诉用户"能说了"
       startAutoHangTimer();
@@ -4764,6 +4994,8 @@
       return true;
     }).catch(function (e) {
       _vc.running = false;
+      // v132：起通话失败时把保活收掉（若已经开了），别留一个"通话中"的常驻通知
+      keepAliveStop();
       var msg = (e && e.message) ? e.message : '麦克风启动失败';
       setState('error', msg);
       toast(msg, 'warn');
@@ -4772,12 +5004,16 @@
   }
 
   function hangup(silent) {
+    pushEvent('hangup(' + (silent ? 'silent' : 'ui') + ')');
     var wasRunning = _vc.running;
     _vc.running = false;
     _vc.turnId++;
     abortCurrentTurn('hangup');
     try { if (_vc.player) _vc.player.hardStop(); } catch (e) {}
     stopCapture();
+    // v132：通话结束就撤保活 —— 前台服务的常驻通知和唤醒锁不能留在那儿
+    keepAliveStop();
+    stopCaptureWatchdog();
     clearFillerTimer();
     clearSpeakWatchdog();
     clearTimeout(_vc.autoHangTimer);
@@ -5325,7 +5561,14 @@
     //   全活着。回到前台后麦克风已经没了、_vc.vad=null → 界面显示"请说话"但永远识别不到；
     //   更糟的是残留的 45s watchdog 会在下一通电话里突然 hardStop()。
     //   现在按"挂断"处理：一次通话跟着页面的可见性走，回来重新点通话即可。
+    //
+    //   ★ v132 例外：**保活开着**（这通电话就是要在息屏/后台活下去）时不能挂断 ——
+    //   实测息屏几分钟后页面会收到 pagehide（Chromium 把隐藏页降级），
+    //   旧逻辑会当场把通话挂掉，用户看到的就是"息屏一会儿电话自己断了"。
+    //   这时只记一条事件，状态机原样保留；页面回来（解冻）后继续用。
     function onPageHide() {
+      pushEvent('pagehide' + (_vc.keepAlive ? '(保活中，不挂断)' : ''));
+      if (_vc.running && _vc.keepAlive) return;
       try { if (_vc.running) hangup(true); } catch (e) {}
       try { stopCapture(); } catch (e) {}
       clearSpeakWatchdog();
@@ -5337,6 +5580,40 @@
       if (root.addEventListener) {
         root.addEventListener('pagehide', onPageHide);
         root.addEventListener('beforeunload', onPageHide);
+      }
+    } catch (e) {}
+
+    // v132：Page Lifecycle 的 freeze/resume。能收到就说明系统在对这页做降级，
+    //   是息屏长测的关键证据（Page Lifecycle 在 WebView 里是否支持，实测为准）。
+    try {
+      if (root.document && root.document.addEventListener) {
+        root.document.addEventListener('freeze', function () { pushEvent('document freeze'); });
+        root.document.addEventListener('resume', function () { pushEvent('document resume'); });
+      }
+      if (root.addEventListener) {
+        root.addEventListener('freeze', function () { pushEvent('window freeze'); });
+      }
+    } catch (e) {}
+
+    // v132：原生每 5 秒调一次（前台服务在跑时）。页面隐藏后 JS 定时器会被节流到
+    //   1 次/30 秒量级，这个入口由原生主动触发、不受节流影响 —— 用来跑采集看门狗，
+    //   顺带让渲染进程别以为自己可以彻底躺平。
+    try {
+      root.__callTick = function () {
+        try { captureWatchTick(); } catch (e) {}
+      };
+    } catch (e) {}
+
+    // v132：网页端的屏幕唤醒锁会被浏览器在页面隐藏时自动释放，回到前台要重新申请
+    //   （原生侧有前台服务，不依赖这个 —— 见 keepAliveStart）
+    try {
+      if (root.document && root.document.addEventListener) {
+        root.document.addEventListener('visibilitychange', function () {
+          try {
+            if (root.document.hidden) { _vc.screenLock = null; return; }
+            if (_vc.running && !keepAlivePlugin()) keepScreenAwake(true);
+          } catch (e) {}
+        });
       }
     } catch (e) {}
 
@@ -5427,9 +5704,33 @@
           spool: (_vc.pipeline && _vc.pipeline.spoolStats) ? _vc.pipeline.spoolStats()
             : (_vc.metrics && _vc.metrics.lastSpool) || null
         } : null,
+        events: (_vc.events || []).slice(-40),
         lastBrain: _vc.lastBrain || null,
         leakRms: Math.round((_vc.leakRms || 0) * 10000) / 10000,
         fillers: _vc.fillerBuffers.filter(Boolean).length,
+        // v132：息屏保活的状态（原生三件套 / 网页屏幕锁）
+        keepAlive: {
+          on: !!_vc.keepAlive,
+          info: _vc.keepAliveInfo || null,
+          screenLock: !!_vc.screenLock,
+          audible: !!_vc.keepAliveOsc,
+          hidden: (function () { try { return !!root.document && root.document.hidden; } catch (e) { return null; } })()
+        },
+        // v132：音频层状态。息屏后"采集突然不来了"时，靠这几个值区分是
+        //   AudioContext 被挂起、还是麦克风流被系统收回（两者的修法完全不同）
+        audio: (function () {
+          var c = _vc.audioCtx;
+          return {
+            ctx: c ? c.state : null,
+            rate: c ? c.sampleRate : null,
+            time: c ? Math.round(c.currentTime * 1000) / 1000 : null,
+            capturing: !!_vc.capturing,
+            sinceBlockMs: _vc.lastBlockAt ? Math.round(nowMs() - _vc.lastBlockAt) : null,
+            resumed: _vc.ctxResumes || 0,
+            revives: _vc.captureRevives || 0,
+            reviveFails: _vc.reviveFails || 0
+          };
+        })(),
         // 采集链路取证：VAD 进 speech 却攒不到样本时，靠这四个数定位断在哪一步
         capture: _vc.diag ? {
           blocks: _vc.diag.blocks, resSamples: _vc.diag.resSamples,

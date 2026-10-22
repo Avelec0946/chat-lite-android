@@ -24,6 +24,13 @@
 
         </activity>
 
+        <!-- v132: 通话保活前台服务 —— 息屏后进程/网络不被系统掐断。
+             类型必须是 microphone|mediaPlayback（targetSdk 34 不声明就起不来） -->
+        <service
+            android:name=".CallKeepService"
+            android:exported="false"
+            android:foregroundServiceType="microphone|mediaPlayback" />
+
         <provider
             android:name="androidx.core.content.FileProvider"
             android:authorities="${applicationId}.fileprovider"
@@ -44,6 +51,11 @@
     <uses-permission android:name="android.permission.WRITE_EXTERNAL_STORAGE" android:maxSdkVersion="28" />
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
     <uses-permission android:name="android.permission.WAKE_LOCK" />
+    <!-- v132: 通话保活。前台服务让进程在息屏后仍被当作"正在为用户工作"，
+         Android 14（targetSdk 34）要求按类型单独声明权限，缺则启动即崩 -->
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MICROPHONE" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MEDIA_PLAYBACK" />
 
     <!-- v125: 语音通话（真实时双向语音）所需权限
          RECORD_AUDIO 是 getUserMedia 在 WebView 里工作的【硬前提】：

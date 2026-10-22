@@ -1290,3 +1290,47 @@ JS 侧表现为「通话一直卡在连接中」，而日志里 `onPermissionReq
 `AudioRoutePlugin.java` / `MainActivity.java` 属原生，**不推主仓库**。
 `voice.js` 里的 `Capacitor.Plugins.AudioRoute` 调用**必须原样保留**（Web 侧插件不存在时自动回落，不影响浏览器）。
 `io.js` 的导入修复是纯 Web 逻辑，可整体同步。
+
+## 34. v132 息屏保活：前台服务 + 唤醒锁 + 原生心跳（commit 见 git log）
+
+### 一、为什么必须动原生
+
+真机实测（小米 22081212C / Android 15 / MIUI，起通话后按电源键）：
+
+| 时间点 | 现象 |
+|---|---|
+| 息屏 35s | 采集还在（35s 收到 820 个音频块）；**定时器被节流**（250ms 的 interval 只跑 38 次）；**API 调用直接失败**：`Unable to resolve host api.xiaomimimo.com: No address associated with hostname` |
+| 息屏 3~6 分钟 | `capture.blocks` 停止增长、JS 定时器也停（进程 `isFrozen=false`，不是被系统冻结）；亮屏瞬间全部恢复 |
+
+→ 两件事 JS 侧无能为力：**后台网络/DNS 被掐**、**隐藏页面被 Chromium 挂起**。
+
+### 二、原生侧新增
+
+| 文件 | 内容 |
+|---|---|
+| `CallKeepService.java` | 前台服务，`foregroundServiceType="microphone|mediaPlayback"`（targetSdk 34 不声明就启动即崩）；常驻通知「语音通话中」，点按回应用；`START_NOT_STICKY`（没有通话状态就别复活） |
+| `CallKeepAlivePlugin.java` | `start()` / `stop()` / `status()`。start：PARTIAL_WAKE_LOCK + `WifiLock(FULL_HIGH_PERF)` + `startForegroundService`。**任何一步失败都 resolve 而不是 reject**（保活失败最多不抗息屏，不能弄断通话） |
+| `AndroidManifest.xml` | 服务声明 + `FOREGROUND_SERVICE` / `FOREGROUND_SERVICE_MICROPHONE` / `FOREGROUND_SERVICE_MEDIA_PLAYBACK` |
+| `MainActivity.java` | `registerPlugin(CallKeepAlivePlugin.class)` |
+
+**原生心跳**：服务在跑时，主线程 Handler 每 5 秒做三件事 —— `webView.resumeTimers()`、`webView.onResume()`、`evaluateJavascript("window.__callTick&&window.__callTick()")`。
+原因：隐藏页面的 JS 定时器被节流到 1 次/30 秒量级，采集看门狗需要准时钟；同时定期唤醒渲染进程以对抗隐藏页挂起。
+
+### 三、Web 侧（voice.js）新增
+
+| 改动 | 说明 |
+|---|---|
+| `keepAliveStart/Stop` | 通话接通时开、挂断/启动失败时关；插件不存在时静默跳过；浏览器环境退化为 Screen Wake Lock（防息屏） |
+| `startCaptureWatchdog` | 「正在通话 + 采集开着」却连续 6s 没有音频块 → 先 `ctx.resume()`，再无效就整条采集图重建（重新 getUserMedia）；失败会重试而不是放弃 |
+| `__callTick` | 原生心跳入口，只做看门狗（不碰别的定时器） |
+| `__debug()` | 新增 `keepAlive`（on/info/screenLock/hidden）与 `audio`（ctx/capturing/sinceBlockMs/resumed/revives/reviveFails） |
+| `finishUtterance` | `_vc.vad.reset()` 补判空 —— 看门狗重建采集的瞬间 `_vc.vad` 会短暂为 null，原来会抛 TypeError 让整轮"突然哑掉" |
+
+### 四、cache-bust
+
+只升 `voice.js` **132 → 133**；`chat.js` 保持 131、其余模块保持原值。原生文件不参与 cache-bust。
+
+### 五、主仓库同步提示
+
+`CallKeepService.java` / `CallKeepAlivePlugin.java` / Manifest / MainActivity 属原生，**不推主仓库**。
+`voice.js` 里 `Capacitor.Plugins.CallKeepAlive` 与 `navigator.wakeLock` 两段**必须原样保留**（浏览器端没有插件时自动降级）。
