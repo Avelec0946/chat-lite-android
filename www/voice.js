@@ -31,7 +31,7 @@
   // 1. 常量与配置
   // =====================================================================================
 
-  var VERSION = 'v130';
+  var VERSION = 'v131';
 
   // 采集 / 播放
   var CAPTURE_RATE = 16000;   // ASR 只接受 16k 单声道 16bit wav（已实测）
@@ -3330,60 +3330,65 @@
     '禁止只回一句语气词或空应答（「嗯」「我在」「嗯，我在」「嗯，我在听」）—— 那不是回应，等于没说话。'
   ].join('\n');
 
-  function plainMsgContent(m) {
-    var c = strOf(m && m.content);
-    return c.replace(/<status>[\s\S]*?<\/status>/g, '').trim();
+  // 念之前的清洗：`<status>…</status>`（文字界面的状态栏）绝不能进 TTS。
+  //   v131 起通话历史与文本对话同源，历史里带状态栏标签，模型可能跟着学；
+  //   标签被念出来就是"状态冒号心情冒号……"这种噪音，必须在入管道前掐掉。
+  function stripSpeechNoise(text) {
+    var s = strOf(text);
+    if (s.indexOf('<') < 0) return s.trim();
+    s = s.replace(/<status>[\s\S]*?<\/status>/gi, '');
+    // 被流式切开的半截标签（"<status>情绪：" 与 "平静</status>" 分成两次送来）
+    var cut = s.search(/<\/?status/i);
+    if (cut >= 0) s = s.slice(0, cut);
+    s = s.replace(/<\/?[a-z]{0,6}>?$/i, '');    // 结尾残留的 "<sta" / "</statu"
+    return s.trim();
   }
 
   // =====================================================================================
-  // v130 ★ 附件正文必须进通话上下文。
+  // v131 ★ 通话上下文 = 文本对话上下文（同一个构建器），只多一层"语音翻译"。
   //
-  //   用户实测：先发一个 .md 文件（「收到这个文件先不要回复」），然后进通话说「就在我发给你的
-  //   文件里」→ AI 答「文件我这边是真没看到」；**挂断后同样的问题又问一遍，它就看得到了**。
+  //   历史沿革（两步都踩在同一个坑上）：
+  //     v130 给通话单独补了一份附件处理（纯文本、2 万字截断、图片只给文字说明）；
+  //     v131 直接把这份"补丁"删掉 —— 因为它本身就是瘸的：图片看不见、长文件被截、
+  //     历史只带 14 条。用户的要求很清楚：通话与文本对话**只差一层语音翻译**，
+  //     上下文必须一模一样，不许"语音版功能更少"。
   //
-  //   根因：普通对话走 chat.js 的 buildContext() → app.js 的 buildFileContent(m)，
-  //   它把 msg.files[].content 拼进 content；而通话走 voice.js 的 historyMessages()，
-  //   只读 m.content（plainMsgContent）→ **附件在通话侧根本不是"少了一部分"，而是从来没有过**。
-  //   两条上下文构建器各写一份，行为就分叉了 —— 这正是它只在通话里"看不见文件"的原因。
-  //
-  //   不直接调 buildFileContent 的理由：① 它对图片返回 content **数组**（image_url parts），
-  //   而通话大脑默认是纯文本模型，数组会直接 400；② 它按 500k 上限截断，通话每轮都重发历史，
-  //   几十万字符会把延迟和成本一起拖垮。所以这里只取"文本文件的前若干字"，图片给一句说明。
+  //   做法：直接调 chat.js 的 buildContext(conv, {statusBar:false}) ——
+  //     · 附件：app.js buildFileContent(m)，文本/图片都按原样进 content（图片是 image_url parts）
+  //     · 历史：整条 activePath，一条不截（与文本对话同长度）
+  //     · 人设/强调/模型修饰/用户身份：同一份代码
+  //     唯一去掉的是状态栏那几条**输出格式**指令（`<status>` 标签是给文字界面看的，
+  //     念出来就是噪音），这与"能力"无关，属于输出通道差异。
+  //   只在 buildContext 不可用时（node 单测 / 极端加载时序）才走本地兜底，兜底行为与之一致。
   // =====================================================================================
-  var FILE_CLIP_CHARS = 20000;    // 单个文件最多带多少字
-  var FILE_TOTAL_CHARS = 40000;   // 整段历史里附件合计上限（多轮/多文件时按序分配）
-
   function msgHasFiles(m) {
     return !!(m && m.role === 'user' && m.files && m.files.length);
   }
 
-  // budget 是跨消息共享的剩余额度对象 {left}：越新的消息越晚取，老文件自然被截
-  function voiceFileBlock(m, budget) {
-    if (!msgHasFiles(m)) return '';
-    var blocks = [];
-    for (var i = 0; i < m.files.length; i++) {
-      var f = m.files[i] || {};
-      var name = strOf(f.name) || '附件';
-      if (f.isImage) {
-        // 通话是念出来的，也没有 vision 保证 → 明确告诉模型"有这张图但看不到内容"，
-        //   它至少不会反过来问"你发的什么文件"。绝不给它编造图片内容的余地。
-        blocks.push('--- ' + name + '（图片）---\n〔用户发了一张图片；通话里你看不到画面，别猜内容，需要就问他〕');
-        continue;
+  // 附件内容：**唯一实现**优先用文本对话那份（app.js buildFileContent），
+  //   它决定了"图片 → content 数组（image_url parts）、文本 → 文件名 + 正文"。
+  //   兜底只在 app.js 不可用时生效，语义与它逐条对齐（不截断、图片同样走 parts）。
+  function fileContentOf(m) {
+    if (!msgHasFiles(m)) return m ? m.content : '';
+    try {
+      if (typeof buildFileContent === 'function') return buildFileContent(m);
+    } catch (e) { warn('buildFileContent', e); }
+    var files = m.files || [];
+    var hasImages = false;
+    for (var i = 0; i < files.length; i++) if (files[i] && files[i].isImage) { hasImages = true; break; }
+    if (hasImages) {
+      var parts = [];
+      if (m.content) parts.push({ type: 'text', text: m.content });
+      for (var j = 0; j < files.length; j++) {
+        var f = files[j] || {};
+        if (f.isImage) parts.push({ type: 'image_url', image_url: { url: 'data:' + f.mimeType + ';base64,' + f.base64 } });
+        else parts.push({ type: 'text', text: '--- ' + f.name + ' ---\n' + strOf(f.content) });
       }
-      var text = strOf(f.content);
-      if (!text) continue;
-      if (budget && budget.left <= 0) {
-        blocks.push('--- ' + name + ' ---\n〔附件较多，这一份没有带进上下文〕');
-        continue;
-      }
-      var room = budget ? Math.min(FILE_CLIP_CHARS, budget.left) : FILE_CLIP_CHARS;
-      var take = text.length > room ? text.slice(0, room) : text;
-      if (budget) budget.left -= take.length;
-      blocks.push('--- ' + name + ' ---\n' + take +
-        (take.length < text.length ? '\n…〔文件较长，只带了前 ' + take.length + ' 字〕' : ''));
+      return parts;
     }
-    if (!blocks.length) return '';
-    return '用户附带了以下文件内容：\n' + blocks.join('\n\n');
+    var ctx = files.map(function (x) { return '--- ' + (x && x.name) + ' ---\n' + strOf(x && x.content); }).join('\n\n');
+    return m.content ? ('用户附带了以下文件内容：\n' + ctx + '\n\n用户消息：\n' + m.content)
+      : ('用户附带了以下文件内容：\n' + ctx);
   }
 
   // v129：历史**原样透传**。
@@ -3394,6 +3399,8 @@
     return strOf(text);
   }
 
+  // buildContext 不可用时的历史装配（与 chat.js buildContext 的历史段同规则：
+  //   跳过 system、保留全部消息、附件走 fileContentOf、**不截断**）
   function historyMessages(conv, limit) {
     var out = [];
     try {
@@ -3402,34 +3409,37 @@
       if (typeof getActiveChain === 'function') chain = getActiveChain(conv);
       else chain = (conv.activePath || []).map(function (id) { return conv.messageMap[id]; });
       chain = (chain || []).filter(function (m) {
-        // 通话标注（marker==='call'）不进普通历史：一轮一条，几通电话就能把上下文占满
-        if (!m || m.marker === 'call' || m.role === 'system') return false;
-        if (m.role !== 'user' && m.role !== 'assistant') return false;
-        // v130：只有正文、没有附件的老判断会把"纯附件消息"整个丢掉（用户先丢文件再提问时，
-        //   那条消息正文再短也带着整份文件）。有附件就留。
-        return !!plainMsgContent(m) || msgHasFiles(m);
+        if (!m || m.role === 'system') return false;
+        return m.role === 'user' || m.role === 'assistant';
       });
-      var slice = chain.slice(-(limit || 16));
-      // 附件额度按"从新到旧"分配：越近的文件越可能正被讨论，老文件让位
-      var budget = { left: FILE_TOTAL_CHARS };
-      var contents = [];
-      for (var k = slice.length - 1; k >= 0; k--) {
-        contents[k] = voiceFileBlock(slice[k], budget);
-      }
+      var slice = (limit && limit > 0) ? chain.slice(-limit) : chain;
       for (var i = 0; i < slice.length; i++) {
-        var body = plainMsgContent(slice[i]);
-        var block = contents[i];
-        var content = body;
-        if (block) {
-          content = body ? (block + '\n\n用户消息：\n' + body) : block;
-        }
+        var c = fileContentOf(slice[i]);
+        // 图片消息的 content 是 parts 数组（多模态）—— 一旦被 strOf 就成了
+        // "[object Object],[object Object]"，图就彻底没了。数组必须原样透传。
         out.push({
           role: slice[i].role,
-          content: brainHistoryContent(slice[i].role, content)
+          content: Array.isArray(c) ? c : brainHistoryContent(slice[i].role, c)
         });
       }
     } catch (e) { warn('history', e); }
     return out;
+  }
+
+  // 文本对话的完整上下文（含 system 消息）。给不通就退回"本地装配"，绝不抛。
+  function chatContext(conv) {
+    var raw = null;
+    try {
+      if (typeof buildContext === 'function') raw = buildContext(conv, { statusBar: false });
+    } catch (e) { warn('buildContext', e); raw = null; }
+    if (!Array.isArray(raw) || !raw.length) {
+      raw = [];
+      var parts = buildSessionSystemParts(conv);
+      if (parts.length) raw.push({ role: 'system', content: parts.join('\n\n') });
+      var hist = historyMessages(conv, 0);
+      for (var i = 0; i < hist.length; i++) raw.push(hist[i]);
+    }
+    return raw;
   }
 
   // 会话人设：和 chat.js 的 buildContext() 用同一套 system 组装顺序，
@@ -3501,16 +3511,43 @@
     };
   }
 
-  function buildBrainMessages(conv, userText, signals) {
-    var cfg = voiceCfg();
+  // 本轮易变信息（声音状态 + 时间）—— **故意不放进 system**。
+  //   为什么：system 里只要有一个字节每轮都变，上游的前缀缓存就整段失效，
+  //   于是"带完整历史 + 多模态附件"这种长上下文每轮都要按全价重算，延迟和成本一起炸。
+  //   放到**本轮用户话**的末尾之后：system 与历史逐字不变 → 只有新增的这一条 miss，
+  //   正好是缓存该命中的形状（这也是"百万上下文在通话里能用"的前提）。
+  function buildTurnStateBlock(signals, clock, cfg) {
+    var L = [];
     var signalsText = '';
     try {
-      var PD0 = root.VoiceDirector;
-      if (PD0 && typeof PD0.describeSignals === 'function') {
-        signalsText = strOf(PD0.describeSignals(signals, { customPersona: cfg.customPersona }));
+      var PD = root.VoiceDirector;
+      if (PD && typeof PD.describeSignals === 'function') {
+        signalsText = strOf(PD.describeSignals(signals, { customPersona: cfg && cfg.customPersona }));
       }
     } catch (e) { signalsText = ''; }
+    if (signalsText) {
+      L.push('【对方这一段的声音状态】');
+      L.push(signalsText);
+      L.push('不要把这些特征说出来（别说「你刚才语速很快」），把它变成你说话的方式和长度。');
+    }
+    if (clock && clock.enabled) {
+      var clockText = '';
+      try {
+        var PD2 = root.VoiceDirector;
+        if (PD2 && typeof PD2.describeClock === 'function') clockText = strOf(PD2.describeClock(clock));
+      } catch (e) { clockText = ''; }
+      if (clockText) {
+        if (L.length) L.push('');
+        L.push('【现在的时间和通话进度】');
+        L.push(clockText);
+        L.push('这些只是给你自己判断用的：可以顺着时间说话（比如「都这么晚了」），但不要把几点几分原样念出来。');
+      }
+    }
+    return L.join('\n');
+  }
 
+  function buildBrainMessages(conv, userText, signals) {
+    var cfg = voiceCfg();
     var clock = buildClock();
     var parts = buildSessionSystemParts(conv);
     var layer = '';
@@ -3522,11 +3559,10 @@
           sessionParts: parts.slice(),
           personaId: cfg.personaId,
           customPersona: cfg.customPersona,
-          signals: signals,
-          signalsText: signalsText,
+          // ★ 不传 signals / clock：它们会把 system 变成"每轮都不一样"，
+          //   从而毁掉前缀缓存。副作用是通话层里那两段不会出现 —— 由 buildTurnStateBlock 补。
           voiceLabel: strOf(cfg.voiceId),
           channel: 'voice',
-          clock: clock,
           rate: clampRate(cfg.rate),
           rateMode: (strOf(cfg.rateMode) === 'pitch') ? 'pitch' : 'natural',
           // v129：篇幅档位默认 normal（2~3 句 / 20~70 字）。以前默认 short（8~35 字）
@@ -3549,8 +3585,6 @@
           sysOld = strOf(PD2.buildSystemPrompt({
             personaId: cfg.personaId,
             customPersona: cfg.customPersona,
-            signals: signals,
-            signalsText: signalsText,
             voiceLabel: strOf(cfg.voiceId),
             channel: 'voice'
           }));
@@ -3563,25 +3597,32 @@
       layer = sysOld;
     }
 
-    var sysParts = parts.slice();
-    if (layer) sysParts.push(layer);
-    // 通话层若没把副语言信号/时间写进提示词，这里补上（已包含就不重复）
-    var joined = sysParts.join('\n\n');
-    if (signalsText && joined.indexOf(signalsText) < 0) sysParts.push(signalsText);
-    if (clock.enabled) {
-      var clockText = '';
-      try {
-        var PD3 = root.VoiceDirector;
-        if (PD3 && typeof PD3.describeClock === 'function') clockText = strOf(PD3.describeClock(clock));
-      } catch (e) { clockText = ''; }
-      joined = sysParts.join('\n\n');
-      if (clockText && joined.indexOf(clockText) < 0) sysParts.push(clockText);
-    }
-    var sys = sysParts.join('\n\n') + '\n' + SPEECH_DIRECTIVE;
+    // 上下文 = 文本对话的上下文（buildContext），通话层 + 输出指令并进它的 system
+    var msgs = chatContext(conv);
+    var tail = layer + '\n' + SPEECH_DIRECTIVE;
 
-    var msgs = [{ role: 'system', content: sys }];
-    var hist = historyMessages(conv, 14);
-    for (var i = 0; i < hist.length; i++) msgs.push(hist[i]);
+    // ① 本轮的"空气泡"占位：runTurn 在建请求**之前**就 addAssistantPlaceholder() 了
+    //    （为了流式时有个消息可更新），它此刻是一条 content='' 的 assistant 消息 ——
+    //    原样发出去等于让模型看到"上一条 assistant 什么都没说"，属于污染上下文。
+    while (msgs.length && msgs[msgs.length - 1].role === 'assistant' &&
+      !strOf(msgs[msgs.length - 1].content).trim()) {
+      msgs.pop();
+    }
+
+    // ② 本轮的**用户消息也已经在会话里**（addUserMsg 先于 callBrain）——
+    //    再 push 一条就会变成 [user(原话), user(原话+声音状态)]，同一句发两遍。
+    //    这也是 v126 那个"messages 里重复追加"同族的问题：上下文构建器不知道
+    //    "本轮消息是否已落库"。做法：末条且内容一致 → 就地补上易变块，不新增。
+    var sysIdx = -1;
+    for (var i = 0; i < msgs.length; i++) if (msgs[i] && msgs[i].role === 'system') { sysIdx = i; break; }
+    if (sysIdx >= 0) {
+      msgs[sysIdx] = {
+        role: 'system',
+        content: strOf(msgs[sysIdx].content) + (strOf(msgs[sysIdx].content) ? '\n\n' : '') + tail
+      };
+    } else {
+      msgs.unshift({ role: 'system', content: tail });
+    }
 
     // v126 修（v125 遗留）：这里原来还调了一次 VoiceDirector.buildTurnMessages。
     //   那个函数**自己会再拼一遍 system**（不传 system 时它内部调 buildSystemPrompt），
@@ -3590,7 +3631,26 @@
     //   实测抓到过：新通话层 + 旧 buildSystemPrompt 同时出现，JSON 格式说明也写了两份，
     //   模型可能按旧的那份输出（字段名对不上就解析失败），而表面上一切正常。
     //   现在只补本轮用户话，system / history 各只出现一次。
-    msgs.push({ role: 'user', content: userText });
+    var turn = strOf(userText);
+    var volatileBlock = buildTurnStateBlock(signals, clock, cfg);
+    var withBlock = volatileBlock ? ((turn ? turn + '\n\n' : '') + volatileBlock) : turn;
+    var lastMsg = msgs[msgs.length - 1];
+    if (lastMsg && lastMsg.role === 'user' && strOf(lastMsg.content) === turn) {
+      msgs[msgs.length - 1] = { role: 'user', content: withBlock };
+    } else {
+      msgs.push({ role: 'user', content: withBlock });
+    }
+
+    // 失败提示用：这一轮上下文里有没有图片。模型不支持看图时上游会回 4xx，
+    //   那时的报错必须说人话（"换个支持视觉的模型"），而不是丢一个 HTTP 400 给用户。
+    var hasImg = false;
+    for (var k = 0; k < msgs.length && !hasImg; k++) {
+      var cc = msgs[k] && msgs[k].content;
+      if (Array.isArray(cc)) {
+        for (var p = 0; p < cc.length; p++) if (cc[p] && cc[p].type === 'image_url') { hasImg = true; break; }
+      }
+    }
+    _vc.lastTurnHasImages = hasImg;
     return msgs;
   }
 
@@ -4347,6 +4407,10 @@
       clearSpeakWatchdog();
       clearFillerTimer();
       var msg = (e && e.message) ? e.message : '出了点问题';
+      // v131：上下文里带图但模型不认图时，上游回 4xx —— 把它翻译成能行动的一句话
+      if (_vc.lastTurnHasImages && /(HTTP\s*4\d\d|\b400\b|\b415\b|\b422\b)/i.test(msg)) {
+        msg += '｜这张图当前的通话大脑可能不支持看图，换一个支持视觉的模型再试';
+      }
       if (e && e.code === 'voice_noasr') {
         setState('listening', '没听清，再说一次？');
         setTimeout(function () { if (_vc.running && _vc.state === 'listening') setStateText('请说话'); }, 1500);
@@ -4468,7 +4532,9 @@
     var origPush = pl.push;
     pl.push = function (text) {
       if (token !== _vc.turnId) return;
-      var t = strOf(text).trim();
+      // v131：上下文与文本对话同源后，历史里会带 `<status>` 标签（那是文字界面的状态栏），
+      //   模型有可能学着往外吐。这里统一清掉，**绝不把标签念出来**。
+      var t = stripSpeechNoise(text);
       if (!t) return;
       pl._said += t;
       _vc.saidText = pl._said;
@@ -5470,11 +5536,13 @@
     createSpool: createSpool,
     // v130：整条流水线（并发 3 句 → 串行出声音 → 排空回调），ioTts/ioSink 可注入
     createPipeline: createPipeline,
+    // v131：通话上下文与文本对话同源（附件/图片/完整历史）+ 逐轮易变块 + 念前清洗
+    fileContentOf: fileContentOf,
+    chatContext: chatContext,
+    buildTurnStateBlock: buildTurnStateBlock,
+    stripSpeechNoise: stripSpeechNoise,
     // v130：附件进通话上下文
-    voiceFileBlock: voiceFileBlock,
     msgHasFiles: msgHasFiles,
-    FILE_CLIP_CHARS: FILE_CLIP_CHARS,
-    FILE_TOTAL_CHARS: FILE_TOTAL_CHARS,
     // 其它
     clamp: clamp,
     num: num,

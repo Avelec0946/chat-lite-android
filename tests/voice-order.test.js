@@ -183,20 +183,25 @@ console.log('\n[4] 附件进通话上下文（用户反馈 ①）');
   ok('纯附件消息（无正文）也进历史', h2.length === 1 && h2[0].content.indexOf('只有附件没有正文') >= 0,
     JSON.stringify(h2));
 
-  // 图片：给说明，不塞 base64，也不能让纯文本模型收到数组
+  // 图片：v131 起与文本对话同源 —— 走 image_url parts，**真的把图给模型看**
   var conv3 = { id: 'c3', rootId: 'r', messageMap: {}, activePath: [] };
+  var pngB64 = 'AAAA'.repeat(1000);
   conv3.messageMap = {
     u8: {
       id: 'u8', role: 'user', content: '看这张图',
-      files: [{ name: 'shot.png', isImage: true, mimeType: 'image/png', base64: 'AAAA'.repeat(1000) }]
+      files: [{ name: 'shot.png', isImage: true, mimeType: 'image/png', base64: pngB64 }]
     }
   };
   conv3.activePath = ['u8'];
   var h3 = T.historyMessages(conv3, 8);
-  ok('图片只给文字说明，内容类型仍是字符串',
-    typeof h3[0].content === 'string' && h3[0].content.indexOf('图片') >= 0, typeof h3[0].content);
-  ok('图片的 base64 不进上下文（会撑爆纯文本大脑）',
-    h3[0].content.indexOf('AAAA') < 0, h3[0].content.slice(0, 120));
+  var c3 = h3[0].content;
+  ok('图片变成 content 数组（image_url parts）', Array.isArray(c3), typeof c3);
+  ok('数组里有 image_url 且带完整 data URL（视觉真的可用）', Array.isArray(c3) &&
+    c3.some(function (p) { return p.type === 'image_url' && String(p.image_url && p.image_url.url).indexOf('data:image/png;base64,') === 0; }),
+    JSON.stringify(Array.isArray(c3) ? c3.map(function (p) { return p.type; }) : c3));
+  ok('文字与原话都在数组里', Array.isArray(c3) &&
+    c3.some(function (p) { return p.type === 'text' && String(p.text).indexOf('看这张图') >= 0; }),
+    JSON.stringify(c3 && c3[0]));
 
   // assistant 的 files 不该被注入（只有用户消息才代表"挂在上下文里的文件"）
   var conv4 = { id: 'c4', rootId: 'r', messageMap: {}, activePath: [] };
@@ -207,48 +212,150 @@ console.log('\n[4] 附件进通话上下文（用户反馈 ①）');
   var h4 = T.historyMessages(conv4, 8);
   ok('assistant 的附件不注入', h4[0].content === '给你一个文件', JSON.stringify(h4[0].content));
 
-  // 大文件截断：不能把每轮 prompt 拖到几十万字符
-  var big = 'x'.repeat(T.FILE_CLIP_CHARS + 5000);
+  // v131：**不截断** —— 与文本对话一致（用户明确要求"无缝无损"，不许语音版更瘸）
+  var big = 'x'.repeat(120000);
   var conv5 = { id: 'c5', rootId: 'r', messageMap: {}, activePath: [] };
   conv5.messageMap = {
     u5: { id: 'u5', role: 'user', content: '长文', files: [{ name: 'big.md', content: big }] }
   };
   conv5.activePath = ['u5'];
   var h5 = T.historyMessages(conv5, 8);
-  ok('超大附件按 FILE_CLIP_CHARS 截断', h5[0].content.length < T.FILE_CLIP_CHARS + 600,
-    String(h5[0].content.length));
-  ok('截断处有明确说明（模型知道自己没看全）',
-    h5[0].content.indexOf('只带了前') >= 0, h5[0].content.slice(-60));
+  var bigBody = Array.isArray(h5[0].content) ? JSON.stringify(h5[0].content) : h5[0].content;
+  ok('12 万字的附件一字不截', bigBody.indexOf(big) >= 0, 'len=' + bigBody.length);
+  ok('没有"只带了前 N 字"这类截断说明', bigBody.indexOf('只带了前') < 0, 'len=' + bigBody.length);
 
-  // 多文件共享总额度
-  var f1 = 'y'.repeat(T.FILE_CLIP_CHARS);
+  // 多文件也全带
+  var f1 = 'y'.repeat(30000);
   var conv6 = { id: 'c6', rootId: 'r', messageMap: {}, activePath: [] };
   conv6.messageMap = {
-    u6: { id: 'u6', role: 'user', content: '', files: [{ name: 'f1.md', content: f1 }, { name: 'f2.md', content: f1 }] }
+    u6: { id: 'u6', role: 'user', content: '', files: [{ name: 'f1.md', content: f1 }, { name: 'f2.md', content: 'z'.repeat(30000) }] }
   };
   conv6.activePath = ['u6'];
   var h6 = T.historyMessages(conv6, 8);
-  ok('多个大文件合计不超过 FILE_TOTAL_CHARS 的量级',
-    h6[0].content.length <= T.FILE_TOTAL_CHARS + 500, String(h6[0].content.length));
+  ok('多文件全部带上（合计 6 万字不截）',
+    h6[0].content.indexOf(f1) >= 0 && h6[0].content.indexOf('z'.repeat(30000)) >= 0,
+    String(h6[0].content.length));
 })();
 
 // =====================================================================================
-console.log('\n[5] 附件额度按"从新到旧"分配（正在讨论的那份优先）');
+console.log('\n[5] 历史长度与文本对话一致（不再只带 14 条）');
 // =====================================================================================
 (function () {
-  var older = 'OLD'.repeat(Math.floor(T.FILE_CLIP_CHARS / 3) + 10);
-  var newer = 'NEW'.repeat(50);
   var conv = { id: 'c7', rootId: 'r', messageMap: {}, activePath: [] };
+  var ids = [];
+  for (var i = 0; i < 40; i++) {
+    var id = 'm' + i;
+    conv.messageMap[id] = { id: id, role: i % 2 ? 'assistant' : 'user', content: '第' + i + '句' };
+    ids.push(id);
+  }
+  conv.activePath = ids;
+  var hist = T.historyMessages(conv, 0);
+  ok('40 条历史一条不少（文本对话就是全发）', hist.length === 40, String(hist.length));
+  var msgs = T.buildBrainMessages(conv, '现在呢', null);
+  var histCount = msgs.filter(function (m) { return /^第\d+句$/.test(String(m.content)); }).length;
+  ok('buildBrainMessages 里也是 40 条历史（+ system + 本轮）', histCount === 40, String(histCount) + ' / 共 ' + msgs.length);
+  ok('历史顺序没乱', String(hist[0].content) === '第0句' && String(hist[39].content) === '第39句',
+    String(hist[0].content) + '…' + String(hist[39].content));
+})();
+
+// =====================================================================================
+console.log('\n[6] 上下文与文本对话同源（同一个 buildContext）');
+// =====================================================================================
+(function () {
+  var conv = { id: 'c8', rootId: 'r', messageMap: {}, activePath: [], systemPrompt: '你是猫娘' };
   conv.messageMap = {
-    u1: { id: 'u1', role: 'user', content: '旧文件', files: [{ name: 'old.md', content: older }] },
-    a1: { id: 'a1', role: 'assistant', content: '收到' },
-    u2: { id: 'u2', role: 'user', content: '新文件', files: [{ name: 'new.md', content: newer }] }
+    u1: { id: 'u1', role: 'user', content: '看这个', files: [{ name: 'a.md', content: 'A正文' }] }
   };
-  conv.activePath = ['u1', 'a1', 'u2'];
-  var hist = T.historyMessages(conv, 8);
-  var joined = hist.map(function (m) { return String(m.content); }).join('\n');
-  ok('最新的文件一定完整带上', joined.indexOf(newer) >= 0, joined.length + '');
-  ok('旧文件仍在（额度够，不该被丢）', joined.indexOf('OLD') >= 0, joined.length + '');
+  conv.activePath = ['u1'];
+
+  // 冒充 chat.js 的 buildContext：记录参数，返回一份"文本对话会发的东西"
+  var seenOpts = null;
+  globalThis.buildFileContent = function (m) {
+    if (!m.files) return m.content;
+    return m.content + '\n【附件:' + (m.files[0] && m.files[0].name) + '】';
+  };
+  globalThis.buildContext = function (c, o) {
+    seenOpts = o || null;
+    return [
+      { role: 'system', content: '会话人设：你是猫娘\n用户身份：老板' },
+      { role: 'user', content: globalThis.buildFileContent(c.messageMap.u1) },
+      { role: 'assistant', content: '收到' },
+      { role: 'user', content: '继续聊' }
+    ];
+  };
+
+  var msgs = T.buildBrainMessages(conv, '继续', null);
+  ok('调用了 chat.js 的 buildContext', !!seenOpts, 'seen=' + JSON.stringify(seenOpts));
+  ok('明确要求关闭状态栏（statusBar:false）', !!seenOpts && seenOpts.statusBar === false, JSON.stringify(seenOpts));
+  ok('文本对话的每条历史都原样带过来（4 条 + 本轮）', msgs.length === 5,
+    JSON.stringify(msgs.map(function (m) { return m.role; })));
+  ok('附件处理走的就是 buildFileContent（同源，不是另一份实现）',
+    String(msgs[1].content).indexOf('【附件:a.md】') >= 0, String(msgs[1].content));
+  ok('system 里既有会话人设又有通话层与输出指令',
+    String(msgs[0].content).indexOf('你是猫娘') >= 0 &&
+    String(msgs[0].content).indexOf('【怎么输出】') >= 0, String(msgs[0].content).slice(0, 60));
+  ok('全篇只有一条 system（不重复注入）',
+    msgs.filter(function (m) { return m.role === 'system'; }).length === 1,
+    JSON.stringify(msgs.map(function (m) { return m.role; })));
+
+  // 反证：buildContext 不存在时走本地兜底，附件仍然带（不是瘸的）
+  delete globalThis.buildContext;
+  var fb = T.buildBrainMessages(conv, '继续', null);
+  var flat = fb.map(function (m) { return JSON.stringify(m.content); }).join('\n');
+  ok('无 buildContext 时兜底仍带附件（buildFileContent 优先）',
+    flat.indexOf('【附件:a.md】') >= 0, flat.slice(-200));
+  ok('兜底路径下本轮用户话仍在最后',
+    fb[fb.length - 1].role === 'user' && String(fb[fb.length - 1].content).indexOf('继续') === 0,
+    JSON.stringify(fb.map(function (m) { return m.role; })));
+
+  delete globalThis.buildFileContent;
+  ok('buildFileContent 也没有时，仍能内联出附件正文', (function () {
+    var c2 = { id: 'c9', rootId: 'r', messageMap: {}, activePath: [] };
+    c2.messageMap = { u1: { id: 'u1', role: 'user', content: '看这个', files: [{ name: 'b.md', content: '内联正文' }] } };
+    c2.activePath = ['u1'];
+    var h = T.historyMessages(c2, 0);
+    return String(h[0].content).indexOf('内联正文') >= 0 && String(h[0].content).indexOf('b.md') >= 0;
+  })());
+
+  // 通话的真实时序：addUserMsg + addAssistantPlaceholder **先于** callBrain 落库。
+  //   于是"文本对话的上下文"里已经有本轮用户话和一条空的 assistant 占位。
+  //   v131 直接复用它，就必须处理这两条，否则同一句话发两遍 + 空 assistant 污染上下文。
+  var convD = { id: 'cd', rootId: 'r', messageMap: {}, activePath: [] };
+  convD.messageMap = {
+    h1: { id: 'h1', role: 'user', content: '昨天聊到哪儿了' },
+    h2: { id: 'h2', role: 'assistant', content: '聊到你要考试。' },
+    u1: { id: 'u1', role: 'user', content: '今天好累' },
+    a0: { id: 'a0', role: 'assistant', content: '' }        // ← 本轮空气泡占位
+  };
+  convD.activePath = ['h1', 'h2', 'u1', 'a0'];
+  var dm = T.buildBrainMessages(convD, '今天好累', null);
+  ok('空气泡占位不发给模型', dm.filter(function (m) { return m.role === 'assistant' && !String(m.content).trim(); }).length === 0,
+    JSON.stringify(dm.map(function (m) { return m.role; })));
+  ok('本轮用户话只发一次（不因"已落库"而重复）',
+    dm.filter(function (m) { return m.role === 'user' && String(m.content).indexOf('今天好累') === 0; }).length === 1,
+    JSON.stringify(dm.map(function (m) { return m.role + ':' + String(m.content).slice(0, 10); })));
+  ok('易变块补在已有的那条用户消息上（末条仍是 user）',
+    dm[dm.length - 1].role === 'user' && String(dm[dm.length - 1].content).indexOf('今天好累') === 0,
+    JSON.stringify(dm[dm.length - 1]));
+  ok('前面那轮的历史没被动过',
+    String(dm[0].content).indexOf('昨天聊到哪儿了') >= 0 || String(dm[1].content).indexOf('昨天聊到哪儿了') >= 0,
+    JSON.stringify(dm.slice(0, 2)));
+})();
+
+// =====================================================================================
+console.log('\n[7] 念之前把 <status> 清掉（上下文同源后的必要防护）');
+// =====================================================================================
+(function () {
+  ok('完整状态栏块被清掉',
+    T.stripSpeechNoise('好，那我们继续。\n<status>心情：平静｜时间：20:15</status>') === '好，那我们继续。',
+    T.stripSpeechNoise('好，那我们继续。\n<status>心情：平静｜时间：20:15</status>'));
+  ok('被流式切开的半个标签也不会念出来',
+    T.stripSpeechNoise('知道了。<status>心情：平静').indexOf('status') < 0,
+    T.stripSpeechNoise('知道了。<status>心情：平静'));
+  ok('结尾残留的半截标签被清掉',
+    T.stripSpeechNoise('好<sta') === '好', T.stripSpeechNoise('好<sta'));
+  ok('普通文本不受影响', T.stripSpeechNoise('今天有点累，早点睡。') === '今天有点累，早点睡。',
+    T.stripSpeechNoise('今天有点累，早点睡。'));
 })();
 
 // =====================================================================================
@@ -304,7 +411,7 @@ function runPipelineCase(specs, opts) {
 }
 
 (async function () {
-  console.log('\n[6] 整条流水线：并发预取 + 串行播放 + 排空回调');
+  console.log('\n[8] 整条流水线：并发预取 + 串行播放 + 排空回调');
   var r = await runPipelineCase([
     { text: '第一句。', chunks: [{ at: 30, tag: 'A1' }, { at: 70, tag: 'A2' }, { at: 110, tag: 'A3' }], resolveAt: 130 },
     { text: '第二句。', chunks: [{ at: 20, tag: 'B1' }, { at: 40, tag: 'B2' }], resolveAt: 60 },
@@ -319,7 +426,7 @@ function runPipelineCase(specs, opts) {
   ok('结束后没有残留排队/在飞', r.pl.size() === 0, String(r.pl.size()));
   r.pl.stop();
 
-  console.log('\n[7] 中间一句 TTS 失败：跳过它，前后仍按序，且不卡死');
+  console.log('\n[9] 中间一句 TTS 失败：跳过它，前后仍按序，且不卡死');
   var r2 = await runPipelineCase([
     { text: '第一句。', chunks: [{ at: 10, tag: 'A1' }], resolveAt: 30 },
     { text: '第二句。', chunks: [{ at: 12, tag: 'B1' }], resolveAt: 20, reject: true },

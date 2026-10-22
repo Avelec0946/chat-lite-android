@@ -560,10 +560,15 @@ function statusBarUserText(sb) {
 }
 
 // ===== 上下文构建 =====
-function buildContext(conv) {
+// v131：加 opts —— 语音通话复用**同一个**构建器（opts.statusBar=false 只是不注入状态栏
+//   那几条"输出格式"指令，历史/附件/图片/模型修饰/身份 一律与文本对话逐字相同）。
+//   以前通话侧自己写了一份，于是"文本对话看得见附件、通话看不见"这种分叉必然发生（v130 已修过一次，
+//   这次从根上只留一个实现）。
+function buildContext(conv, opts) {
+  const o = opts || {};
   const msgs = [];
   const sysParts = [];
-  const sb = effectiveStatusBar(conv);
+  const sb = (o.statusBar === false) ? null : effectiveStatusBar(conv);
   const mp = effectiveModelPrompt(conv);
 
   // 会话级 systemPrompt

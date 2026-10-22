@@ -716,13 +716,17 @@ console.log('\n[12] 通话提示词 = 会话人设 + 通话层');
   ok('会话人设排在通话层之前', sys.indexOf('你是猫娘') >= 0 && sys.indexOf('你是猫娘') < sys.indexOf('通话层'), sys);
   // v129：输出改成纯文本后，指令头从「【输出格式（强制）】」变成「【怎么输出】」
   ok('输出格式指令在最后（纯文本路线）', sys.indexOf('【怎么输出】') > sys.indexOf('通话层'), sys);
-  ok('clock 传给通话层（enabled/now/callStartedAt/lastTurnAt/turnIndex）',
-    !!seen && !!seen.clock && seen.clock.enabled === true &&
-    typeof seen.clock.now === 'number' && typeof seen.clock.callStartedAt === 'number' &&
-    typeof seen.clock.lastTurnAt === 'number' && typeof seen.clock.turnIndex === 'number',
-    JSON.stringify(seen && seen.clock));
-  ok('timestamps 开时时间描述进提示词', sys.indexOf('【时间】下午三点') >= 0, sys);
-  ok('副语言信号只注入一次', sys.split('【语气】有点急').length - 1 === 1, sys);
+  // v131：system 必须**逐轮不变**（前缀缓存的前提），所以副语言信号与时间不再进 system，
+  //   而是挂在本轮用户话后面。这里同时钉住"进了"和"只进一份"。
+  var lastTurn = msgs[msgs.length - 1];
+  var turnText = String(lastTurn.content);
+  ok('clock 不再传给通话层（传了 system 就会每轮都变，缓存必失效）',
+    !!seen && seen.clock === undefined && seen.signals === undefined && seen.signalsText === undefined,
+    JSON.stringify({ clock: !!seen && seen.clock, signals: !!seen && seen.signals }));
+  ok('timestamps 开时时间描述进**本轮用户话**', turnText.indexOf('【时间】下午三点') >= 0, turnText);
+  ok('副语言信号进**本轮用户话**且只一次', turnText.split('【语气】有点急').length - 1 === 1, turnText);
+  ok('system 里不含逐轮易变内容（缓存命中的前提）',
+    sys.indexOf('【语气】有点急') < 0 && sys.indexOf('【时间】下午三点') < 0, sys);
 
   // v126 回归：v125 里 buildBrainMessages 末尾还会调一次 buildTurnMessages，
   //   而那个函数会自己再拼一遍 system —— 于是 messages 变成 [system, user, system, user, user]，
@@ -731,19 +735,27 @@ console.log('\n[12] 通话提示词 = 会话人设 + 通话层');
   ok('messages 里 system 只出现一次',
     msgs.filter(function (m) { return m.role === 'system'; }).length === 1,
     JSON.stringify(msgs.map(function (m) { return m.role; })));
-  ok('messages 末条是本轮用户话', msgs[msgs.length - 1].role === 'user' &&
-    msgs[msgs.length - 1].content === '你好',
-    JSON.stringify(msgs[msgs.length - 1]));
+  ok('messages 末条是本轮用户话（原话在最前，易变块附在其后）',
+    lastTurn.role === 'user' && turnText.indexOf('你好') === 0, turnText.slice(0, 40));
   ok('本轮用户话只出现一次（不被 buildTurnMessages 重复追加）',
-    msgs.filter(function (m) { return m.role === 'user' && m.content === '你好'; }).length === 1,
+    msgs.filter(function (m) { return m.role === 'user' && String(m.content).indexOf('你好') === 0; }).length === 1,
     JSON.stringify(msgs.map(function (m) { return m.role + ':' + String(m.content).slice(0, 8); })));
   ok('提示词里输出格式说明只有一份（v129：不再要求 JSON）',
     (sys.split('【怎么输出】').length - 1) === 1 && sys.indexOf('response_format') < 0,
     String(sys.split('【怎么输出】').length - 1));
 
   globalThis.settings.voice.timestamps = false;
-  T.buildBrainMessages(conv, '你好', null);
-  ok('timestamps 关时 clock.enabled=false', seen.clock.enabled === false, JSON.stringify(seen.clock));
+  var msgs2 = T.buildBrainMessages(conv, '你好', null);
+  ok('timestamps 关时用户话里没有时间块',
+    String(msgs2[msgs2.length - 1].content).indexOf('【现在的时间和通话进度】') < 0,
+    String(msgs2[msgs2.length - 1].content));
+
+  // 前缀缓存的硬指标：同一会话连续两轮，system 必须逐字相同
+  globalThis.settings.voice.timestamps = true;
+  var s1 = T.buildBrainMessages(conv, '第一句', null)[0].content;
+  var s2 = T.buildBrainMessages(conv, '第二句', null)[0].content;
+  ok('连续两轮 system 逐字相同（前缀缓存命中）', s1 === s2,
+    s1 === s2 ? '' : ('长度 ' + s1.length + ' vs ' + s2.length));
 
   delete globalThis.VoiceDirector;
   var sysOld = T.buildBrainMessages(conv, '你好', null)[0].content;
