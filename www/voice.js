@@ -31,7 +31,7 @@
   // 1. 常量与配置
   // =====================================================================================
 
-  var VERSION = 'v129.1';
+  var VERSION = 'v130';
 
   // 采集 / 播放
   var CAPTURE_RATE = 16000;   // ASR 只接受 16k 单声道 16bit wav（已实测）
@@ -3335,6 +3335,57 @@
     return c.replace(/<status>[\s\S]*?<\/status>/g, '').trim();
   }
 
+  // =====================================================================================
+  // v130 ★ 附件正文必须进通话上下文。
+  //
+  //   用户实测：先发一个 .md 文件（「收到这个文件先不要回复」），然后进通话说「就在我发给你的
+  //   文件里」→ AI 答「文件我这边是真没看到」；**挂断后同样的问题又问一遍，它就看得到了**。
+  //
+  //   根因：普通对话走 chat.js 的 buildContext() → app.js 的 buildFileContent(m)，
+  //   它把 msg.files[].content 拼进 content；而通话走 voice.js 的 historyMessages()，
+  //   只读 m.content（plainMsgContent）→ **附件在通话侧根本不是"少了一部分"，而是从来没有过**。
+  //   两条上下文构建器各写一份，行为就分叉了 —— 这正是它只在通话里"看不见文件"的原因。
+  //
+  //   不直接调 buildFileContent 的理由：① 它对图片返回 content **数组**（image_url parts），
+  //   而通话大脑默认是纯文本模型，数组会直接 400；② 它按 500k 上限截断，通话每轮都重发历史，
+  //   几十万字符会把延迟和成本一起拖垮。所以这里只取"文本文件的前若干字"，图片给一句说明。
+  // =====================================================================================
+  var FILE_CLIP_CHARS = 20000;    // 单个文件最多带多少字
+  var FILE_TOTAL_CHARS = 40000;   // 整段历史里附件合计上限（多轮/多文件时按序分配）
+
+  function msgHasFiles(m) {
+    return !!(m && m.role === 'user' && m.files && m.files.length);
+  }
+
+  // budget 是跨消息共享的剩余额度对象 {left}：越新的消息越晚取，老文件自然被截
+  function voiceFileBlock(m, budget) {
+    if (!msgHasFiles(m)) return '';
+    var blocks = [];
+    for (var i = 0; i < m.files.length; i++) {
+      var f = m.files[i] || {};
+      var name = strOf(f.name) || '附件';
+      if (f.isImage) {
+        // 通话是念出来的，也没有 vision 保证 → 明确告诉模型"有这张图但看不到内容"，
+        //   它至少不会反过来问"你发的什么文件"。绝不给它编造图片内容的余地。
+        blocks.push('--- ' + name + '（图片）---\n〔用户发了一张图片；通话里你看不到画面，别猜内容，需要就问他〕');
+        continue;
+      }
+      var text = strOf(f.content);
+      if (!text) continue;
+      if (budget && budget.left <= 0) {
+        blocks.push('--- ' + name + ' ---\n〔附件较多，这一份没有带进上下文〕');
+        continue;
+      }
+      var room = budget ? Math.min(FILE_CLIP_CHARS, budget.left) : FILE_CLIP_CHARS;
+      var take = text.length > room ? text.slice(0, room) : text;
+      if (budget) budget.left -= take.length;
+      blocks.push('--- ' + name + ' ---\n' + take +
+        (take.length < text.length ? '\n…〔文件较长，只带了前 ' + take.length + ' 字〕' : ''));
+    }
+    if (!blocks.length) return '';
+    return '用户附带了以下文件内容：\n' + blocks.join('\n\n');
+  }
+
   // v129：历史**原样透传**。
   //   v128 曾在这里给 assistant 补一层 {"speech":…} 的壳，是为了迁就"要求 JSON 输出"的
   //   上游行为；v129 输出改纯文本后，历史也必须是纯文本 —— 两边格式一致，模型不会
@@ -3353,13 +3404,28 @@
       chain = (chain || []).filter(function (m) {
         // 通话标注（marker==='call'）不进普通历史：一轮一条，几通电话就能把上下文占满
         if (!m || m.marker === 'call' || m.role === 'system') return false;
-        return (m.role === 'user' || m.role === 'assistant') && plainMsgContent(m);
+        if (m.role !== 'user' && m.role !== 'assistant') return false;
+        // v130：只有正文、没有附件的老判断会把"纯附件消息"整个丢掉（用户先丢文件再提问时，
+        //   那条消息正文再短也带着整份文件）。有附件就留。
+        return !!plainMsgContent(m) || msgHasFiles(m);
       });
       var slice = chain.slice(-(limit || 16));
+      // 附件额度按"从新到旧"分配：越近的文件越可能正被讨论，老文件让位
+      var budget = { left: FILE_TOTAL_CHARS };
+      var contents = [];
+      for (var k = slice.length - 1; k >= 0; k--) {
+        contents[k] = voiceFileBlock(slice[k], budget);
+      }
       for (var i = 0; i < slice.length; i++) {
+        var body = plainMsgContent(slice[i]);
+        var block = contents[i];
+        var content = body;
+        if (block) {
+          content = body ? (block + '\n\n用户消息：\n' + body) : block;
+        }
         out.push({
           role: slice[i].role,
-          content: brainHistoryContent(slice[i].role, plainMsgContent(slice[i]))
+          content: brainHistoryContent(slice[i].role, content)
         });
       }
     } catch (e) { warn('history', e); }
@@ -3797,7 +3863,103 @@
   // 19. TTS 流水线（边合成边播；句子级并发，前一句在播时后一句已经发出去了）
   // =====================================================================================
 
-  function createPipeline(gate, guard, perf) {
+  // =====================================================================================
+  // ★ v130 有序汇流（createSpool）—— 「AI 念得乱、根本没法听」的根治
+  //
+  //   现象（用户实测）：回复一长（2~3 句）就完全听不懂在念什么，像是"嗑着念"。
+  //
+  //   根因：句子级并发（maxActive=3）让**多条 PCM 流同时到达**，而播放器只有**一个**
+  //   排期游标 p.nextTime —— 谁先到就排谁。于是第 1 句还在流式下发时，第 2、3 句的
+  //   音频块已经插进来了，三个句子的音频在时间轴上**交替拼接**：
+  //       1a 2a 1b 3a 1c 2b ……
+  //   更糟的是这层还共用了三个**跨块有状态**的处理器：重采样器相位、静音压缩的静音计数、
+  //   WSOLA 伸缩器的相位/累加器。交错喂进来的样本等于把三句话混进同一台机器，
+  //   于是不只是"顺序错"，每个块边界还会因为相位突变产生咔哒 → 听感就是"吐字乱的"。
+  //
+  //   为什么以前没暴露：v128 及之前回复基本只有一句（篇幅档 short），并发路径形同虚设；
+  //   v129 把篇幅放到 normal（20~70 字，2~3 句）→ 这条路径才第一次真正跑起来。
+  //   这也是为什么"文字是对的、只有声音乱" —— 文本侧没有任何并发。
+  //
+  //   做法：**并发下载，串行喂播放器**。只有"当前该播的那一句"（head）能直接写进
+  //   播放器；后面的句子先按序号进缓冲。前一句结束时立刻把缓冲按序灌进去（数据早就到了，
+  //   所以不会因此变慢——预取的意义保留）。flushStretch（WSOLA 尾巴）也改成"轮到这句
+  //   结束时才吐"，否则它会在别的句子正流着的时候重置伸缩器状态。
+  // =====================================================================================
+  function createSpool(opts) {
+    opts = opts || {};
+    var append = typeof opts.append === 'function' ? opts.append : function () {};
+    var flush = typeof opts.flush === 'function' ? opts.flush : function () {};
+    // 单句缓冲上限：24k/16bit ≈ 48KB/s → 4MB ≈ 87 秒。真要超了，宁可不播这句，
+    //   也不能把手机内存吃穿（一个坏上游无限吐音频就是这条路径）。
+    var MAX_BUFFER_BYTES = 4 * 1024 * 1024;
+
+    var head = 0;      // 当前允许直接进播放器的序号
+    var next = 0;      // 下一个待分配的序号
+    var bufs = {};     // seq -> [Uint8Array]
+    var done = {};     // seq -> true（该句音频已全部到齐）
+    var pending = 0;   // 缓冲中的字节数
+    var closed = false;
+    var stats = { direct: 0, buffered: 0, flushed: 0, dropped: 0, outOfOrder: 0 };
+
+    function drain() {
+      while (!closed) {
+        var list = bufs[head];
+        if (list && list.length) {
+          bufs[head] = [];
+          for (var i = 0; i < list.length; i++) {
+            pending -= list[i].length;
+            stats.flushed++;
+            append(list[i]);
+          }
+        }
+        if (!done[head]) break;
+        // 这句到齐了（哪怕一个字节都没收到，比如 TTS 报错）→ 吐出尾巴，轮到下一句
+        delete done[head];
+        delete bufs[head];
+        flush();
+        head++;
+      }
+    }
+
+    return {
+      // 领号：必须按播放顺序（句子进队列的顺序）调用
+      open: function () {
+        var seq = next++;
+        bufs[seq] = bufs[seq] || [];
+        return {
+          seq: seq,
+          push: function (b) {
+            if (closed || !b || !b.length) return;
+            if (seq === head) { stats.direct++; append(b); return; }
+            stats.outOfOrder++;    // 取证：这句的音频**先于**前一句到达（旧版就会在这里插队）
+            if (pending + b.length > MAX_BUFFER_BYTES) { stats.dropped++; return; }
+            bufs[seq].push(b);
+            pending += b.length;
+            stats.buffered++;
+          },
+          finish: function () {
+            if (closed) return;
+            done[seq] = true;
+            if (seq === head) drain();
+          }
+        };
+      },
+      pendingBytes: function () { return pending; },
+      headSeq: function () { return head; },
+      stats: function () { return stats; },
+      close: function () {
+        closed = true;
+        bufs = {}; done = {}; pending = 0;
+      }
+    };
+  }
+
+  // ioTts / ioSink 是**测试注入位**（默认走真实 TTS 与真实播放器）。
+  //   为什么留这个口子：本轮的 bug 全是"接线"问题（并发写同一个播放器、finish 漏调、
+  //   排空判定漏条件），零件单测照样全绿也抓不到。只有把 pipeline 整条链路跑起来、
+  //   按真实时序往里面灌并发分片，才能钉住"顺序"和"收尾"这两件事。
+  function createPipeline(gate, guard, perf, ioTts, ioSink) {
+    var doTts = typeof ioTts === 'function' ? ioTts : ttsStream;
     var q = {
       queue: [],          // 待合成的句子
       perf: strOf(perf),  // v129：这一轮的表演提示（只加在送 TTS 的文本上）
@@ -3806,13 +3968,30 @@
                           //   实测每句 TTS 首包 ≈0.55s，而短句音频只有 0.8~1.5s；
                           //   只预取 1 句时，句间很容易出现 0.5~0.9s 的空白（真机/无头都量到过）。
                           //   多预取 1 句的代价只是多一个并发请求，对上游无压力。
+                          //   ★ 并发只到"拿到音频"为止：写进播放器必须按句序（见 createSpool）。
       done: false,
       closed: false,
       stalled: false,     // v128：大脑卡住导致的"被收尾"，与正常收尾区分开
       stallTimer: null,
       onIdle: null,
-      firstChunkMs: 0
+      firstChunkMs: 0,
+      spool: null
     };
+
+    // 播放器是唯一出口：所有句子都从这里出去，且必须按序
+    var sinkAppend = (ioSink && typeof ioSink.append === 'function') ? ioSink.append : function (bytes) {
+      if (!alive()) return;
+      if (!_vc.player) { try { ensurePlayer(); } catch (e) { return; } }
+      _vc.player.appendPcm24(bytes);
+      if (_vc.state !== 'speaking') enterSpeaking();
+    };
+    var sinkFlush = (ioSink && typeof ioSink.flush === 'function') ? ioSink.flush : function () {
+      // 一句的边界：把 WSOLA 里滞留的尾巴吐出来，保持句尾完整。
+      //   v130 之前这行挂在"TTS 请求结束"上 —— 并发时它会在别的句子正在流的时候
+      //   重置伸缩器状态，那句的首尾就被削掉一截。
+      try { if (_vc.player) _vc.player.flushStretch(); } catch (e) {}
+    };
+    q.spool = createSpool({ append: sinkAppend, flush: sinkFlush });
 
     // 这一轮还该不该出声音（token 是否过期、通话是否还在进行）
     function alive() {
@@ -3834,6 +4013,8 @@
         q.stallTimer = null;
         if (q.closed || q.done) return;
         if (q.queue.length || q.active > 0) { armStall(); return; }
+        // v130：缓冲区里还压着句子（还没轮到播）→ 不是"大脑静默"，继续等
+        if (q.spool && q.spool.pendingBytes() > 0) { armStall(); return; }
         var pl = _vc.player;
         if (pl && !pl.isIdle()) { armStall(); return; }   // 还在播 → 等播完再看
         q.stalled = true;
@@ -3855,6 +4036,8 @@
       if (q.active > 0) return;
       if (q.queue.length) return;
       if (!q.done) return;
+      // v130：还有句子压在缓冲区里没进播放器 → 绝不能判"说完了"
+      if (q.spool && q.spool.pendingBytes() > 0) return;
       // 播放器还没建好时不要卡死在这里：没有任何音频排期，等同于"已排空"
       var p = _vc.player;
       if (p) {
@@ -3878,20 +4061,21 @@
       // v129：表演提示只加在**送去合成**的那一份文本上（MiMo 会把中文括注当表演方向吃掉）。
       //   队列里的 text 与写回会话的文本始终是干净的。
       var speak = (q.perf || '') + text;
-      var p = ttsStream(speak, {
+      // v130：领号。号 = 播放顺序。onPcm 的字节不再直接进播放器，而是交给 spool ——
+      //   轮到这一句才真的出声音（并发预取，串行播放）。
+      var sp = q.spool.open();
+      var p = doTts(speak, {
         gate: gate,
         onPcm: function (bytes) {
           // v128：晚到的音频必须自己闭嘴。打断/挂断/换轮之后，原生流里已经排队的
           //   分片还会继续投递进来 —— 以前它们会被塞进播放器（用户听到 AI 又冒一句），
           //   并把状态从 idle/error 拉回 speaking（此后没有任何路径能把它收回去）。
           if (!alive()) return;
-          if (!_vc.player) { try { ensurePlayer(); } catch (e) { return; } }
-          _vc.player.appendPcm24(bytes);
-          if (_vc.state !== 'speaking') enterSpeaking();
+          sp.push(bytes);
         }
       }).then(function (r) {
-        // 这一句的 PCM 已经全部到齐：吐出伸缩器里的尾巴，保持句尾完整
-        try { if (_vc.player) _vc.player.flushStretch(); } catch (e) {}
+        // 这一句的 PCM 已经全部到齐（句尾的 WSOLA 尾巴由 spool 在"轮到这句播完"时吐）
+        sp.finish();
         if (r && r.firstChunkMs && (!q.firstChunkMs || r.firstChunkMs < q.firstChunkMs)) q.firstChunkMs = r.firstChunkMs;
       }).catch(function (e) {
         if (isAbort(e)) return;
@@ -3899,6 +4083,9 @@
         warn('TTS 失败（静音降级）:', e && e.message);
         if (!q.warned) { q.warned = true; toast('语音合成失败，已切到纯文字模式', 'warn'); }
       }).then(function () {
+        // 失败/中断也要 finish，否则这一号的 done 永远不置位 → 后面所有句子都被缓冲区
+        //   一直压着不播（听感是"AI 卡住不说了"，比丢一句严重得多）。
+        try { sp.finish(); } catch (e) {}
         q.active--;
         pump();
       });
@@ -3945,7 +4132,8 @@
       whenIdle: function (cb) {
         // 已经排空过（典型时序：finish() 里先判空了、这里才注册）→ 立即回调，不能漏。
         //   这正是曾经卡死在 speaking 的原因：单次触发的事件被注册在触发之后。
-        if (q.closed || (q.done && !q.queue.length && q.active === 0 && (!_vc.player || _vc.player.isIdle()))) {
+        if (q.closed || (q.done && !q.queue.length && q.active === 0 &&
+            q.spool.pendingBytes() === 0 && (!_vc.player || _vc.player.isIdle()))) {
           q.closed = true;
           try { cb(); } catch (e) { warn('whenIdle', e); }
           return;
@@ -3956,11 +4144,15 @@
       firstChunkMs: function () { return q.firstChunkMs; },
       size: function () { return q.queue.length + q.active; },
       stalled: function () { return !!q.stalled; },
+      // v130 取证：direct = 直接进播放器的块数；outOfOrder = 到达时前面还有句没播完
+      //   （旧版正是在这里插队，导致句子音频交替）；buffered/flushed = 缓冲与按序补播
+      spoolStats: function () { return q.spool.stats(); },
       stop: function () {
         q.closed = true;
         clearStall();
         q.queue.length = 0;
         q.onIdle = null;
+        try { q.spool.close(); } catch (e) {}
         if (_vc.player && _vc.player.onDrained === maybeIdle) _vc.player.onDrained = null;
       }
     };
@@ -4294,6 +4486,11 @@
     _vc.metrics.turnTotalMs = total;
     _vc.metrics.turns = (_vc.metrics.turns || 0) + 1;
     _vc.metrics.ttsFirstChunkMs = (_vc.pipeline && _vc.pipeline.firstChunkMs) ? _vc.pipeline.firstChunkMs() : _vc.metrics.ttsFirstChunkMs;
+    // v130：把这一轮的有序汇流计数留下来 —— pipeline 马上就要置 null，
+    //   否则真机上读完一轮再查 __debug() 永远是 null，等于没有取证。
+    try {
+      if (_vc.pipeline && _vc.pipeline.spoolStats) _vc.metrics.lastSpool = _vc.pipeline.spoolStats();
+    } catch (e) {}
     _vc.metrics.lastTurn = {
       at: Date.now(),
       totalMs: total,
@@ -5158,7 +5355,11 @@
           gaps: _vc.player.gapLog,
           silenceTrimmedMs: _vc.player.silenceTrimmedMs,
           silenceCapMs: cfgNum('silenceCapMs', SILENCE_CAP_MS, 0, 1000),
-          scheduledMs: Math.round(_vc.player.scheduledMs || 0)
+          scheduledMs: Math.round(_vc.player.scheduledMs || 0),
+          // v130 取证：outOfOrder>0 说明这一轮真的出现过"后一句的音频先到"——
+          //   旧版会把它们插进前一句中间（听感=念得乱）；现在它们被按序补播。
+          spool: (_vc.pipeline && _vc.pipeline.spoolStats) ? _vc.pipeline.spoolStats()
+            : (_vc.metrics && _vc.metrics.lastSpool) || null
         } : null,
         lastBrain: _vc.lastBrain || null,
         leakRms: Math.round((_vc.leakRms || 0) * 10000) / 10000,
@@ -5265,6 +5466,15 @@
     buildBrainMessages: buildBrainMessages,
     historyMessages: historyMessages,
     appendCallMarker: appendCallMarker,
+    // v130：有序汇流（并发下载、串行播放）—— 纯逻辑，可在 node 里直接驱动
+    createSpool: createSpool,
+    // v130：整条流水线（并发 3 句 → 串行出声音 → 排空回调），ioTts/ioSink 可注入
+    createPipeline: createPipeline,
+    // v130：附件进通话上下文
+    voiceFileBlock: voiceFileBlock,
+    msgHasFiles: msgHasFiles,
+    FILE_CLIP_CHARS: FILE_CLIP_CHARS,
+    FILE_TOTAL_CHARS: FILE_TOTAL_CHARS,
     // 其它
     clamp: clamp,
     num: num,
