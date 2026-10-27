@@ -12,12 +12,30 @@
  *       产品可能选择"回 listening 再说一次"，那也是一种合理设计；
  *       真正不能接受的是：卡在 thinking/speaking、抛未捕获异常、提示是英文堆栈或空白。
  *
- * 退出码：全 PASS = 0，有 FAIL = 1，脚本自身崩了 = 2
+ * 退出码：全 PASS = 0，有 FAIL = 1，脚本自身崩了 = 2，未提供 key（这段没验证）= 2
  */
 'use strict';
 
 const path = require('path');
 const { spawn } = require('child_process');
+
+// 仓库里**不保存任何明文 key**（2026-10-27 清理）。缺 key 就说「没跑」，
+// 不要拿空 key 跑出一堆「缺少 API 密钥」的假失败 —— 那会让人以为功能坏了。
+(function requireKeys() {
+  const need = [
+    ['VOICE_MIMO_KEY', 'MiMo（识别 + 合成）'],
+    ['VOICE_DS_KEY', 'DeepSeek（通话大脑）']
+  ];
+  const miss = need.filter(function (x) { return !process.env[x[0]]; });
+  if (!miss.length) return;
+  console.log('=== 未执行：缺少 ' + miss.map(function (x) { return x[0]; }).join(' / ') + ' ===');
+  miss.forEach(function (x) { console.log('  ' + x[0] + '  → ' + x[1]); });
+  console.log('');
+  console.log('key 只能从环境变量来（仓库里不留明文）：');
+  console.log('  bash:       VOICE_MIMO_KEY=... VOICE_DS_KEY=... node tests/voice-edge.js');
+  console.log('  PowerShell: $env:VOICE_MIMO_KEY="..."; $env:VOICE_DS_KEY="..."; node tests/voice-edge.js');
+  process.exit(2);
+})();
 
 const ROOT = path.resolve(__dirname, '..');
 const PAGE_JS = path.join(__dirname, 'voice-edge-page.js');

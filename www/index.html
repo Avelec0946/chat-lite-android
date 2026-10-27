@@ -7,7 +7,7 @@
 <title>chat-lite</title>
 <link rel="stylesheet" href="vendor/highlight/github-dark.min.css?v=116">
 <link rel="stylesheet" href="vendor/katex/katex.min.css?v=116">
-<link rel="stylesheet" href="style.css?v=129">
+<link rel="stylesheet" href="style.css?v=130">
   <meta name="theme-color" content="#7c3aed">
   <link rel="manifest" href="manifest.json">
 </head>
@@ -653,7 +653,7 @@
           <button id="btn-add-voice-provider" class="btn btn-small" style="margin-top:8px">+ 添加语音接口</button>
           <div id="voice-provider-list" class="provider-list" style="margin-top:8px"></div>
 
-          <div id="voice-provider-editor" class="image-provider-editor" style="display:none">
+          <div id="voice-provider-editor" class="image-provider-editor voice-provider-editor" style="display:none">
             <label class="card-field"><span>名称</span>
               <input id="vp-name" class="card-input" type="text" placeholder="如：MiMo 官方">
             </label>
@@ -678,8 +678,14 @@
             <label class="card-field"><span>合成模型</span>
               <input id="vp-tts-model" class="card-input" type="text" placeholder="mimo-v2.5-tts">
             </label>
-            <div class="card-import-row">
-              <button id="btn-save-voice-provider" class="btn btn-small">保存</button>
+            <!-- v3.0.2：与「接口管理」同一套按钮顺序：先测试连接（当场验证密钥/模型），
+                 再保存/取消。以前语音接口没有测试入口，配错了只能打一通电话才发现 401。 -->
+            <div class="provider-editor-actions">
+              <button id="btn-test-voice-provider" class="btn btn-small">测试连接</button>
+              <span id="voice-provider-test-result" class="provider-test-result"></span>
+            </div>
+            <div class="provider-editor-actions">
+              <button id="btn-save-voice-provider" class="btn btn-small btn-primary">保存</button>
               <button id="btn-cancel-voice-provider" class="btn btn-small" style="background:var(--bg3);color:var(--text)">取消</button>
             </div>
           </div>
@@ -886,8 +892,8 @@
 <!-- v125: 语音通话 —— voice-director 是纯函数层（无 DOM/无网络），voice.js 是运行时 -->
 <!-- v127: voice-provider 管独立的语音接口（地址+密钥+模型），与「接口管理」的聊天渠道无关 -->
 <script src="voice-director.js?v=129"></script>
-<script src="voice-provider.js?v=127"></script>
+<script src="voice-provider.js?v=128"></script>
 <script src="voice-settings.js?v=130"></script>
-<script src="voice.js?v=136"></script>
+<script src="voice.js?v=137"></script>
 </body>
 </html>

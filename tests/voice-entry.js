@@ -201,6 +201,26 @@ async function main() {
     add('E10.3 图标照常显示', c.btnVisible === true, 'visible=' + c.btnVisible);
   }
 
+  // ---------------------------------------------------------------- E11 语音接口显示逻辑（v3.0.2）
+  //   用户要求：语音的 key 管理要和「接口管理」在直觉上一致。
+  {
+    const c = C.e11 || {};
+    add('E11.1 语音接口列表默认折叠（与「接口管理」一致，不再把"使用中"那条摊开）',
+        c.listFolded === true, 'folded=' + mk(c.listFolded));
+    add('E11.2 当前接口靠「使用中」徽标标识', c.hasBadge === true, 'badge=' + mk(c.hasBadge));
+    add('E11.3 列表项按钮不被名称挤成竖排（高度正常）',
+        typeof c.btnHeight === 'number' && c.btnHeight >= 28 && c.btnHeight <= 52, 'h=' + c.btnHeight);
+    add('E11.4 ★ 编辑器里有「测试连接」（配完能当场验证密钥/模型）',
+        c.hasTestBtn === true && c.hasTestResult === true,
+        'btn=' + mk(c.hasTestBtn) + ' result=' + mk(c.hasTestResult));
+    add('E11.5 保存按钮是主色按钮（与会话接口一致）', c.saveIsPrimary === true, 'primary=' + mk(c.saveIsPrimary));
+    add('E11.6 ★ 编辑器嵌在被点的那一项里（不是固定挂在列表下方）',
+        c.editorInGroup === true && c.groupOpen === true,
+        'inGroup=' + mk(c.editorInGroup) + ' open=' + mk(c.groupOpen));
+    add('E11.7 嵌进列表项时去掉独立圆角（由 details 的框承载）',
+        String(c.editorRadius || '') === '0px', 'radius=' + mk(c.editorRadius));
+  }
+
   // ---------------------------------------------------------------- 汇总
   const pass = R.filter(function (r) { return r.pass; }).length;
   const fail = R.length - pass;

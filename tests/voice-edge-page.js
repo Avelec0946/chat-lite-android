@@ -21,9 +21,11 @@ module.exports = async (ctx) => {
   // ★ 必须先把 key 放进页面：fixtures/voice-e2e-setup.js 读 window.__e2eKeys，
   //   漏了这一步，建出来的渠道 apiKey 是 undefined，后面所有场景都会变成「缺少 API 密钥」，
   //   看起来像产品 bug 其实是测试脚手架 bug（本套件第一版就这么错过一次）。
+  //   仓库里不保存明文 key：缺了就是空串，由 node 侧（voice-edge.js）先拦住并说明
+  //   「没配 key，这一段没验证」—— 不能让写死的 key 把"没验证"伪装成"通过"。
   await ev('window.__e2eKeys = ' + JSON.stringify({
-    mimo: process.env.VOICE_MIMO_KEY || 'sk-ct055gjomfb1sqdddezb1yt3xccvlxfs4q8uzb2lrmdny6xr',
-    ds: process.env.VOICE_DS_KEY || 'sk-46cc4725d23f4270a91499f1e9228d94'
+    mimo: process.env.VOICE_MIMO_KEY || '',
+    ds: process.env.VOICE_DS_KEY || ''
   }) + '; 1');
   await ev([
     'window.__e2eErrors = [];',

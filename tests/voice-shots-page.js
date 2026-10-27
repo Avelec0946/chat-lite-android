@@ -15,7 +15,11 @@ module.exports = async (ctx) => {
   const tag = W + 'x' + H;
   const out = { viewport: tag, shots: [], geo: {} };
 
-  await ev('window.__e2eKeys = { mimo: "sk-ct055gjomfb1sqdddezb1yt3xccvlxfs4q8uzb2lrmdny6xr", ds: "sk-46cc4725d23f4270a91499f1e9228d94" }; 1');
+  // 仓库里不保存明文 key（key 从环境变量来，缺了截图里就是"未配置"的样子）
+  await ev('window.__e2eKeys = ' + JSON.stringify({
+    mimo: process.env.VOICE_MIMO_KEY || '',
+    ds: process.env.VOICE_DS_KEY || ''
+  }) + '; 1');
   await ev(read('voice-e2e-setup.js'));
   await sleep(300);
 

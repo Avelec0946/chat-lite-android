@@ -383,7 +383,7 @@ body.dark .chat-bg::after{background:rgba(0,0,0,var(--bg-overlay,0.35))}
 .provider-group .provider-editor{border:none;border-top:1px solid var(--border);border-radius:0;margin-top:0}
 .provider-header{display:flex;justify-content:space-between;align-items:center;margin-bottom:4px}
 .provider-name{font-weight:600;font-size:14px}
-.provider-actions{display:flex;gap:6px}
+.provider-actions{display:flex;gap:6px;flex-shrink:0}
 .provider-detail{display:flex;flex-direction:column;gap:2px}
 .provider-url{font-size:12px;color:var(--text2);word-break:break-all}
 .provider-endpoint{font-size:12px;color:var(--text2);word-break:break-all;opacity:0.85}
@@ -612,6 +612,13 @@ body.image-view-open.sidebar-hidden .image-view{left:0}
 .image-provider-editor .card-field > .setting-hint,
 .image-provider-editor .setting-hint{margin:3px 0 0}
 .image-provider-editor .provider-editor-actions{margin-top:14px}
+/* v3.0.2：语音接口的编辑框跟「接口管理」的编辑框同色同圆角。
+   它复用了生图的 .image-provider-editor（bg3 + --radius），而会话那边是 .provider-editor（bg2 + 8px），
+   两块挤在同一个设置面板里，一深一浅，看着像两个软件。只覆盖这两项，字号/间距仍走生图那套（已验证过的排版）。 */
+.voice-provider-editor{background:var(--bg2);border-radius:8px}
+/* 语音编辑框被放进列表项里时（点某项的「编辑」），与会话接口那边完全同一处理：
+   去掉自己的边框和圆角，交给 details 的框承载，只在顶上留一条分隔线。 */
+.provider-group .voice-provider-editor{border:none;border-top:1px solid var(--border);border-radius:0;margin-top:0}
 .image-provider-test-result{font-size:12px;margin-top:6px;padding:6px 10px;border-radius:6px;background:var(--bg2);border:1px solid var(--border);color:var(--text2);min-height:16px}
 .image-provider-test-result.ok{color:var(--success);border-color:var(--success);background:var(--bg3)}
 .image-provider-test-result.err{color:var(--danger);border-color:var(--danger);background:var(--bg3)}

@@ -6,7 +6,7 @@
  *   可选环境变量：
  *     VOICE_E2E_URL   默认 http://127.0.0.1:8777/index.html
  *     VOICE_E2E_W/H   视口，默认 390x844
- *     VOICE_MIMO_KEY / VOICE_DS_KEY  覆盖内置测试 key
+ *     VOICE_MIMO_KEY / VOICE_DS_KEY  必填（仓库里不保存明文 key）
  *
  * 设计原则（独立验证，不照抄既有结论）：
  *   · 断言只看「可观测的运行结果 + 真实 DOM」，不看内部变量「应该是」什么
@@ -15,12 +15,31 @@
  *   · 注入用 Int16Array：__injectUtterance 的形参是 pcmInt16，
  *     而 concatInt16 对 Uint8Array 会退化成 Int16Array(总字节数)。见报告「可疑项」。
  *
- * 退出码：全 PASS = 0，有 FAIL = 1，脚本自身崩了 = 2
+ * 退出码：全 PASS = 0，有 FAIL = 1，脚本自身崩了 = 2，
+ *         未提供 key（这段没验证）= 2
  */
 'use strict';
 
 const path = require('path');
 const { spawn } = require('child_process');
+
+// 仓库里**不保存任何明文 key**（2026-10-27 清理：曾经写死过两把，已随历史泄露、已作废）。
+// 缺 key 就直接说「没跑」，不要拿空 key 去跑出一堆「缺少 API 密钥」的假失败。
+(function requireKeys() {
+  const need = [
+    ['VOICE_MIMO_KEY', 'MiMo（识别 + 合成）'],
+    ['VOICE_DS_KEY', 'DeepSeek（通话大脑）']
+  ];
+  const miss = need.filter(function (x) { return !process.env[x[0]]; });
+  if (!miss.length) return;
+  console.log('=== 未执行：缺少 ' + miss.map(function (x) { return x[0]; }).join(' / ') + ' ===');
+  miss.forEach(function (x) { console.log('  ' + x[0] + '  → ' + x[1]); });
+  console.log('');
+  console.log('这两套件要打真实接口，key 只能从环境变量来（仓库里不留明文）：');
+  console.log('  bash:       VOICE_MIMO_KEY=... VOICE_DS_KEY=... node tests/e2e-voice.js');
+  console.log('  PowerShell: $env:VOICE_MIMO_KEY="..."; $env:VOICE_DS_KEY="..."; node tests/e2e-voice.js');
+  process.exit(2);
+})();
 
 const ROOT = path.resolve(__dirname, '..');
 

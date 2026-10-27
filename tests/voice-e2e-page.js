@@ -18,8 +18,10 @@ module.exports = async (ctx) => {
 
   // 0) 页面侧异常收集 + 注入 key（不落盘，只在内存里）
   await ev('window.__e2eErrors = []; window.__e2eKeys = ' + JSON.stringify({
-    mimo: process.env.VOICE_MIMO_KEY || 'sk-ct055gjomfb1sqdddezb1yt3xccvlxfs4q8uzb2lrmdny6xr',
-    ds: process.env.VOICE_DS_KEY || 'sk-46cc4725d23f4270a91499f1e9228d94'
+    // 仓库里不保存任何明文 key：缺了就是空串，由 node 侧（voice-e2e.js）先拦住
+    // 并明确说「这段没验证」，而不是拿一把写死的 key 跑出一个"通过"。
+    mimo: process.env.VOICE_MIMO_KEY || '',
+    ds: process.env.VOICE_DS_KEY || ''
   }) + '; 1');
   await ev("window.addEventListener('error', function(e){ window.__e2eErrors.push('error: ' + (e.message || '')); }); " +
            "window.addEventListener('unhandledrejection', function(e){ window.__e2eErrors.push('rejection: ' + (e.reason && (e.reason.message || e.reason))); }); 1");

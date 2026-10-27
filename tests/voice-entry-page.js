@@ -247,5 +247,37 @@ module.exports = async (ctx) => {
   await shot('tools/out/v300-settings-voice.png');
   out.shotTops = jp(await ev('JSON.stringify({img:(function(){var d=document.querySelector("[data-group-key=image-provider]");return d?Math.round(d.getBoundingClientRect().top):-1;})(),voice:(function(){var d=document.querySelector("[data-group-key=voice]");return d?Math.round(d.getBoundingClientRect().top):-1;})()})'));
 
+  // ---------------------------------------------------------------- E11 语音接口的显示逻辑（v3.0.2）
+  //   用户要求：语音的 key 管理要和「接口管理」在直觉上一致。
+  //   这里钉住三条最容易跑偏的：列表默认折叠 / 编辑器嵌在被点的那一项里 / 有「测试连接」。
+  out.cases.e11 = jp(await ev([
+    '(function(){',
+    '  var res = {};',
+    '  settings.voice.voiceProviders = [{ id:"e11", name:"E11 语音接口",',
+    '    baseUrl:"https://api.xiaomimimo.com", endpointPath:"/v1/chat/completions",',
+    '    apiKey:"sk-e11-placeholder", asrModel:"mimo-v2.5-asr", ttsModel:"mimo-v2.5-tts",',
+    '    authType:"bearer", authHeader:"Authorization", authPrefix:"Bearer ", extraHeaders:{}, extraQuery:{}, models:[] }];',
+    '  settings.voice.voiceProviderId = "e11";',
+    '  VoiceProvider.renderList();',
+    '  var item = document.querySelector("#voice-provider-list .provider-group");',
+    '  res.listFolded = item ? !item.open : null;',
+    '  res.hasBadge = item ? !!item.querySelector(".provider-badge-on") : null;',
+    '  var btn = item ? item.querySelector(".provider-actions .btn") : null;',
+    '  res.btnHeight = btn ? Math.round(btn.getBoundingClientRect().height) : null;',
+    '  res.hasTestBtn = !!document.getElementById("btn-test-voice-provider");',
+    '  res.hasTestResult = !!document.getElementById("voice-provider-test-result");',
+    '  res.saveIsPrimary = !!document.querySelector("#btn-save-voice-provider.btn-primary");',
+    '  VoiceProvider.openEditor(0);',
+    '  var ed = document.getElementById("voice-provider-editor");',
+    '  res.editorInGroup = !!(ed && ed.parentNode && String(ed.parentNode.className || "").indexOf("provider-group") >= 0);',
+    '  res.editorVisible = ed ? getComputedStyle(ed).display !== "none" : null;',
+    '  var cs = ed ? getComputedStyle(ed) : null;',
+    '  res.editorRadius = cs ? cs.borderRadius : null;',
+    '  res.groupOpen = item ? item.open : null;',
+    '  VoiceProvider.closeEditor();',
+    '  return JSON.stringify(res);',
+    '})()'
+  ].join('\n')));
+
   console.log('__ENTRY_JSON__' + JSON.stringify(out));
 };

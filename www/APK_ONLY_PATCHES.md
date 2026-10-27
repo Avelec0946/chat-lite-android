@@ -1413,3 +1413,70 @@ v130/v131 之后，句间空白是唯一还影响听感的东西，但原来只�
 
 APK：`chat-lite-3.0-debug.apk`（4,805,602 字节），包内 51 个 web 资源与工作区 SHA1 逐一比对一致，
 已装机（`com.avelec.chatlite`，MainActivity 启动正常）。
+
+## 36. v3.0.2 语音接口管理靠拢「接口管理」+ 清掉仓库里的明文 key（cache-bust 见下）
+
+> 用户两条要求：① 已把泄露的 key 作废，收尾清理；② **语音通话的 key 管理要和「接口管理」在直觉上一致**。
+
+### 一、先说清了：软件里从来没有 key
+
+- `www/`、`android/app/src/`、解包后的 APK（含 `classes.dex`）搜 `sk-`：**0 处**；
+- 应用代码历史里也没出现过（`git log -S` 查 `www/` `android/` 为空）；
+- key 一直是用户在设置里填、存 IndexedDB。
+
+**泄露的是仓库里的测试脚本**：`tests/voice-e2e-page.js`、`voice-edge-page.js`、`voice-shots-page.js`
+把 MiMo / DeepSeek 两把 key 写成 `process.env.X || 'sk-…'` 的兜底默认值，从 v125（`cc5f290`）起就在
+`main` / `maintenance` / `feature/voice-call` 三条远程分支上。
+
+处理：三处全部改成只读环境变量；`voice-edge.js` / `e2e-voice.js` 开头加硬前置 ——
+缺 key 就打印「=== 未执行：缺少 VOICE_MIMO_KEY / VOICE_DS_KEY ===」并 `exit 2`。
+**不给"空 key → 一堆 401 失败"的假红灯，也不给"跳过 → 全绿"的假安心。**
+
+### 二、五处「不像同一个软件」的地方（都有截图对照）
+
+| 项 | 改前 | 改后 |
+|---|---|---|
+| 列表项按钮 | 名称一长，`编辑/删除` 被挤成竖排（会话接口的 `[OPENAI] DeepSeek 官方` 就是这样） | `.provider-actions{flex-shrink:0}`：名称换行、按钮始终 48×44 横排 |
+| 列表展开 | 语音把"使用中"那条默认摊开，会话全部折叠 | 语音也默认折叠，当前项只靠「使用中」徽标 + 边框区分 |
+| 编辑框位置 | 语音固定挂在列表下方，接口一多要往下找 | 点哪一项的「编辑」，框就嵌进哪一项（与 `providers.js` 同一套：重建列表前先把编辑框挪出容器） |
+| 编辑框外观 | 语音复用生图的 `.image-provider-editor`（bg3 + 圆角），会话是 bg2 + 嵌进 details 后无圆角 | 新增 `.voice-provider-editor` + `.provider-group .voice-provider-editor`，两态都对齐 |
+| 保存按钮 | 语音是普通按钮，会话是主色 | 统一 `btn-primary` |
+
+### 三、补上「测试连接」（这才是 key 管理的要害）
+
+会话接口配完能立刻「测试连接」，语音接口以前没有 —— **配错了只能打一通电话才发现 401**。
+现在编辑器里有同一个位置的「测试连接」，走 `VoiceCall.__testChain()`：
+识别 → 合成 → 往返（TTS 合成后回灌 ASR）三级，比会话的 `/models` 探测深一档，
+因为"密钥对、模型名写错"只有往返能发现。
+
+两处细节是刻意的：
+
+1. **测试读的是已保存的配置**（`voiceCfg`），不是编辑框草稿。所以改了 key 没保存就点测试，
+   会提示「请先保存，再测试（测试用的是已保存的配置）」—— 否则"改完→测通过→保存"会让人以为新 key 验证过了。
+2. **失败时保留具体原因**，不吞成一句"链路不可用"：
+   `链路不可用　·　识别服务：不可达（mimo-v2.5-asr）—— HTTP 401：Invalid API Key`
+   （`__testChain` 的结论行是给通话界面写的，带"按上面提示"，在单行结果区里不成立，所以自己拼。）
+
+### 四、cache-bust
+
+`style.css` 129 → **130**、`voice-provider.js` 127 → **128**、`voice.js` 136 → **137**（仅 VERSION → `v3.0.2`）。
+`db.js` 130 / `chat.js` 131 / `voice-settings.js` 130 不动。
+
+### 五、验证
+
+| 项 | 结果 |
+|---|---|
+| `voice-runtime` / `voice-director` / `voice-order` / `import` | 284 / 480 / 66 / 24 全过 |
+| `voice-entry` | **51 / 51**（新增 E11.1~E11.7：折叠 / 徽标 / 按钮高度 / 有测试连接 / 主色保存 / 嵌进列表项 / 圆角归零） |
+| 390×844 截图对照 | 列表：两侧按钮均 48×44、高 65/64；编辑框：两侧 `bg=rgb(30,30,30)`、`radius=0px`、都有测试按钮 |
+| 「测试连接」真实点击 | 假 key → `链路不可用 · 识别服务：不可达 —— HTTP 401：Invalid API Key`，按钮恢复可点 |
+| `voice-edge` / `e2e-voice` | **本次未跑**：缺 `VOICE_MIMO_KEY` / `VOICE_DS_KEY`（旧 key 已作废），脚本按设计 `exit 2` |
+
+### 六、产物
+
+`chat-lite-3.0-maintenance-debug.apk`（4,671,441 字节 / appId **`com.avelec.chatlite.maintenance`** /
+versionName `3.0-maintenance`），包内 51 个 web 资源 SHA1 与工作区逐一一致，已 `adb install -r` 装机。
+
+> 维护分支的 appId 带 `.maintenance` 后缀、与主包共存（build.gradle 按分支算），
+> 所以这一版只更新了**维护包**；主包 `com.avelec.chatlite` 仍是 v3.0.1。
+> 这符合当前流程：改动先进维护分支，主包等验收后再合。
