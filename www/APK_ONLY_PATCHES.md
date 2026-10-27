@@ -1334,3 +1334,82 @@ JS 侧表现为「通话一直卡在连接中」，而日志里 `onPermissionReq
 
 `CallKeepService.java` / `CallKeepAlivePlugin.java` / Manifest / MainActivity 属原生，**不推主仓库**。
 `voice.js` 里 `Capacitor.Plugins.CallKeepAlive` 与 `navigator.wakeLock` 两段**必须原样保留**（浏览器端没有插件时自动降级）。
+
+## 35. v3.0.1 收尾：实况校准 + 两处资源泄漏 + 逐句取证（cache-bust voice.js 135→136）
+
+> 结项版本。用户决定：语音模块**整体不推主仓库**（见 `SYNC-MANIFEST.md` §二.1）、其余均通过。
+
+### 一、为什么要先"校准"再改
+
+v3.0 把语音改成默认关之后，**测试前提没跟上**：`open()` 被总开关拦住 →
+`voice-edge` 里 start/打断/互斥/注入一整批场景全都变成"没接通"，一口气 18 条红灯，
+看起来像大面积功能回归。实际是：
+
+| 现象 | 真因 |
+|---|---|
+| `voice-edge` 17 条 FAIL | 场景前提错位：套件测的是通话行为，前提却是"用户已打开"，而 v3.0 默认是关 |
+| `voice-edge` B9.4 FAIL | **测试自己漏投影字段**：断言读 `enabledSetByUser`，页面侧从没把这个字段取出来 |
+| `e2e-voice` 10 条 FAIL | 同上，被默认关拦住 |
+| `voice-edge` B5.1~B5.4 / e2e 整轮 | 测试用的 DeepSeek key 返回 **401**，被打断场景和整轮链路都跑不到 |
+
+修法全在测试侧（不动产品行为）：fixture 显式 `enabled=true` + `enabledSetByUser=true`；
+B1 场景先落一次完整配置再清空渠道；补投影 `enabledSetByUser`；B9.5 改为"三种合法结局"；
+entry 的版本号断言放宽到 `/^v3\.0(\.\d+)?$/`。
+另外两套件都加了**环境阻塞判定**：只有明确的 401/鉴权失败才把连带失败标 `SKIP`，
+汇总行写清「SKIP（大脑凭证 401，整轮未验证）」—— 不是把测试改绿，是让红绿灯说实话。
+
+### 二、AudioContext 从不释放（v128 就记下的 P1）
+
+现象：`open()` 建一次 ctx 就一直挂到页面刷新。只用一次语音界面，也常驻一条音频流（待机耗电）。
+
+改法：新增 `releaseAudioCtx()`，在 **`close()`（退出语音界面）** 时
+`player.hardStop()` → `_vc.player=null` → 拉掉预热闸门 → `_vc.fillerBuffers=[]` → `ctx.close()`；
+`ensureAudioCtx()` 遇到 `state==='closed'` 的旧 ctx 自动重建（否则"关过一次就再也放不出声"）。
+
+**只在 close 释放、不在 hangup 释放**：挂断后往往马上再打一通，重建 ctx 要重走音频链路。
+
+真机实测（小米 f5303ddd）：`null → running → null → running → null`。
+
+### 三、语气词预热请求无法中止（P1）
+
+`prewarmFillers` 原来用 `gate:null` —— 挂断后 3 条 TTS 还在跑，最长占满 30s，还在解码 PCM、生成 AudioBuffer。
+
+改法：每条预热配真闸门收进 `_vc.fillerGates`，`abortFillerWarm()` 在**挂断与退出界面**都拉闸。
+`ssePost` 的 `cleanup` 会走 `CapStreamHttp.cancelStream` / `ctrl.abort()`，是真的停网络读，不是只丢结果。
+
+### 四、句间饿死：从"只有总时长"变成"能落到哪一句"
+
+v130/v131 之后，句间空白是唯一还影响听感的东西，但原来只有 `starve.maxMs`，看不出是哪句。
+现在每轮留一张表（`__debug().playback.sentences`）：
+
+```
+[{ seq, chars, firstChunkMs, ttsDoneMs, flushedMs, leadMs, failed }]
+```
+
+- `firstChunkMs` 大 → 首包慢；`ttsDoneMs` 远大于它 → 整句合成慢；
+- `flushedMs` 大而 `leadMs ≤ 0` → 交出去时播放队列已空，那段空白就是这句造成的；
+- `leadMs` 只在真实播放器存在时记录，node 注入 sink 时为 `null`（**不编数据**）。
+
+### 五、诊断不说谎
+
+`__injectUtterance` 上写明"绕过 VAD、测不到阈值/端点/计时"，并让这一通电话在
+`__debug().injected` 里标 `true` —— 免得事后把自动化结论当成真机结论。
+
+### 六、cache-bust
+
+`voice.js` **135 → 136**；`VERSION` `v3.0 → v3.0.1`。其余模块不动（`db.js` 保持 130 / `chat.js` 131）。
+
+### 七、验证
+
+| 套件 | 结果 |
+|---|---|
+| `voice-runtime` | 284 / 284 |
+| `voice-director` | 480 / 480 |
+| `voice-order` | 66 / 66（新增逐句明细 9 条，连跑 3 次稳定） |
+| `import` | 24 / 24 |
+| `voice-entry` | 44 / 44 |
+| `voice-edge` | 49 PASS / 0 FAIL / 1 SKIP（打断场景等可用 key） |
+| `e2e-voice` | 29 PASS / 0 FAIL / 10 SKIP（同上） |
+
+APK：`chat-lite-3.0-debug.apk`（4,805,602 字节），包内 51 个 web 资源与工作区 SHA1 逐一比对一致，
+已装机（`com.avelec.chatlite`，MainActivity 启动正常）。

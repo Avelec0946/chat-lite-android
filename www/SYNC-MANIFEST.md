@@ -11,6 +11,13 @@
 
 ## 一、共享文件（sync.ps1 会同步的部分）
 
+> ⚠ **v3.0.1（2026-10-27）起：语音通话是 APK 专有功能，主仓库不包含、也不同步。**
+> 但下面这些「共享文件」**已经含语音相关代码**（v125 起），整体同步会把语音代码带到 Web 版，
+> 而 Web 版没有 `voice*.js` → 顶栏出现点不开的话筒、控制台报错。
+> **同步这些文件时必须按 §二.1 的清单人工剔除语音段落**，不能无脑覆盖。
+> 语音相关行数（实测）：`index.html` 84 / `style.css` 277 / `db.js` 20 / `image-gen.js` 7 / `app.js` 2 / `io.js` 1。
+> `chat.js` 是唯一"干净"的（`buildContext(conv, opts)` 的 `statusBar` 选项是通用改进，可整体同步）。
+
 | 文件 | 说明 |
 |---|---|
 | `app.js` | 入口（state/init/事件绑定/通用工具） |
@@ -42,6 +49,24 @@
 | 生图的 Filesystem 图片存储 | `writeImageFile` / `readImageFile` 等 |
 | 导入导出 OOM 修复（`encoding:'utf8'`） | Filesystem 原生写文本 |
 | 后台任务通知 / WakeLock 逻辑 | Capacitor App 生命周期 |
+
+### 二.1 语音通话模块（整体 APK 专有，**不推主仓库**）
+
+| 项 | 说明 |
+|---|---|
+| `voice.js` / `voice-director.js` / `voice-provider.js` / `voice-settings.js` | 四个文件都**不进主仓库**（主仓库现在没有，保持没有） |
+| 原生 `CallKeepService` / `CallKeepAlivePlugin` / `AudioRoutePlugin` | 前台服务 + 唤醒锁 + Wi-Fi 锁 + 音频路由，Web 版没有对应物 |
+| `index.html` 里的 `#voice-view` 整块 DOM / 顶栏话筒按钮 / 4 个 `<script>` 引用 | 同步时要整块剔除 |
+| `index.html` 设置面板的「语音通话」分组（含 Beta 徽标 / 总开关 / 微调面板） | 同上 |
+| `style.css` 的 `.voice-*` 规则（约 277 行） | 剔除后其余样式可同步 |
+| `db.js` 的 `defaultVoiceSettings` / `migrateVoiceSettings` / 语音字段收敛（约 20 行） | 剔除；其余存储逻辑可同步 |
+| `image-gen.js` 的 `state.voiceOpen` 互斥判断（约 7 行） | 剔除 |
+| `app.js` 的语音入口绑定（2 行）/ `io.js` 的 voice 字段处理（1 行） | 剔除 |
+| `www/APK_ONLY_PATCHES.md` §32~§36 | 语音模块的完整改动史（APK 专有，主仓库不需要） |
+
+> 判据：主仓库没有 `voice.js` 时，`window.VoiceCall` 为 undefined。
+> 上面所有剔除点都必须能在「VoiceCall 不存在」时安全降级 —— 代码里已按这个原则写（`typeof` 判断 + try/catch），
+> 但**同步后仍需实际打开一次页面确认无报错**。
 
 ## 三、主仓库特有（sync 不覆盖，需手工维护）
 

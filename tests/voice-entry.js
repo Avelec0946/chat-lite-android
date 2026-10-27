@@ -91,7 +91,8 @@ async function main() {
     add('E0.2 ★ 默认 enabled=false（v3.0 起 Beta 功能不默认开）', c.enabled === false, 'enabled=' + mk(c.enabled));
     add('E0.3 默认 enabledSetByUser=false（用户还没表过态）', c.enabledSetByUser === false,
         'setByUser=' + mk(c.enabledSetByUser));
-    add('E0.4 版本号已升到 v3.0', c.version === 'v3.0', 'version=' + mk(c.version));
+    // 只钉大版本线：3.0.x 都属于「v3.0 这条线」，小修改（3.0.1）不该让测试红
+    add('E0.4 版本号已升到 v3.0 线', /^v3\.0(\.\d+)?$/.test(String(c.version)), 'version=' + mk(c.version));
     add('E0.5 voice-settings.js 走新 cache-bust 130', /voice-settings\.js\?v=130/.test(String(c.cacheBust)),
         'src=' + mk(c.cacheBust));
   }

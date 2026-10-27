@@ -64,6 +64,9 @@ module.exports = async (ctx) => {
     '    asrModel: settings.voice.asrModel, ttsModel: settings.voice.ttsModel,',
     '    voiceId: settings.voice.voiceId, personaId: settings.voice.personaId,',
     '    enabled: settings.voice.enabled, sensitivity: settings.voice.sensitivity,',
+    // v3.0：B9.4 断言了 enabledSetByUser === false，但这里一直没投影这个字段
+    //   → 拿到 undefined，那条断言必然失败（测试自身缺字段，不是迁移没写）。
+    '    enabledSetByUser: settings.voice.enabledSetByUser,',
     '    endpointSilenceMs: settings.voice.endpointSilenceMs, minUtteranceMs: settings.voice.minUtteranceMs,',
     '    showTranscript: settings.voice.showTranscript, showSignals: settings.voice.showSignals,',
     '    autoHangupSilenceMs: settings.voice.autoHangupSilenceMs, ttsFormat: settings.voice.ttsFormat,',
@@ -86,8 +89,13 @@ module.exports = async (ctx) => {
     // v126：失败时要能读到原因，否则断言只能看 true/false，无法区分"没配密钥"与"真坏了"
     '    var txt = "";',
     '    try { var el = document.getElementById("voice-state-text"); txt = el ? String(el.textContent || "") : ""; } catch (e) {}',
+    // v3.0：迁移后 enabled=false，start() 会被总开关拦住（只弹 toast、不改状态文案），
+    //   所以"理由"可能在 toast 里而不在 state-text 里，一并收上来。
+    '    var tst = [];',
+    '    try { var tn = document.querySelectorAll(".toast, #toast-container > *, .toast-msg");',
+    '      for (var i=0;i<tn.length;i++) { var s = String(tn[i].textContent || "").trim(); if (s) tst.push(s); } } catch (e2) {}',
     '    window.VoiceCall.hangup(); window.VoiceCall.close();',
-    '    return JSON.stringify({ start: ok, state: st, text: txt });',
+    '    return JSON.stringify({ start: ok, state: st, text: txt, toasts: tst });',
     '  } catch (e) { return JSON.stringify({ threw: String(e && e.message) }); }',
     '})()'
   ].join('\n')));

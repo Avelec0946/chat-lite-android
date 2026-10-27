@@ -115,6 +115,11 @@ module.exports = async (ctx) => {
 
   // ---------------------------------------------------------------- B1 没配任何渠道
   out.cases.b1 = await (async () => {
+    // v3.0：语音默认关。B1 是第一个场景，此前还没跑过公共 setup，
+    //   页面里 voice.enabled 就是默认的 false → open() 直接以「已在设置里关闭」拦住，
+    //   于是 B1 测到的是"开关拦住了"，不是"没配渠道时的快速失败"。
+    //   先落一次完整配置（含 enabled=true），再按 B1 的语义清空渠道。
+    await ev(read('voice-e2e-setup.js'));
     await ev('window.__h.reset()');
     await ev([
       'window.__savedProviders = (state.providers||[]).slice();',
@@ -262,7 +267,10 @@ module.exports = async (ctx) => {
       '  window.VoiceCall.__injectUtterance(window.__e2ePcm);',
       '  var w1 = await window.__h.waitStates(25000, ["speaking","error"]);',
       '  if (window.VoiceCall.getState() !== "speaking") {',
-      '    return JSON.stringify({ neverSpoke: true, states: w1.seen, state: window.VoiceCall.getState() });',
+      // 失败时要能看出是哪一步断的（识别/大脑/合成），否则只看到 thinking→error
+      '    return JSON.stringify({ neverSpoke: true, states: w1.seen, state: window.VoiceCall.getState(),',
+      '      stateText: window.__h.text("voice-state-text"), toasts: window.__h.toasts(),',
+      '      dbg: (function(){ try { var d = window.VoiceCall.__debug(); return { lastBrain: d.lastBrain, err: d.lastError }; } catch(e) { return null; } })() });',
       '  }',
       '  await new Promise(function(r){ setTimeout(r, 250); });',
       '  var t0 = Date.now();',

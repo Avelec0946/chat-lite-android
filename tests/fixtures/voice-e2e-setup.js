@@ -37,6 +37,13 @@
   v.minUtteranceMs = 400;
   v.endpointSilenceMs = 700;
   v.autoHangup = false;          // 挂机测试不能被自动挂断打断
+  // v3.0：语音通话改默认关（Beta，需手动打开）。老 fixture 没设这两个键，
+  //   open() 会直接以「已在设置里关闭」拦住 —— 于是 edge/e2e 里所有场景（start/打断/
+  //   互斥/注入）全都变成"没接通"，看起来像 18 条功能回归，其实只是前提没对齐。
+  //   这两套件测的是**通话行为**，前提是"用户已经在设置里打开过"，所以显式打开。
+  //   enabledSetByUser=true 是必须的：迁移里「没表过态就强制关」，缺了它下次启动又会被关掉。
+  v.enabled = true;
+  v.enabledSetByUser = true;
   return JSON.stringify({ providers: (state.providers || []).map(function (p) { return p.id; }),
     voiceProviders: v.voiceProviders.length });
 })()

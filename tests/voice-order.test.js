@@ -437,7 +437,32 @@ function runPipelineCase(specs, opts) {
   ok('失败也不会打乱顺序（A 在 B/C 之前）', s2.indexOf('A1') === 0, s2);
   ok('第三句依然播出来了（没被失败句卡住）', s2.indexOf('C1') > 0, s2);
   ok('失败场景也能排空回调', r2.idleAt > 0 && r2.idleAt < 1500, r2.idleAt + 'ms');
+  ok('失败那句在逐句明细里标了 failed', r2.pl.sentenceStats()[1].failed === 1,
+    JSON.stringify(r2.pl.sentenceStats()));
   r2.pl.stop();
+
+  console.log('\n[10] v3.1 逐句取证：首包 / 合成完成 / 轮到播（定位"句间饿死"）');
+  var r3 = await runPipelineCase([
+    { text: '第一句。', chunks: [{ at: 30, tag: 'A1' }], resolveAt: 130 },
+    { text: '第二句。', chunks: [{ at: 20, tag: 'B1' }], resolveAt: 60 },
+    { text: '第三句。', chunks: [{ at: 25, tag: 'C1' }], resolveAt: 55 }
+  ], { finishAt: 300 });
+  var ss = r3.pl.sentenceStats();
+  ok('三句各一条明细', ss.length === 3, JSON.stringify(ss));
+  ok('seq 等于播放顺序', ss.map(function (x) { return x.seq; }).join(',') === '0,1,2',
+    JSON.stringify(ss.map(function (x) { return x.seq; })));
+  ok('每句都记了 TTS 首包耗时', ss.every(function (x) { return x.firstChunkMs > 0; }), JSON.stringify(ss));
+  ok('每句都记了合成完成时刻', ss.every(function (x) { return x.ttsDoneMs > 0; }), JSON.stringify(ss));
+  ok('每句都真的轮到播了（flushedMs>0）', ss.every(function (x) { return x.flushedMs > 0; }), JSON.stringify(ss));
+  // leadMs 要有真实播放器才有意义（node 里 ioSink 是注入的，没有 AudioContext）。
+  //   这里只钉"字段存在且没伪造数据"：没有播放器时必须是 null，不能编一个 0 出来。
+  ok('有 leadMs 这个字段，且无播放器时为 null（不谎报）',
+    ss.every(function (x) { return Object.prototype.hasOwnProperty.call(x, 'leadMs') && x.leadMs === null; }),
+    JSON.stringify(ss.map(function (x) { return x.leadMs; })));
+  // 注意：这里**不**断言"第 3 句比第 2 句先合成完"—— 它们的 resolveAt 只差 5ms，
+  //   定时器抖动就会翻，属于脆弱断言。并发预取本身已在 [8] 用 peak===3 钉住了。
+  ok('字符数如实记录', ss[0].chars === 4, String(ss[0].chars));
+  r3.pl.stop();
 
   console.log('\n' + (failures === 0 ? '全部通过' : '存在失败') + '：' + passes + '/' + (passes + failures));
   process.exit(failures === 0 ? 0 : 1);

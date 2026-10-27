@@ -31,7 +31,7 @@
   // 1. 常量与配置
   // =====================================================================================
 
-  var VERSION = 'v3.0';
+  var VERSION = 'v3.0.1';
 
   // 采集 / 播放
   var CAPTURE_RATE = 16000;   // ASR 只接受 16k 单声道 16bit wav（已实测）
@@ -1267,7 +1267,6 @@
 
     // 播放
     player: null,
-    speaking: false,
     speakStartAt: 0,
     ttsChain: [],            // 待合成的句子（流水线）
     ttsActive: 0,
@@ -1280,10 +1279,15 @@
 
     // 请求
     gate: null,              // 当前轮次的"放弃闸门"
+    injected: false,         // v3.1：这一通电话是否用过 __injectUtterance（诊断用）
 
     // 语气词预热
     fillerBuffers: [],
     fillerWarmToken: 0,
+    // v3.1：预热那三条 TTS 请求的闸门。以前 gate:null —— 挂断后请求还在跑，
+    //   三条流最长能占 30 秒，AudioBuffer 也一直挂在内存里（P1 遗留）。
+    //   现在挂断/关界面时统一拉闸。
+    fillerGates: [],
 
     // 指标
     metrics: { asrMs: 0, brainFirstTokenMs: 0, ttsFirstChunkMs: 0, turnTotalMs: 0, turns: 0, lastTurn: null },
@@ -2330,6 +2334,9 @@
   }
 
   function ensureAudioCtx() {
+    // v3.1：close() 之后残留的 ctx 是 closed 状态，拿它建 buffer 会抛 InvalidStateError。
+    //   这里顺手挡一道，避免"关过一次界面就再也放不出声"。
+    if (_vc.audioCtx && _vc.audioCtx.state === 'closed') _vc.audioCtx = null;
     if (_vc.audioCtx) return _vc.audioCtx;
     try {
       var Ctor = root.AudioContext || root.webkitAudioContext;
@@ -2339,6 +2346,31 @@
       throw makeErr('无法创建音频上下文：' + (e && e.message || e), 'voice_noaudio');
     }
     return _vc.audioCtx;
+  }
+
+  // v3.1（P1 遗留）：把播放用的 AudioContext 真正关掉。
+  //   以前 open() 建一次就常驻到页面刷新 —— 只用一次语音界面也会一直挂着一条音频流
+  //   （WebView 里就是待机耗电），而且下次进来复用的还是同一个。
+  //   只在 close()（退出语音界面）时释放；单纯挂断不释放，因为用户往往马上再打一通，
+  //   重建 ctx 要重走一遍音频链路。
+  function releaseAudioCtx() {
+    try { stopAudibleKeepAlive(); } catch (e) {}
+    var p = _vc.player;
+    _vc.player = null;
+    if (p) { try { p.hardStop(); } catch (e) {} }
+    // 预热的 TTS 和它们的 AudioBuffer 都属于这个 ctx，一起收掉
+    abortFillerWarm();
+    var ctx = _vc.audioCtx;
+    _vc.audioCtx = null;
+    _vc.fillerBuffers = [];      // 旧 ctx 的 AudioBuffer，留着下次 append 会抛
+    if (!ctx) return;
+    try {
+      if (ctx.state !== 'closed' && typeof ctx.close === 'function') {
+        var r = ctx.close();
+        if (r && typeof r.catch === 'function') r.catch(function () {});
+      }
+    } catch (e) {}
+    pushEvent('audio ctx released');
   }
 
   function createPlayer() {
@@ -4199,7 +4231,7 @@
         // 这句到齐了（哪怕一个字节都没收到，比如 TTS 报错）→ 吐出尾巴，轮到下一句
         delete done[head];
         delete bufs[head];
-        flush();
+        flush(head);     // v3.1：带上序号，调用方才能记"这一句什么时候轮到播"
         head++;
       }
     }
@@ -4258,7 +4290,12 @@
       stallTimer: null,
       onIdle: null,
       firstChunkMs: 0,
-      spool: null
+      spool: null,
+      // v3.1：逐句取证。v130/v131 之后"句间饿死"是唯一还影响听感的东西，
+      //   但原来只有全局 starve.maxMs，看不出是哪一句、卡在首包还是卡在合成完。
+      //   每条记：字符数 / 首包耗时 / 合成完成时刻 / 真正开始播的时刻 / 是否失败。
+      sentences: [],
+      sentBySeq: {}
     };
 
     // 播放器是唯一出口：所有句子都从这里出去，且必须按序
@@ -4268,13 +4305,33 @@
       _vc.player.appendPcm24(bytes);
       if (_vc.state !== 'speaking') enterSpeaking();
     };
-    var sinkFlush = (ioSink && typeof ioSink.flush === 'function') ? ioSink.flush : function () {
+    var sinkFlush = (ioSink && typeof ioSink.flush === 'function') ? ioSink.flush : function (seq) {
       // 一句的边界：把 WSOLA 里滞留的尾巴吐出来，保持句尾完整。
       //   v130 之前这行挂在"TTS 请求结束"上 —— 并发时它会在别的句子正在流的时候
       //   重置伸缩器状态，那句的首尾就被削掉一截。
       try { if (_vc.player) _vc.player.flushStretch(); } catch (e) {}
     };
-    q.spool = createSpool({ append: sinkAppend, flush: sinkFlush });
+    // v3.1：在 pipeline 内部记"轮到这一句播"的时刻 —— 不依赖注入的 sink 去理会 seq，
+    //   否则测试注入 ioSink.flush 时这张明细就只有首包、没有播放时刻。
+    q.spool = createSpool({
+      append: sinkAppend,
+      flush: function (seq) {
+        var rec = (seq === undefined || seq === null) ? null : q.sentBySeq[seq];
+        if (rec) {
+          if (!rec.flushedMs) rec.flushedMs = Math.round(nowMs() - rec.t0);
+          // 排期余量：这一句交给播放器的瞬间，队列里还压着多少毫秒没播。
+          //   ≤0 就是"前面已经播空、这句才补上来" —— 用户听到的那段空白，
+          //   而且能精确落到是哪一句。这就是判"句间饿死"的直接证据。
+          try {
+            var pl = _vc.player;
+            if (pl && pl.ctx && typeof pl.nextTime === 'number') {
+              rec.leadMs = Math.round((pl.nextTime - pl.ctx.currentTime) * 1000);
+            }
+          } catch (e) {}
+        }
+        sinkFlush(seq);
+      }
+    });
 
     // 这一轮还该不该出声音（token 是否过期、通话是否还在进行）
     function alive() {
@@ -4347,6 +4404,10 @@
       // v130：领号。号 = 播放顺序。onPcm 的字节不再直接进播放器，而是交给 spool ——
       //   轮到这一句才真的出声音（并发预取，串行播放）。
       var sp = q.spool.open();
+      // v3.1：逐句取证（seq 与播放顺序一致，所以这张表就是"这一轮第几句卡了多久"）
+      var rec = { seq: sp.seq, chars: text.length, t0: nowMs(), firstChunkMs: 0, doneAt: 0, flushedMs: 0, leadMs: null, failed: 0 };
+      q.sentences.push(rec);
+      q.sentBySeq[sp.seq] = rec;
       var p = doTts(speak, {
         gate: gate,
         onPcm: function (bytes) {
@@ -4359,8 +4420,11 @@
       }).then(function (r) {
         // 这一句的 PCM 已经全部到齐（句尾的 WSOLA 尾巴由 spool 在"轮到这句播完"时吐）
         sp.finish();
+        rec.firstChunkMs = (r && r.firstChunkMs) || 0;
+        rec.doneAt = Math.round(nowMs() - rec.t0);
         if (r && r.firstChunkMs && (!q.firstChunkMs || r.firstChunkMs < q.firstChunkMs)) q.firstChunkMs = r.firstChunkMs;
       }).catch(function (e) {
+        rec.failed = 1;
         if (isAbort(e)) return;
         // 静音降级：这一句坏了就跳过，绝不打断整通电话
         warn('TTS 失败（静音降级）:', e && e.message);
@@ -4430,6 +4494,18 @@
       // v130 取证：direct = 直接进播放器的块数；outOfOrder = 到达时前面还有句没播完
       //   （旧版正是在这里插队，导致句子音频交替）；buffered/flushed = 缓冲与按序补播
       spoolStats: function () { return q.spool.stats(); },
+      // v3.1：逐句明细。判"句间饿死"是谁的锅：
+      //   firstChunkMs 大 → 这句首包慢（TTS 侧）；
+      //   ttsDoneMs 远大于 firstChunkMs → 整句合成慢；
+      //   flushedMs 大但 leadMs ≤ 0 → 交出去时队列已空，前面那段空白就是它造成的。
+      sentenceStats: function () {
+        return q.sentences.map(function (r) {
+          return {
+            seq: r.seq, chars: r.chars, firstChunkMs: r.firstChunkMs,
+            ttsDoneMs: r.doneAt, flushedMs: r.flushedMs, leadMs: r.leadMs, failed: r.failed
+          };
+        });
+      },
       stop: function () {
         q.closed = true;
         clearStall();
@@ -4447,7 +4523,6 @@
     if (!_vc.running) return;
     if (_vc.state === 'speaking') { armSpeakWatchdog(); return; }
     setState('speaking');
-    _vc.speaking = true;
     _vc.speakStartAt = nowMs();
     _vc.leakRms = 0.006;
     _vc.interrupted = false;
@@ -4482,8 +4557,28 @@
     if (_vc.fillerTimer) { clearTimeout(_vc.fillerTimer); _vc.fillerTimer = null; }
   }
 
+  // v3.1：预热请求的善后。
+  //   以前 prewarmFillers 用 gate:null —— 关掉界面/挂断时那三条 TTS 还在跑，
+  //   最长占满 30s 超时，中途还在解码 PCM、生成 AudioBuffer（P1 遗留）。
+  //   现在给它们各自的闸门，挂断/关闭时统一拉掉：ssePost 的 cleanup 会
+  //   cancelStream / abort，是真的停下网络读，不是只丢结果。
+  function abortFillerWarm() {
+    var list = _vc.fillerGates || [];
+    _vc.fillerGates = [];
+    for (var i = 0; i < list.length; i++) {
+      try { list[i].abort('filler-abort'); } catch (e) {}
+    }
+  }
+
+  function dropFillerGate(g) {
+    var arr = _vc.fillerGates || [];
+    var i = arr.indexOf(g);
+    if (i >= 0) arr.splice(i, 1);
+  }
+
   function prewarmFillers() {
     var token = ++_vc.fillerWarmToken;
+    abortFillerWarm();          // 上一批没跑完的先拉闸（换音色 / 重进界面都会走到这里）
     _vc.fillerBuffers = [];
     var texts = ['嗯……', '让我想想', '啊，这个'];
     try {
@@ -4500,8 +4595,11 @@
     if (!ctx) return;
 
     texts.slice(0, 3).forEach(function (t, idx) {
+      var g = createGate();
+      _vc.fillerGates.push(g);
+      var settle = function () { dropFillerGate(g); };
       // 后台发，失败静默忽略
-      ttsStream(t, { gate: null, onPcm: function (bytes) {
+      ttsStream(t, { gate: g, onPcm: function (bytes) {
         if (token !== _vc.fillerWarmToken) return;    // 音色已换，丢弃
         var i16 = bytesToInt16(bytes);
         if (!i16.length) return;
@@ -4513,7 +4611,7 @@
           buf.getChannelData(0).set(f32);
           _vc.fillerBuffers[idx] = buf;
         } catch (e) {}
-      } }).catch(function () { /* 静默 */ });
+      } }).then(settle, settle);    // 成功/失败/被拉闸都要把闸门从列表里摘掉
     });
   }
 
@@ -4779,6 +4877,7 @@
     //   否则真机上读完一轮再查 __debug() 永远是 null，等于没有取证。
     try {
       if (_vc.pipeline && _vc.pipeline.spoolStats) _vc.metrics.lastSpool = _vc.pipeline.spoolStats();
+      if (_vc.pipeline && _vc.pipeline.sentenceStats) _vc.metrics.lastSentences = _vc.pipeline.sentenceStats();
     } catch (e) {}
     _vc.metrics.lastTurn = {
       at: Date.now(),
@@ -4886,6 +4985,8 @@
     try { var st = ST(); if (st) st.voiceOpen = false; } catch (e) {}
     applyOpenUI(false);
     if (_vc.timerId) { clearInterval(_vc.timerId); _vc.timerId = null; }
+    // v3.1：退出界面即释放音频上下文（见 releaseAudioCtx 的说明）
+    releaseAudioCtx();
     setState('idle');
   }
 
@@ -4940,6 +5041,7 @@
     }
     setState('connecting', '正在请求麦克风权限…');
     _vc.running = true;
+    _vc.injected = false;      // 每通电话重新计
     _vc.startedAt = Date.now();
     _vc.lastTurnAt = 0;
     _vc.callMarked = false;
@@ -5015,6 +5117,8 @@
     keepAliveStop();
     stopCaptureWatchdog();
     clearFillerTimer();
+    // v3.1：预热的 TTS 请求也要停 —— 挂断后它还在跑网络和解码，纯浪费
+    abortFillerWarm();
     clearSpeakWatchdog();
     clearTimeout(_vc.autoHangTimer);
     _vc.autoHangTimer = null;
@@ -5653,10 +5757,16 @@
     //   用途：无麦克风的自动化测试（CDP 里没法真说话），走的是与真实完全相同的
     //   runTurn → ASR → 大脑 → TTS → 播放 → 写回会话 路径，只是跳过了 VAD 判定。
     //   生产代码不会调用它。
+    // ⚠ 测试专用：**绕过 VAD**，直接把一段 PCM 当成"用户说完了一句"。
+    //   能测的：识别 → 大脑 → 合成 → 播放这段链路。
+    //   测不到的：VAD 阈值 / 端点判定 / 计时 —— 那些必须用 feedCaptureBlock
+    //   （v127.1 的两个致命 bug 就是只走 __injectUtterance 漏掉的）。
+    //   注入过的通话会在 __debug().injected 里标 true，别把自动化结论当真机结论。
     __injectUtterance: function (pcmInt16) {
       if (!_vc.running) return 'not-running';
       var pcm = pcmInt16;
       if (!pcm || !pcm.length) return 'empty';
+      _vc.injected = true;
       _vc.segChunks = [pcm];
       _vc.segSamples = pcm.length;
       _vc.segOnsetMs = 0;
@@ -5666,6 +5776,9 @@
     __debug: function () {
       return {
         state: _vc.state, running: _vc.running, open: _vc.open, muted: _vc.muted,
+        // v3.1：这一通电话里用过 __injectUtterance（绕过 VAD 的测试入口）就标出来，
+        //   否则事后看着一堆数字分不清是真麦克风跑的还是注入的。
+        injected: !!_vc.injected,
         captureRate: _vc.audioCtx ? _vc.audioCtx.sampleRate : 0,
         vad: _vc.vad ? {
           phase: _vc.vad.phase(), thr: _vc.vad.threshold(), noise: _vc.vad.noiseFloor(),
@@ -5702,7 +5815,10 @@
           // v130 取证：outOfOrder>0 说明这一轮真的出现过"后一句的音频先到"——
           //   旧版会把它们插进前一句中间（听感=念得乱）；现在它们被按序补播。
           spool: (_vc.pipeline && _vc.pipeline.spoolStats) ? _vc.pipeline.spoolStats()
-            : (_vc.metrics && _vc.metrics.lastSpool) || null
+            : (_vc.metrics && _vc.metrics.lastSpool) || null,
+          // v3.1：逐句明细（pipeline 结束后读 lastSentences 仍可取证）
+          sentences: (_vc.pipeline && _vc.pipeline.sentenceStats) ? _vc.pipeline.sentenceStats()
+            : (_vc.metrics && _vc.metrics.lastSentences) || null
         } : null,
         events: (_vc.events || []).slice(-40),
         lastBrain: _vc.lastBrain || null,
