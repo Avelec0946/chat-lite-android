@@ -849,7 +849,7 @@
         <details class="setting-group setting-group-collapsible" data-group-key="data" open>
           <summary class="setting-group-summary">数据管理 <span class="setting-scope">全量导出/导入</span></summary>
           <div class="setting-group-body">
-          <span class="setting-hint">导出当前所有对话、接口配置和设置；可用于网页版与 APK 之间迁移数据。</span>
+          <span class="setting-hint">导出当前所有对话、接口配置、设置和<b>图库原图</b>（打包成一个 <b>.zip</b>，导出后走系统分享，存哪由你决定）；导入支持新的 .zip 备份，也兼容以前导出的 .json。</span>
           <div class="card-import-row" style="margin-top:8px">
             <button id="btn-export-all" class="btn btn-small">导出全部数据</button>
             <button id="btn-import-all" class="btn btn-small">导入全部数据</button>
@@ -886,9 +886,9 @@
 <script src="image-gen.js?v=126"></script>
 <script src="conversation.js?v=112"></script>
 <script src="chat.js?v=131"></script>
-<script src="io.js?v=126"></script>
+<script src="io.js?v=128"></script>
 <script src="gesture-helpers.js?v=102"></script>
-<script src="app.js?v=125"></script>
+<script src="app.js?v=127"></script>
 <!-- v125: 语音通话 —— voice-director 是纯函数层（无 DOM/无网络），voice.js 是运行时 -->
 <!-- v127: voice-provider 管独立的语音接口（地址+密钥+模型），与「接口管理」的聊天渠道无关 -->
 <script src="voice-director.js?v=129"></script>
