@@ -128,6 +128,46 @@
     return FALLBACK_PERSONAS;
   }
 
+  // ===== v133：总开关 → 顶栏话筒入口的显隐 =====
+  // 放在这里而不是 voice.js 的理由：这是「设置决定界面」，和设置面板同源；
+  //   语音运行时只负责「被点开之后」的事，不该知道入口按钮长什么样。
+  function voiceEnabled() {
+    var st = settings && settings.voice;
+    return !(st && st.enabled === false);
+  }
+
+  function syncEntryVisibility() {
+    var btn = $('btn-open-voice-view');
+    if (!btn) return voiceEnabled();
+    var on = voiceEnabled();
+    // 用 '' 复原、而不是写死 display：按钮的常态显示由 CSS（.btn）决定，写死会跟样式打架。
+    btn.style.display = on ? '' : 'none';
+    btn.setAttribute('aria-hidden', on ? 'false' : 'true');
+    // 关掉时如果通话界面正开着，一起退出去。
+    //   否则会出现「入口没了、全屏通话还在」的矛盾状态，且用户找不到回来的路。
+    if (!on) {
+      try {
+        var VC = root.VoiceCall;
+        if (VC && typeof VC.isOpen === 'function' && VC.isOpen()) {
+          if (typeof VC.hangup === 'function') VC.hangup();
+          if (typeof VC.close === 'function') VC.close();
+        }
+      } catch (e) {}
+    }
+    return on;
+  }
+
+  // settings 是 app.js 异步从 IndexedDB 读的；本文件在 DOMContentLoaded 就跑起来了，
+  //   此刻 settings 还是默认值。不等它落定就同步，会出现「上次关掉了、刷新后图标又冒出来」。
+  function whenSettingsReady(fn) {
+    var tries = 0;
+    (function tick() {
+      var st = (typeof state !== 'undefined' && state) ? state : root.state;
+      if ((st && st._dataLoaded) || ++tries > 120) { fn(); return; }
+      setTimeout(tick, 50);
+    })();
+  }
+
   // v127：renderProviderSelect 已删除。
   //   它把「接口管理」里的聊天渠道填进语音的渠道下拉 —— 那正是 401 的源头：
   //   聊天渠道的地址是文本网关，拿它发 asr/tts 密钥对不上。语音现在有独立的
@@ -199,6 +239,9 @@
   // ===== 从 settings → DOM（打开设置面板、切换渠道、外部改动后调用）=====
   function syncVoiceSettingsUI() {
     var st = v();
+    // v133：总开关（默认开；老用户没有该键 → 视为开）
+    if ($('voice-enabled')) $('voice-enabled').checked = st.enabled !== false;
+    syncEntryVisibility();
     // v127：渠道下拉已移除 —— 语音走独立的「语音接口」（voice-provider.js 负责渲染）
     if ($('voice-asr-model')) $('voice-asr-model').value = st.asrModel || '';
     if ($('voice-tts-model')) $('voice-tts-model').value = st.ttsModel || '';
@@ -299,6 +342,19 @@
     bindToggle('voice-barge-in', 'bargeIn');
     bindToggle('voice-show-transcript', 'showTranscript');
     bindToggle('voice-show-signals', 'showSignals');
+
+    // ===== v133：总开关 =====
+    // 它改的是「入口在不在」，用户点完立刻要看结果，所以即时落盘 + 立刻刷顶栏，
+    //   不等设置面板的「保存」按钮（那个按钮管的是别的字段）。
+    var enEl = $('voice-enabled');
+    if (enEl) enEl.addEventListener('change', function () {
+      st().enabled = !!enEl.checked;
+      persistVoice();
+      syncEntryVisibility();
+      if (typeof showToast === 'function') {
+        showToast(enEl.checked ? '语音通话已开启，会话顶栏显示话筒入口' : '语音通话已关闭，会话顶栏话筒入口已隐藏');
+      }
+    });
 
     // v128：思考策略。改动即时落盘 —— 用户会在通话中调它来比较手感。
     var thinkSel = $('voice-thinking');
@@ -499,6 +555,11 @@
     bind();
     // 首次尽力同步一次（若 DOM 已就绪且设置面板在 DOM 里）
     if ($('voice-asr-model')) syncVoiceSettingsUI();
+    // v133：入口显隐要等 settings 真读出来再定，否则会按默认值把已关掉的入口又显示一次
+    whenSettingsReady(function () {
+      syncEntryVisibility();
+      if ($('voice-enabled')) $('voice-enabled').checked = (settings.voice || {}).enabled !== false;
+    });
     // v127：语音接口是独立配置，聊天渠道增删与它无关，不再监听 providers-changed
     if (root.VoiceProvider && typeof root.VoiceProvider.init === 'function') {
       try { root.VoiceProvider.init(); } catch (e) { console.warn('[voice-settings] VoiceProvider.init', e); }
@@ -509,6 +570,9 @@
   root.VoiceSettings = {
     init: init,
     sync: syncVoiceSettingsUI,
+    // v133：供外部（测试 / 导入备份后）重新按 settings 刷一次顶栏入口
+    syncEntry: syncEntryVisibility,
+    isEnabled: voiceEnabled,
     currentVoiceLabel: currentVoiceLabel,
     loadCloneRef: loadCloneRef,
     VOICE_OPTIONS: VOICE_OPTIONS,

@@ -245,6 +245,9 @@ html,body{height:100%;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Ro
 .setting-group{background:var(--bg2);border:1px solid var(--border);border-radius:10px;padding:12px;margin-bottom:12px}
 .setting-group-title{display:block;font-size:14px;font-weight:600;color:var(--text);margin-bottom:8px;padding-bottom:6px;border-bottom:1px solid var(--border)}
 .setting-scope{font-size:11px;font-weight:400;color:var(--text2);background:var(--bg3);padding:1px 8px;border-radius:10px;margin-left:6px}
+/* v133：Beta 徽标。和 .setting-scope（灰底说明"作用范围"）区分开：
+   它是状态标记，用主色描边 + 主色字，不抢标题的视觉重量，但一眼能看出"这是试验功能"。 */
+.setting-beta{display:inline-block;font-size:10px;font-weight:600;letter-spacing:.06em;line-height:1.5;color:var(--accent);background:rgba(124,58,237,.14);border:1px solid rgba(124,58,237,.45);padding:0 6px;border-radius:9px;margin-left:6px;vertical-align:1px}
 .settings-scroll-btn{position:absolute;right:16px;bottom:72px;width:40px;height:40px;border-radius:50%;background:var(--bg2);border:1px solid var(--border);color:var(--text);display:flex;align-items:center;justify-content:center;cursor:pointer;box-shadow:var(--shadow);z-index:200;opacity:.92;transition:opacity .2s,transform .2s;-webkit-tap-highlight-color:transparent}
 .settings-scroll-btn:hover{opacity:1;transform:translateY(-1px)}
 .settings-scroll-btn:active{transform:translateY(0)}
