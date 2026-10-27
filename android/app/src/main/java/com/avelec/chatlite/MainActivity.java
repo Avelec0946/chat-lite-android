@@ -42,10 +42,6 @@ public class MainActivity extends BridgeActivity {
         // v132: 注册通话保活插件——局部唤醒锁 + Wi-Fi 高性能锁 + 前台服务，
         //   让息屏之后 CPU / 网络 / 采集都不被系统掐断（实测息屏后 DNS 会直接失败）
         registerPlugin(CallKeepAlivePlugin.class);
-        // v3.0.4: 注册备份打包插件——全量备份要带走 333MB 图库文件，
-        //   Capacitor Filesystem 只能整文件读成 base64（无 offset/length），JS 侧必然 OOM，
-        //   所以 zip 的打包/解包/读取都在原生侧流式做（峰值内存与包大小无关）
-        registerPlugin(BackupArchivePlugin.class);
         super.onCreate(savedInstanceState);
         // v71: 创建 WakeLock，用于后台期间保持 CPU 活跃
         PowerManager pm = (PowerManager) getSystemService(POWER_SERVICE);
