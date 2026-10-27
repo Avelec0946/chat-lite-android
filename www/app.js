@@ -630,11 +630,13 @@ async function init() {
   $('btn-export').addEventListener('click', exportConversation);
   $('btn-import').addEventListener('click', () => { document.getElementById('import-file-input').click(); });
   document.getElementById('import-file-input').addEventListener('change', importConversation);
-  // v3.0.4: 数据管理只有两个动作 —— 备份（写「下载/chat-lite」的 .zip）与恢复（zip / 旧 .json 都吃）
-  var btnBackupNow = document.getElementById('btn-backup-now');
-  if (btnBackupNow) btnBackupNow.addEventListener('click', function () { backupAllData(); });
-  var btnRestoreFrom = document.getElementById('btn-restore-from');
-  if (btnRestoreFrom) btnRestoreFrom.addEventListener('click', function () { restoreFromBackup(); });
+  // v3.0.4: 数据管理对外还是那两个按钮 —— 导出（打包 .zip + 系统分享）、导入（zip / 旧 .json 都吃）
+  var btnExportAll = document.getElementById('btn-export-all');
+  if (btnExportAll) btnExportAll.addEventListener('click', function () { backupAllData(); });
+  var btnImportAll = document.getElementById('btn-import-all');
+  if (btnImportAll) btnImportAll.addEventListener('click', function () { restoreFromBackup(); });
+  var importAllInput = document.getElementById('import-all-file-input');
+  if (importAllInput) importAllInput.addEventListener('change', restoreFromBackup);
   document.querySelector('#branch-drawer .branch-drawer-backdrop').addEventListener('click', closeBranchDrawer);
 
   $('btn-save-settings').addEventListener('click', saveSettingsHandler);

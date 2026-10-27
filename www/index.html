@@ -847,21 +847,22 @@
 
         <!-- ===== 数据管理 ===== -->
         <details class="setting-group setting-group-collapsible" data-group-key="data" open>
-          <summary class="setting-group-summary">数据管理 <span class="setting-scope">备份 / 恢复</span></summary>
+          <summary class="setting-group-summary">数据管理 <span class="setting-scope">全量导出/导入</span></summary>
           <div class="setting-group-body">
-          <span class="setting-hint">备份会把全部内容打包成一个 <b>.zip</b>（含图库原图），存到「<b>下载 / chat-lite</b>」；恢复时选它即可，也能选以前导出的 .json 备份。</span>
-          <div class="card-import-row" style="margin-top:10px">
-            <button id="btn-backup-now" class="btn btn-small">备份数据</button>
-            <button id="btn-restore-from" class="btn btn-small">恢复数据</button>
+          <span class="setting-hint">导出当前所有对话、接口配置、设置和<b>图库原图</b>（打包成一个 <b>.zip</b>，导出后走系统分享，存哪由你决定）；导入支持新的 .zip 备份，也兼容以前导出的 .json。</span>
+          <div class="card-import-row" style="margin-top:8px">
+            <button id="btn-export-all" class="btn btn-small">导出全部数据</button>
+            <button id="btn-import-all" class="btn btn-small">导入全部数据</button>
+            <input type="file" id="import-all-file-input" accept=".json" style="display:none">
           </div>
-          <label class="setting-row" style="margin-top:6px">
-            <span>恢复方式</span>
+          <label class="setting-row" style="margin-top:8px">
+            <span>导入模式</span>
             <select id="import-mode-select" class="setting-select">
               <option value="overwrite" selected>覆盖（推荐）</option>
               <option value="merge">合并（按 ID 去重）</option>
             </select>
           </label>
-          <span class="setting-hint">覆盖：替换当前全部数据。合并：相同 ID 的对话 / 接口以备份为准。</span>
+          <span class="setting-hint">覆盖：直接替换当前所有数据。合并：相同 ID 的对话/接口以导入数据为准。</span>
           </div>
         </details>
       </div>

@@ -63,8 +63,8 @@ function buildExportSettingsV2() {
 async function backupAllData() {
   await ensureDataLoaded();
   const plugin = _backupPlugin();
-  if (!plugin || !isCapacitor() || !CapFilesystem) {
-    showToast('备份功能需要 APK 版', 'warn');
+  if (!plugin || !isCapacitor() || !CapFilesystem || !CapShare) {
+    showToast('导出功能需要 APK 版', 'warn');
     return;
   }
   showToast('正在准备备份...', 'info');
@@ -74,6 +74,8 @@ async function backupAllData() {
   const zipName = 'chat-lite-backup-' + stamp + '.zip';
   const jsonName = 'chat-lite-data-' + stamp + '.json';
   try {
+    // 0) 先清掉上一次导出的中间产物（zip 不能导完就删，见 _purgeStaleBackups 注释）
+    await _purgeStaleBackups();
     // 1) data.json —— 沿用分块流式导出（峰值 = 单批 200KB，不随数据量涨）
     await exportAllDataStreamed(jsonName, buildExportSettingsV2(), { version: 2, format: 'chat-lite-backup-zip' });
     // 2) 打包：data.json + 图库原图 + 缩略图（STORE 不压缩，333MB 约 2s）
@@ -90,40 +92,88 @@ async function backupAllData() {
         imageRecords: imgCount
       }
     });
-    // 3) 落到「下载 / chat-lite」—— 用户在文件管理器里直接看得见、能传到电脑，
-    //    之后恢复时用系统选择器也能直接选中它（不打断操作，也不用系统分享面板）
-    const saved = await plugin.saveToDownloads({ srcPath: zipName, fileName: zipName, mime: 'application/zip' });
+    // 3) 交给用户：系统分享面板（存文件 / 发微信 / 传电脑，存哪由用户决定）
+    const uri = await CapFilesystem.getUri({ path: zipName, directory: 'CACHE' });
     const mb = (res.size / 1048576).toFixed(1);
-    showToast('备份已保存到「' + saved.path + '」（' + mb + 'MB）', 'success');
+    try {
+      await CapShare.share({
+        title: 'chat-lite 全量备份',
+        url: uri.uri,
+        dialogTitle: '保存备份到...'
+      });
+      showToast('备份已生成（' + mb + 'MB）', 'success');
+    } catch (shareErr) {
+      // 分享面板被划掉不算失败：备份包已经生成好了
+      if (String(shareErr && shareErr.message).indexOf('cancel') >= 0) {
+        showToast('已取消分享（备份包已生成，' + mb + 'MB）', 'info');
+      } else {
+        throw shareErr;
+      }
+    }
   } catch (err) {
     console.error('Backup failed:', err);
-    showToast('备份失败：' + ((err && err.message) || err), 'danger');
+    showToast('导出失败：' + ((err && err.message) || err), 'danger');
   } finally {
-    // 中间产物清掉（备份包已经进了「下载/chat-lite」，CACHE 里这份是临时的）
+    // data.json 是纯中间产物，立即删；zip 留着 —— 分享面板背后的接收方可能还在读它
     try { await CapFilesystem.deleteFile({ path: jsonName, directory: 'CACHE' }); } catch (e) {}
-    try { await CapFilesystem.deleteFile({ path: zipName, directory: 'CACHE' }); } catch (e2) {}
   }
 }
 
-// ===== v2 导入：单文件 zip =====
+// CACHE 里上一次导出的 zip / json：**不能导出完就删** —— 系统分享面板交出去的是
+// file:// 句柄，接收方（文件管理器 / 微信）可能在分享面板关闭后还在读，删早了对方拿到空文件。
+// 所以改成「下次导出开始时清上一次」，CACHE 里最多留一个备份包。
+async function _purgeStaleBackups() {
+  try {
+    const ls = await CapFilesystem.readdir({ path: '', directory: 'CACHE' });
+    const files = (ls && ls.files) || [];
+    for (let i = 0; i < files.length; i++) {
+      const name = typeof files[i] === 'string' ? files[i] : files[i].name;
+      if (!name) continue;
+      if (!/^(chat-lite-(backup|data)-|pre-import-).+\.(zip|json)$/.test(name)) continue;
+      try { await CapFilesystem.deleteFile({ path: name, directory: 'CACHE' }); } catch (e) {}
+    }
+  } catch (e) { /* 读不到目录不影响导出 */ }
+}
+
+// ===== 导入：单文件 zip（兼容旧 .json）=====
 // 流程：系统选择器挑文件 → 落地到 app 目录 → 先说清"里面有什么" → 导入前自动备份 →
 //       图片解到 staging（正式目录一个字节都不动）→ 流式读 data.json 落库 →
 //       图库目录原子替换 → 清理。任何一步失败：staging 删掉，正式数据原样。
+// 旧格式（v3.0.4 之前导出的 .json）走同一条落库路径，只是没有图片文件，导入前会明确提示。
+// 网页版没有原生插件：只能读旧 .json（zip 解不开），由 <input type=file> 兜底。
 async function restoreFromBackup(e) {
   const input = e && e.target;
-  if (input && input.files) input.value = '';   // 允许重复选同一个文件
+  const webFile = (input && input.files && input.files[0]) ? input.files[0] : null;
+  if (input && input.files) input.value = '';   // 允许重复选同一个文件（放在取 file 之后）
   const plugin = _backupPlugin();
-  if (!plugin || !CapFilesystem) {
-    showToast('恢复功能需要 APK 版，请更新 App', 'warn');
-    return;
-  }
   const modeEl = document.getElementById('import-mode-select');
   const mode = modeEl ? modeEl.value : 'overwrite';
+
+  // 网页版没有原生解包插件：zip 解不开，只能读旧的 .json（不含图片）
+  if (!plugin || !CapFilesystem) {
+    if (webFile) {
+      if (!confirm('网页版只能导入旧的 .json 备份（不含图片文件）。\n\n恢复后：会话、接口、设置会照旧，' +
+                   '但图库只会剩缩略图。\n\n确定继续吗？')) return;
+      try {
+        showToast('正在写入数据...', 'info');
+        await importAllDataStreamed(makeFileChunkReader(webFile), mode);
+        showToast('旧格式备份已恢复（不含图片）', 'success');
+        if (typeof renderImageStream === 'function') renderImageStream();
+      } catch (err) {
+        console.error('Restore failed:', err);
+        showToast('导入失败：' + ((err && err.message) || err), 'danger');
+      }
+      return;
+    }
+    const fileInput = document.getElementById('import-all-file-input');
+    if (fileInput) fileInput.click();   // 退回 <input type=file>
+    return;
+  }
   let stagedPath = null;
   try {
     showToast('请选择备份文件...', 'info');
     const picked = await plugin.pickArchive();
-    if (!picked || !picked.uri) return;          // 用户取消
+    if (!picked || picked.cancelled || !picked.uri) return;   // 用户取消，不算失败
     showToast('正在读取备份文件...', 'info');
     const staged = await plugin.stage({ uri: picked.uri });
     stagedPath = staged.path;
@@ -182,7 +232,8 @@ async function restoreFromBackup(e) {
   } catch (err) {
     console.error('Restore failed:', err);
     try { if (plugin) await plugin.cleanDir({ dir: 'chatlite_images.new' }); } catch (e2) {}
-    showToast('恢复失败：' + ((err && err.message) || err), 'danger');
+    if (String(err && err.message).indexOf('未选择文件') >= 0) return;   // 用户取消，不当失败报
+    showToast('导入失败：' + ((err && err.message) || err), 'danger');
   }
 }
 
@@ -202,11 +253,29 @@ async function _autoBackupBeforeImport(plugin) {
       await CapFilesystem.copy({ from: zipName, to: zipName, directory: 'CACHE', toDirectory: 'DATA' });
     } catch (e2) { /* 复制失败就留在 CACHE 里 */ }
     try { await CapFilesystem.deleteFile({ path: jsonName, directory: 'CACHE' }); } catch (e3) {}
+    try { await CapFilesystem.deleteFile({ path: zipName, directory: 'CACHE' }); } catch (e4) {}
+    await _purgeOldPreImport(2);
     showToast('已自动备份当前数据（' + zipName + '）', 'info');
   } catch (e) {
     console.warn('pre-import backup failed:', e);
     showToast('注意：导入前自动备份失败，原数据将无法恢复', 'warn');
   }
+}
+
+// 兜底备份也要有上限：只留最近 keep 份（每份可能上百 MB，不清理会把手机塞满）
+async function _purgeOldPreImport(keep) {
+  try {
+    const ls = await CapFilesystem.readdir({ path: '', directory: 'DATA' });
+    const files = (ls && ls.files) || [];
+    const names = files
+      .map(function (f) { return typeof f === 'string' ? f : f.name; })
+      .filter(function (n) { return n && /^pre-import-.+\.zip$/.test(n); })
+      .sort()
+      .reverse();
+    for (let i = keep; i < names.length; i++) {
+      try { await CapFilesystem.deleteFile({ path: names[i], directory: 'DATA' }); } catch (e) {}
+    }
+  } catch (e) {}
 }
 
 async function _cleanupImportStaging(path) {

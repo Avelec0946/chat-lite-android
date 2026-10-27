@@ -1,12 +1,7 @@
 package com.avelec.chatlite;
 
-import android.content.ContentValues;
-import android.content.Context;
 import android.content.Intent;
 import android.net.Uri;
-import android.os.Build;
-import android.os.Environment;
-import android.provider.MediaStore;
 import android.util.Base64;
 
 import com.getcapacitor.JSObject;
@@ -19,7 +14,6 @@ import com.getcapacitor.annotation.CapacitorPlugin;
 import androidx.activity.result.ActivityResult;
 import org.json.JSONObject;
 
-import java.io.BufferedInputStream;
 import java.io.BufferedOutputStream;
 import java.io.File;
 import java.io.FileInputStream;
@@ -34,7 +28,6 @@ import java.util.List;
 import java.util.zip.CRC32;
 import java.util.zip.ZipEntry;
 import java.util.zip.ZipFile;
-import java.util.zip.ZipInputStream;
 import java.util.zip.ZipOutputStream;
 
 /**
@@ -449,7 +442,10 @@ public class BackupArchivePlugin extends Plugin {
     private void archivePicked(PluginCall call, ActivityResult result) {
         if (call == null) return;
         if (result.getResultCode() != android.app.Activity.RESULT_OK) {
-            call.reject("未选择文件");
+            // 用户取消：resolve 而不是 reject —— 取消不是错误，JS 侧不该弹「导入失败」
+            JSObject cancelled = new JSObject();
+            cancelled.put("cancelled", true);
+            call.resolve(cancelled);
             return;
         }
         Uri uri = result.getData() != null ? result.getData().getData() : null;
@@ -612,73 +608,6 @@ public class BackupArchivePlugin extends Plugin {
             call.resolve(ret);
         } catch (Exception ex) {
             call.reject("读取分块失败：" + ex.getMessage());
-        }
-    }
-
-    /**
-     * saveToDownloads({ srcPath, fileName, mime? }) → { path, uri, size }
-     *   把备份包落到「下载 / chat-lite」—— 用户在文件管理器里直接能看到、能传到电脑，
-     *   之后恢复时用系统选择器也能直接选中它（比"系统分享"少一步，也不打断操作）。
-     *   Android 10+ 走 MediaStore（无需任何权限）；更老的系统落到 app 的外部文件目录。
-     */
-    @PluginMethod
-    public void saveToDownloads(PluginCall call) {
-        String srcPath = call.getString("srcPath", null);
-        String fileName = call.getString("fileName", "chat-lite-backup.zip");
-        String mime = call.getString("mime", "application/zip");
-        if (srcPath == null) { call.reject("缺少 srcPath"); return; }
-        File src = new File(srcPath);
-        if (!src.isAbsolute()) src = new File(cacheDir(), srcPath);
-        if (!src.exists()) { call.reject("源文件不存在：" + srcPath); return; }
-
-        Context ctx = getContext();
-        Uri inserted = null;
-        OutputStream os = null;
-        try {
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-                ContentValues values = new ContentValues();
-                values.put(MediaStore.Downloads.DISPLAY_NAME, fileName);
-                values.put(MediaStore.Downloads.MIME_TYPE, mime);
-                values.put(MediaStore.Downloads.RELATIVE_PATH, Environment.DIRECTORY_DOWNLOADS + "/chat-lite");
-                values.put(MediaStore.Downloads.IS_PENDING, 1);
-                inserted = ctx.getContentResolver().insert(MediaStore.Downloads.EXTERNAL_CONTENT_URI, values);
-                if (inserted == null) { call.reject("写入下载目录失败：MediaStore insert 返回 null"); return; }
-                os = ctx.getContentResolver().openOutputStream(inserted);
-            } else {
-                File dir = new File(ctx.getExternalFilesDir(Environment.DIRECTORY_DOWNLOADS), "chat-lite");
-                if (!dir.exists() && !dir.mkdirs()) { call.reject("无法创建目录：" + dir); return; }
-                File out = new File(dir, fileName);
-                os = new FileOutputStream(out);
-                inserted = Uri.fromFile(out);
-            }
-            if (os == null) { call.reject("无法写入目标文件"); return; }
-            try (FileInputStream in = new FileInputStream(src)) {
-                copyStream(in, os, new byte[64 * 1024]);
-            }
-            os.flush();
-            os.close();
-            os = null;
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q && inserted != null) {
-                ContentValues done = new ContentValues();
-                done.put(MediaStore.Downloads.IS_PENDING, 0);
-                ctx.getContentResolver().update(inserted, done, null, null);
-            }
-            JSObject ret = new JSObject();
-            ret.put("uri", inserted == null ? "" : inserted.toString());
-            ret.put("fileName", fileName);
-            ret.put("size", src.length());
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-                ret.put("path", Environment.DIRECTORY_DOWNLOADS + "/chat-lite/" + fileName);
-            } else {
-                ret.put("path", inserted == null ? fileName : inserted.getPath());
-            }
-            call.resolve(ret);
-        } catch (Exception e) {
-            if (os != null) { try { os.close(); } catch (Exception ignored) { } }
-            if (inserted != null && Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-                try { ctx.getContentResolver().delete(inserted, null, null); } catch (Exception ignored) { }
-            }
-            call.reject("保存到下载目录失败：" + e.getMessage());
         }
     }
 
