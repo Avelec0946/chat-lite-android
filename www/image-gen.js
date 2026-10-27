@@ -1835,31 +1835,39 @@ function backfillImageThumbnail(img, dataUrl) {
 
 // v3.0.3: 老缩略图升级（最长边 < 900 或没有记录尺寸的，都算「v123 时代的 96px」）。
 //   逐张做、做完就存、把新尺寸记进 thumbW/thumbH —— 记了尺寸下次启动就不会再做。
-//   失败也打标（thumbUpgraded），否则每次启动都会重试同一张读不出来的图。
+//   **失败只在本次会话里跳过，绝不写进记录**：
+//   2026-10-27 实测过一个反例 —— 某台机器上原图文件整目录不在了，升级必然失败；
+//   第一版把失败也写成 thumbUpgraded，结果文件后来补回来也永远不会再升。
+//   现在失败只记在内存 `_thumbUpgradeFailed`，下次启动会再试一次（一次读失败只有几十毫秒）。
 var _legacyThumbRunning = false;
+var _thumbUpgradeFailed = {};
 function isLegacyThumb(rec) {
   if (!rec || rec.thumbUpgraded) return false;
+  if (_thumbUpgradeFailed[rec.id]) return false;
   if (rec.externalUrl || !rec.fileName) return false;
   var side = Math.max(rec.thumbW || 0, rec.thumbH || 0);
   return side < 900;   // 新规格最长边 1024；老规格 96
 }
-async function _upgradeOneLegacyThumb(rec) {
+// 第二参 preloadedFull：调用方手里已经有原图 dataUrl 时直接给，省掉一次几 MB 的文件读
+async function _upgradeOneLegacyThumb(rec, preloadedFull) {
+  if (!rec || !rec.id) return false;
   try {
-    var full = await getImageDataUrl(rec);
-    if (!full) { rec.thumbUpgraded = true; return false; }
+    var full = preloadedFull || await getImageDataUrl(rec);
+    if (!full) { _thumbUpgradeFailed[rec.id] = true; return false; }
     var meta = await buildImageThumbnail(full);
-    if (!meta || !meta.thumbDataUrl) { rec.thumbUpgraded = true; return false; }
+    if (!meta || !meta.thumbDataUrl) { _thumbUpgradeFailed[rec.id] = true; return false; }
     var name = await writeThumbFile(meta.thumbDataUrl, rec.id);
     if (name) { rec.thumbName = name; rec.thumbDataUrl = null; }
     else { rec.thumbDataUrl = meta.thumbDataUrl; }
     rec.thumbW = meta.thumbW;
     rec.thumbH = meta.thumbH;
     rec.thumbUpgraded = true;
+    delete _thumbUpgradeFailed[rec.id];
     // 内存里可能还留着老缩略图 —— 丢掉，让 getImageThumbUrl 重新从文件读新的
     rec.thumbDataUrl = null;
     return true;
   } catch (e) {
-    rec.thumbUpgraded = true;
+    _thumbUpgradeFailed[rec.id] = true;
     console.warn('upgrade legacy thumb failed:', rec && rec.id, e);
     return false;
   }
@@ -1879,12 +1887,16 @@ function scheduleLegacyThumbUpgrade() {
   function step() {
     if (idx >= queue.length) {
       _legacyThumbRunning = false;
-      // 只有「升级了东西、且当前没在生成」时才重建列表 —— 否则会打断正在跑的那一轮
+      // 只有「升级了东西、图库正开着、且没在生成」时才重建列表 ——
+      //   否则会打断正在跑的那一轮；图库没开的话，下次打开自然会读到新缩略图。
       if (done > 0) {
         saveImageProviders();
-        if (!state._imageGenerating) renderImageStream();
+        if (state.imageViewOpen && !state._imageGenerating) renderImageStream();
       }
       console.log('[image-gen] 已升级 ' + done + ' 张老缩略图（1024px）');
+      // 还有剩的（老图多于一批）就等一会儿再来一批，全程在后台、用户无感
+      var rest = (settings.images || []).some(function(r) { return isLegacyThumb(r); });
+      if (rest) setTimeout(scheduleLegacyThumbUpgrade, 8000);
       return;
     }
     var rec = queue[idx++];
@@ -1899,15 +1911,34 @@ function scheduleLegacyThumbUpgrade() {
 }
 
 // v123: 读缩略图（优先文件，其次内存字段，最后回退原图）
+// v3.0.3 修：从**文件**读到的缩略图不再写回 `img.thumbDataUrl`。
+//   原实现把 base64 塞回记录，而 `saveImageProviders()` 会把整条记录落盘 ——
+//   96px 时代一条 3.5 KB，86 条也就 300 KB；缩略图提到 1024px 之后一条 ~120 KB，
+//   86 条 ≈ 10 MB，直接顶穿 localStorage/IndexedDB 的配额，保存会失败。
+//   现在只放内存缓存（`_thumbUrlCache`，最多留 40 条），记录里永远只有文件名。
+var _thumbUrlCache = {};
+var _thumbUrlCacheOrder = [];
+var _THUMB_CACHE_MAX = 40;
+function _cacheThumbUrl(id, url) {
+  if (!id) return;
+  if (!_thumbUrlCache[id]) _thumbUrlCacheOrder.push(id);
+  _thumbUrlCache[id] = url;
+  while (_thumbUrlCacheOrder.length > _THUMB_CACHE_MAX) {
+    var old = _thumbUrlCacheOrder.shift();
+    if (old !== id) delete _thumbUrlCache[old];
+  }
+}
 async function getImageThumbUrl(img) {
   if (!img) return null;
+  // 记录自带（浏览器模式 / 老数据遗留）优先
   if (img.thumbDataUrl) return img.thumbDataUrl;
+  if (img.id && _thumbUrlCache[img.id]) return _thumbUrlCache[img.id];
   if (img.thumbName && isCapacitor() && CapFilesystem) {
     try {
       var res = await CapFilesystem.readFile({ path: IMAGE_STORE_DIR + '/' + img.thumbName, directory: 'DATA', encoding: 'utf8' });
       if (res && res.data) {
         var url = 'data:image/jpeg;base64,' + res.data;
-        img.thumbDataUrl = url;
+        _cacheThumbUrl(img.id, url);   // 只进内存，不写回记录
         return url;
       }
     } catch (e) { /* 回退到原图 */ }
