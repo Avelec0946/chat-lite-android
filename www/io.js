@@ -232,6 +232,7 @@ async function restoreFromBackup(e) {
   } catch (err) {
     console.error('Restore failed:', err);
     try { if (plugin) await plugin.cleanDir({ dir: 'chatlite_images.new' }); } catch (e2) {}
+    try { if (plugin) await plugin.closeAllStreams(); } catch (e3) {}
     if (String(err && err.message).indexOf('未选择文件') >= 0) return;   // 用户取消，不当失败报
     showToast('导入失败：' + ((err && err.message) || err), 'danger');
   }
@@ -406,13 +407,18 @@ function createConvScanner() {
   };
 }
 
-// 分块读取器：v1 从 File 对象切片，v2 从 zip 条目按字节区间读（原生插件）。
-//   统一接口：{ total: number|null, next(): Promise<{text, bytes, done}> }
+// 分块读取器：v1 从 File 对象切片，v2 从 zip 条目 / 普通文件按**顺序流**读（原生插件）。
+//   统一接口：{ total: number|null, next(): Promise<{text, bytes, done}>, close(): Promise }
+//   v3.0.4 修：旧的按 offset 随机读有两个致命问题（见插件 openStream 注释）——
+//     ① 每块都从 0 跳一遍 = O(n²)；② Android 的 ZipFileInputStream.skip 越界不报 EOF，
+//     JS 侧 offset 会无限增长、导入永远不结束（真机实测 91.7MB 的包跑 5 分钟还在读）。
+//   现在原生维护读位置，JS 只负责按顺序要下一块。
 function makeFileChunkReader(file) {
   const CHUNK = 2 * 1024 * 1024;
   let offset = 0;
   return {
     total: file.size,
+    close: function () { return Promise.resolve(); },
     next: function () {
       return new Promise(function (resolve, reject) {
         if (offset >= file.size) { resolve({ text: '', bytes: 0, done: true }); return; }
@@ -431,47 +437,51 @@ function makeFileChunkReader(file) {
   };
 }
 
-function makeZipChunkReader(plugin, path, entry) {
+// 原生顺序流读取器（zip 条目 / 普通文件共用）
+//   entry 传 null 表示读普通文件（旧 .json 备份）
+function makeStreamReader(plugin, path, entry) {
   const CHUNK = 2 * 1024 * 1024;
-  let offset = 0;
+  const decoder = new TextDecoder('utf-8');
+  let id = null;
+  let closed = false;
+  async function close() {
+    if (closed) return;
+    closed = true;
+    const cur = id; id = null;
+    if (cur) { try { await plugin.closeStream({ id: cur }); } catch (e) {} }
+  }
   return {
     total: null,
+    close: close,
     next: async function () {
-      const r = await plugin.readChunk({ path: path, entry: entry, offset: offset, length: CHUNK });
+      if (!id) {
+        const o = await plugin.openStream({ path: path, entry: entry || null });
+        id = o.id;
+      }
+      const r = await plugin.readStream({ id: id, length: CHUNK });
       const bytes = r.read || 0;
-      offset += bytes;
       let text = '';
       if (bytes > 0) {
         const bin = atob(r.data || '');
         const arr = new Uint8Array(bin.length);
         for (var i = 0; i < bin.length; i++) arr[i] = bin.charCodeAt(i);
-        text = new TextDecoder('utf-8').decode(arr);
+        // stream:true —— 2MB 的块边界会切断多字节汉字，不这样做每块交界处会变成 U+FFFD
+        text = decoder.decode(arr, { stream: !r.eof });
       }
-      return { text: text, bytes: bytes, done: !!r.eof || bytes === 0 };
+      const done = !!r.eof || bytes === 0;
+      if (done) await close();
+      return { text: text, bytes: bytes, done: done };
     }
   };
 }
 
-// 旧 .json 备份的读取器：按字节区间读普通文件（整读上百 MB 会把 WebView 撑爆）
+function makeZipChunkReader(plugin, path, entry) {
+  return makeStreamReader(plugin, path, entry || 'data.json');
+}
+
+// 旧 .json 备份的读取器：同样是顺序流（整读上百 MB 会把 WebView 撑爆）
 function makePlainFileChunkReader(plugin, path) {
-  const CHUNK = 2 * 1024 * 1024;
-  let offset = 0;
-  return {
-    total: null,
-    next: async function () {
-      const r = await plugin.readFileChunk({ path: path, offset: offset, length: CHUNK });
-      const bytes = r.read || 0;
-      offset += bytes;
-      let text = '';
-      if (bytes > 0) {
-        const bin = atob(r.data || '');
-        const arr = new Uint8Array(bin.length);
-        for (var i = 0; i < bin.length; i++) arr[i] = bin.charCodeAt(i);
-        text = new TextDecoder('utf-8').decode(arr);
-      }
-      return { text: text, bytes: bytes, done: !!r.eof || bytes === 0 };
-    }
-  };
+  return makeStreamReader(plugin, path, null);
 }
 
 async function importAllDataStreamed(reader, mode) {
@@ -484,27 +494,32 @@ async function importAllDataStreamed(reader, mode) {
   let offset = 0;
   const total = reader.total || 0;
 
-  while (true) {
-    const chunk = await reader.next();
-    const text = chunk.text;
-    if (text) {
-      const res = scanner.feed(text);
-      if (!inConvs) {
-        if (res.found) { headText += text.slice(0, res.found.posInChunk); inConvs = true; }
-        else headText += text;   // phase 0 整块累积
+  try {
+    while (true) {
+      const chunk = await reader.next();
+      const text = chunk.text;
+      if (text) {
+        const res = scanner.feed(text);
+        if (!inConvs) {
+          if (res.found) { headText += text.slice(0, res.found.posInChunk); inConvs = true; }
+          else headText += text;   // phase 0 整块累积
+        }
+        for (let k = 0; k < res.objs.length; k++) {
+          newConvs.push(JSON.parse(res.objs[k]));   // 逐条 parse（单条小）
+        }
+        if (res.done) { done = true; if (res.tailText !== null) tailText += res.tailText; }   // 累积（phase 2 每块都是 tail 片段，覆盖会丢前段）
+        else if (done && res.tailText !== null) { tailText += res.tailText; }
+        offset += chunk.bytes || text.length;
       }
-      for (let k = 0; k < res.objs.length; k++) {
-        newConvs.push(JSON.parse(res.objs[k]));   // 逐条 parse（单条小）
+      if (chunk.done) break;
+      if (total && offset % (CHUNK_TOTAL_MARK) === 0) {
+        showToast('导入中 ' + Math.min(100, Math.round(offset / total * 100)) + '%…', 'info');
       }
-      if (res.done) { done = true; if (res.tailText !== null) tailText += res.tailText; }   // 累积（phase 2 每块都是 tail 片段，覆盖会丢前段）
-      else if (done && res.tailText !== null) { tailText += res.tailText; }
-      offset += chunk.bytes || text.length;
+      await new Promise(r => setTimeout(r, 0));   // yield
     }
-    if (chunk.done) break;
-    if (total && offset % (CHUNK_TOTAL_MARK) === 0) {
-      showToast('导入中 ' + Math.min(100, Math.round(offset / total * 100)) + '%…', 'info');
-    }
-    await new Promise(r => setTimeout(r, 0));   // yield
+  } finally {
+    // 中途抛错也要把原生流关掉（正常读完时 reader 自己已经关过一次，close 幂等）
+    try { if (reader.close) await reader.close(); } catch (e) {}
   }
   if (!done) throw new Error('备份格式异常：未找到 conversations 数组结束');
 
