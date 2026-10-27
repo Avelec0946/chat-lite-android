@@ -131,9 +131,11 @@
   // ===== v133：总开关 → 顶栏话筒入口的显隐 =====
   // 放在这里而不是 voice.js 的理由：这是「设置决定界面」，和设置面板同源；
   //   语音运行时只负责「被点开之后」的事，不该知道入口按钮长什么样。
+  // v3.0：判定改成严格的「=== true」。默认关之后，"字段缺了/不是布尔值" 该按关处理，
+  //   用 `!(x === false)` 会把 undefined 当开 —— 与"默认关"正好相反。
   function voiceEnabled() {
     var st = settings && settings.voice;
-    return !(st && st.enabled === false);
+    return !!(st && st.enabled === true);
   }
 
   function syncEntryVisibility() {
@@ -239,8 +241,8 @@
   // ===== 从 settings → DOM（打开设置面板、切换渠道、外部改动后调用）=====
   function syncVoiceSettingsUI() {
     var st = v();
-    // v133：总开关（默认开；老用户没有该键 → 视为开）
-    if ($('voice-enabled')) $('voice-enabled').checked = st.enabled !== false;
+    // v3.0：总开关（默认关；没有该键 → 视为关，与 defaultVoiceSettings 一致）
+    if ($('voice-enabled')) $('voice-enabled').checked = st.enabled === true;
     syncEntryVisibility();
     // v127：渠道下拉已移除 —— 语音走独立的「语音接口」（voice-provider.js 负责渲染）
     if ($('voice-asr-model')) $('voice-asr-model').value = st.asrModel || '';
@@ -346,9 +348,12 @@
     // ===== v133：总开关 =====
     // 它改的是「入口在不在」，用户点完立刻要看结果，所以即时落盘 + 立刻刷顶栏，
     //   不等设置面板的「保存」按钮（那个按钮管的是别的字段）。
+    // v3.0：顺手记「用户表过态」—— 默认关是一次性落地，用户一旦自己选过，
+    //   迁移就再也不许按默认值覆盖他（见 db.js migrateVoiceSettings）。
     var enEl = $('voice-enabled');
     if (enEl) enEl.addEventListener('change', function () {
       st().enabled = !!enEl.checked;
+      st().enabledSetByUser = true;
       persistVoice();
       syncEntryVisibility();
       if (typeof showToast === 'function') {
@@ -558,7 +563,7 @@
     // v133：入口显隐要等 settings 真读出来再定，否则会按默认值把已关掉的入口又显示一次
     whenSettingsReady(function () {
       syncEntryVisibility();
-      if ($('voice-enabled')) $('voice-enabled').checked = (settings.voice || {}).enabled !== false;
+      if ($('voice-enabled')) $('voice-enabled').checked = (settings.voice || {}).enabled === true;
     });
     // v127：语音接口是独立配置，聊天渠道增删与它无关，不再监听 providers-changed
     if (root.VoiceProvider && typeof root.VoiceProvider.init === 'function') {

@@ -20,7 +20,7 @@ def branchTag = isMain ? "" : branchLast
 def appIdBase = "com.avelec.chatlite"
 def appIdFull = isMain ? appIdBase : appIdBase + "." + variantSuffix
 def appNameFull = isMain ? "chat-lite" : "chat-lite [" + branchTag + "]"
-def versionNameFull = isMain ? "2.1" : "2.1-" + branchTag
+def versionNameFull = isMain ? "3.0" : "3.0-" + branchTag
 
 android {
     namespace "com.avelec.chatlite"
@@ -29,7 +29,7 @@ android {
         applicationId appIdFull
         minSdkVersion rootProject.ext.minSdkVersion
         targetSdkVersion rootProject.ext.targetSdkVersion
-        versionCode 2
+        versionCode 3
         versionName versionNameFull
         testInstrumentationRunner "androidx.test.runner.AndroidJUnitRunner"
         // resValue 注入：app_name 和 custom_url_scheme 跟随分支变化（strings.xml 中已移除同名项避免冲突）

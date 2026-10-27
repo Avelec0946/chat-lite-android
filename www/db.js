@@ -151,7 +151,14 @@ function defaultSettings() {
 //   两处共用同一份真相，避免"默认值写了两次、改一处忘一处"。
 function defaultVoiceSettings() {
   return {
-    enabled: true,
+    // v3.0：语音通话改「默认关，需手动打开」。
+    //   它一直挂着 Beta 标：一个试验功能不该默认在顶栏占一格。关掉只是收起入口，
+    //   语音配置、接口、音色一条都不删，打开即恢复。
+    //   ★ 只改默认值对老用户不起作用 —— 迁移是「有值就不覆盖」，而他们的库里
+    //   enabled 早在 v125 就被写成 true 了。所以配一个「用户表过态没有」的标记：
+    //   没碰过开关 → 一次性强制关；碰过 → 尊重选择，永不再覆盖（见 migrateVoiceSettings）。
+    enabled: false,
+    enabledSetByUser: false,
     // v127：语音接口独立配置（voiceProviders），与「接口管理」里的聊天渠道彻底分开。
     //   为什么要独立：聊天渠道是给文本模型用的，语音要的是 asr/tts 专用模型，
     //   而且像 MiMo Token Plan 这类网关地址（token-plan-cn.xiaomimimo.com）只认它自己的
@@ -293,6 +300,11 @@ function migrateVoiceSettings(v) {
   }
   // 类型收敛
   out.enabled = !!out.enabled;
+  // v3.0：默认关的一次性落地（详见 defaultVoiceSettings 里的说明）。
+  //   判断依据不是「值等不等于默认值」，而是一个显式的「用户表过态」标记 ——
+  //   否则用户手动打开后，下次启动又会被按默认值关掉。
+  out.enabledSetByUser = !!out.enabledSetByUser;
+  if (!out.enabledSetByUser) out.enabled = false;
   out.bargeIn = !!out.bargeIn;
   out.showTranscript = !!out.showTranscript;
   out.showSignals = !!out.showSignals;

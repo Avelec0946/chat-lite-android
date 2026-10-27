@@ -275,8 +275,12 @@ async function main() {
     //   这里只要求「至少覆盖契约里的全部字段」，缺字段才是真问题。
     add9('B9.3 voice 字段被迁移补全（≥ 契约字段数）', aft.fieldCount >= 24, 'fieldCount=' + aft.fieldCount);
     const dflt = aft.defaults || {};
+    // v3.0：语音通话默认关（需手动打开），所以这里钉的是 false，不是 true。
+    //   配 enabledSetByUser=false 才算完整 —— 只改 enabled 而不带标记，
+    //   下次迁移会「有值就不覆盖」，老库里的 true 永远关不掉。
     const okDflt = dflt.asrModel === 'mimo-v2.5-asr' && dflt.ttsModel === 'mimo-v2.5-tts' &&
-      dflt.voiceId === 'Mia' && dflt.personaId === 'warm' && dflt.enabled === true &&
+      dflt.voiceId === 'Mia' && dflt.personaId === 'warm' && dflt.enabled === false &&
+      dflt.enabledSetByUser === false &&
       dflt.sensitivity === 0.5 && dflt.endpointSilenceMs === 700 && dflt.minUtteranceMs === 400 &&
       dflt.showTranscript === true && dflt.showSignals === true &&
       dflt.autoHangupSilenceMs === 3600000 && dflt.ttsFormat === 'pcm16' &&
