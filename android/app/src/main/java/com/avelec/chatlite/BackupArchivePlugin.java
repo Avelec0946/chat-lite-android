@@ -287,28 +287,6 @@ public class BackupArchivePlugin extends Plugin {
         return new ZipFile(f);
     }
 
-    // ── 3) 读包里的文本（data.json，通常几百 KB ~ 几 MB）─────────────────
-
-    /** readText({ path? , uri? , entry? }) → { text } */
-    @PluginMethod
-    public void readText(PluginCall call) {
-        String entry = call.getString("entry", "data.json");
-        try {
-            ZipFile zip = openZip(call.getString("path", null), call.getString("uri", null));
-            if (zip == null) { call.reject("打不开备份文件"); return; }
-            ZipEntry e = zip.getEntry(entry);
-            if (e == null) { zip.close(); call.reject("备份里没有 " + entry); return; }
-            String txt;
-            try (InputStream in = zip.getInputStream(e)) { txt = readAll(in); }
-            zip.close();
-            JSObject ret = new JSObject();
-            ret.put("text", txt);
-            call.resolve(ret);
-        } catch (Exception e) {
-            call.reject("读取 " + entry + " 失败：" + e.getMessage());
-        }
-    }
-
     private static String readAll(InputStream in) throws IOException {
         java.io.ByteArrayOutputStream bos = new java.io.ByteArrayOutputStream();
         copyStream(in, bos, new byte[64 * 1024]);
@@ -477,7 +455,7 @@ public class BackupArchivePlugin extends Plugin {
     /**
      * stage({ uri, outPath? }) → { path, size, ms }
      *   把 content:// 的文件复制到 app files 目录（一次复制，之后所有操作都走本地路径，
-     *   避免每次 info/readText/extract 都重拷一遍几百 MB）。
+     *   避免每次 info/extract 都重拷一遍几百 MB）。
      */
     @PluginMethod
     public void stage(PluginCall call) {
@@ -503,47 +481,116 @@ public class BackupArchivePlugin extends Plugin {
     }
 
     /**
-     * readChunk({ path, entry, offset, length }) → { data(base64), eof }
-     *   按字节区间读包内条目 —— data.json 可能上百 MB，JS 侧要分块读回来做流式解析，
-     *   而 Capacitor Filesystem.readFile 没有 offset，只能由原生按区间给。
+     * openStream({ path, entry? }) → { id, size }
+     *   **顺序流式读**（v3.0.4 修）：data.json 可能上百 MB，JS 侧要分块读回来做流式解析。
+     *   旧实现每次 readChunk 都重新 new ZipFile + skip(offset) —— 两个致命后果：
+     *     ① 每块都从 0 跳一遍 → O(n²)，91.7MB 的包要读 ~2GB；
+     *     ② Android 的 ZipFileInputStream.skip 在 STORE 条目上并不可靠，实测越过条目尾部
+     *        仍返回数据、eof 永远为 false → JS 侧 offset 无限增长、导入永远不结束。
+     *   改成：一次打开、顺序读、读完即关（会话表在插件里，读位置由原生维护）。
+     *   entry 为 null 时读普通文件（旧 .json 备份）。
      */
+    private static class StreamSession {
+        InputStream in;
+        ZipFile zip;
+        long pos;
+    }
+
+    private final java.util.HashMap<String, StreamSession> streams = new java.util.HashMap<>();
+    private int streamSeq = 0;
+
     @PluginMethod
-    public void readChunk(PluginCall call) {
+    public void openStream(PluginCall call) {
         String path = call.getString("path", null);
-        String entry = call.getString("entry", "data.json");
-        long offset = call.getLong("offset", 0L);
-        int length = call.getInt("length", 2 * 1024 * 1024);
+        String entry = call.getString("entry", null);
         if (path == null) { call.reject("缺少 path"); return; }
-        if (length <= 0 || length > 8 * 1024 * 1024) length = 2 * 1024 * 1024;
+        StreamSession s = new StreamSession();
         try {
             File f = resolveArchive(path);
-            ZipFile zip = new ZipFile(f);
-            ZipEntry e = zip.getEntry(entry);
-            if (e == null) { zip.close(); call.reject("备份里没有 " + entry); return; }
+            if (f == null || !f.exists()) { call.reject("文件不存在：" + path); return; }
+            long size;
+            if (entry != null) {
+                s.zip = new ZipFile(f);
+                ZipEntry e = s.zip.getEntry(entry);
+                if (e == null) { s.zip.close(); call.reject("备份里没有 " + entry); return; }
+                size = e.getSize();
+                s.in = s.zip.getInputStream(e);
+            } else {
+                size = f.length();
+                s.in = new java.io.BufferedInputStream(new FileInputStream(f), 64 * 1024);
+            }
+            String id = "s" + (++streamSeq);
+            streams.put(id, s);
+            JSObject ret = new JSObject();
+            ret.put("id", id);
+            ret.put("size", size);
+            call.resolve(ret);
+        } catch (Exception e) {
+            try { if (s.zip != null) s.zip.close(); } catch (Exception ignore) {}
+            call.reject("打开失败：" + e.getMessage());
+        }
+    }
+
+    /** readStream({ id, length }) → { data(base64), read, pos, eof } */
+    @PluginMethod
+    public void readStream(PluginCall call) {
+        String id = call.getString("id", null);
+        int length = call.getInt("length", 2 * 1024 * 1024);
+        if (length <= 0 || length > 8 * 1024 * 1024) length = 2 * 1024 * 1024;
+        StreamSession s = id == null ? null : streams.get(id);
+        if (s == null) { call.reject("读取会话不存在：" + id); return; }
+        try {
             byte[] buf = new byte[length];
             int got = 0;
-            try (InputStream in = zip.getInputStream(e)) {
-                long skipped = 0;
-                while (skipped < offset) {
-                    long s = in.skip(offset - skipped);
-                    if (s <= 0) { if (in.read() < 0) break; skipped++; }
-                    else skipped += s;
-                }
-                while (got < length) {
-                    int n = in.read(buf, got, length - got);
-                    if (n < 0) break;
-                    got += n;
-                }
+            while (got < length) {
+                int n = s.in.read(buf, got, length - got);
+                if (n < 0) break;
+                got += n;
             }
-            zip.close();
+            s.pos += got;
             JSObject ret = new JSObject();
             ret.put("data", Base64.encodeToString(buf, 0, got, Base64.NO_WRAP));
             ret.put("read", got);
+            ret.put("pos", s.pos);
             ret.put("eof", got < length);
             call.resolve(ret);
-        } catch (Exception ex) {
-            call.reject("读取分块失败：" + ex.getMessage());
+        } catch (Exception e) {
+            closeStreamSession(id);
+            call.reject("读取失败：" + e.getMessage());
         }
+    }
+
+    /** closeStream({ id }) → { ok } */
+    @PluginMethod
+    public void closeStream(PluginCall call) {
+        closeStreamSession(call.getString("id", null));
+        JSObject ret = new JSObject();
+        ret.put("ok", true);
+        call.resolve(ret);
+    }
+
+    /** closeAllStreams() → { closed }（导入异常中断时兜底，别让原生流一直挂着） */
+    @PluginMethod
+    public void closeAllStreams(PluginCall call) {
+        int n = streams.size();
+        for (String id : new ArrayList<>(streams.keySet())) closeStreamSession(id);
+        JSObject ret = new JSObject();
+        ret.put("closed", n);
+        call.resolve(ret);
+    }
+
+    private void closeStreamSession(String id) {
+        if (id == null) return;
+        StreamSession s = streams.remove(id);
+        if (s == null) return;
+        try { if (s.in != null) s.in.close(); } catch (Exception ignore) {}
+        try { if (s.zip != null) s.zip.close(); } catch (Exception ignore) {}
+    }
+
+    @Override
+    protected void handleOnDestroy() {
+        for (String id : new ArrayList<>(streams.keySet())) closeStreamSession(id);
+        super.handleOnDestroy();
     }
 
     /**
@@ -573,44 +620,6 @@ public class BackupArchivePlugin extends Plugin {
         }
     }
 
-    /**
-     * readFileChunk({ path, offset, length }) → { data(base64), read, eof }
-     *   普通文件（旧的 .json 备份）的按区间读 —— 旧备份也可能上百 MB，不能整读进 JS。
-     */
-    @PluginMethod
-    public void readFileChunk(PluginCall call) {
-        String path = call.getString("path", null);
-        long offset = call.getLong("offset", 0L);
-        int length = call.getInt("length", 2 * 1024 * 1024);
-        if (path == null) { call.reject("缺少 path"); return; }
-        if (length <= 0 || length > 8 * 1024 * 1024) length = 2 * 1024 * 1024;
-        try {
-            File f = resolveArchive(path);
-            byte[] buf = new byte[length];
-            int got = 0;
-            try (FileInputStream in = new FileInputStream(f)) {
-                long skipped = 0;
-                while (skipped < offset) {
-                    long sk = in.skip(offset - skipped);
-                    if (sk <= 0) { if (in.read() < 0) break; skipped++; }
-                    else skipped += sk;
-                }
-                while (got < length) {
-                    int n = in.read(buf, got, length - got);
-                    if (n < 0) break;
-                    got += n;
-                }
-            }
-            JSObject ret = new JSObject();
-            ret.put("data", Base64.encodeToString(buf, 0, got, Base64.NO_WRAP));
-            ret.put("read", got);
-            ret.put("eof", got < length);
-            call.resolve(ret);
-        } catch (Exception ex) {
-            call.reject("读取分块失败：" + ex.getMessage());
-        }
-    }
-
     /** cleanDir({ dir }) → { ok }（导入失败时清掉 staging 目录） */
     @PluginMethod
     public void cleanDir(PluginCall call) {
@@ -623,26 +632,6 @@ public class BackupArchivePlugin extends Plugin {
             call.resolve(ret);
         } catch (Exception e) {
             call.reject("清理失败：" + e.getMessage());
-        }
-    }
-
-    /** entrySize({ path, entry }) → { size }（给 JS 端做进度百分比用） */
-    @PluginMethod
-    public void entrySize(PluginCall call) {
-        String path = call.getString("path", null);
-        String entry = call.getString("entry", "data.json");
-        if (path == null) { call.reject("缺少 path"); return; }
-        try {
-            File f = resolveArchive(path);
-            ZipFile zip = new ZipFile(f);
-            ZipEntry e = zip.getEntry(entry);
-            long size = (e == null) ? -1 : e.getSize();
-            zip.close();
-            JSObject ret = new JSObject();
-            ret.put("size", size);
-            call.resolve(ret);
-        } catch (Exception ex) {
-            call.reject("读取条目大小失败：" + ex.getMessage());
         }
     }
 
