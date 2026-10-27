@@ -341,13 +341,17 @@ body.dark .chat-bg::after{background:rgba(0,0,0,var(--bg-overlay,0.35))}
 
 /* ===== Interrupted Bar ===== */
 .interrupted-bar{
-  display:flex;align-items:center;gap:8px;
+  display:flex;align-items:center;gap:8px;flex-wrap:wrap;
   margin-top:8px;padding:6px 10px;
   background:color-mix(in srgb,var(--warning) 10%,transparent);border:1px solid color-mix(in srgb,var(--warning) 30%,transparent);
   border-radius:6px;font-size:13px;
 }
+/* v3.0.3：给原因一句「不能窄于一句话」的下限。
+   flex:1 的 basis 是 0，min-width 默认 auto 对中文等于 1 个字 ——
+   一旦同一行还挤着多个 nowrap 按钮，这段中文就会被压成「一字一行」的竖排，
+   把整条 bar 撑到几百像素高（2026-10-20 生图错误条实测 470px）。加下限于字号才稳。 */
 .interrupted-reason{
-  color:var(--warning-text);flex:1;
+  color:var(--warning-text);flex:1;min-width:11ch;word-break:break-word;
 }
 .continue-btn{
   padding:4px 12px;border:1px solid var(--primary);border-radius:4px;
@@ -525,7 +529,11 @@ body.image-view-open.sidebar-hidden .image-view{left:0}
 .image-msg.assistant{justify-content:flex-start;padding:10px 28px}
 .image-msg .img-bubble{max-width:75%;padding:10px 16px;border-radius:20px;word-break:break-word}
 .image-msg.user .img-bubble{background:linear-gradient(135deg,var(--bubble-user-from) 0%,var(--bubble-user-to) 100%);color:var(--bubble-user-text);border-bottom-right-radius:7px;box-shadow:0 1px 2px rgba(0,0,0,.06)}
-.image-msg.assistant .img-bubble{background:transparent;color:var(--text);border-radius:0;padding:10px 0;max-width:100%;display:flex;flex-direction:column;gap:8px}
+/* v3.0.3: assistant 气泡改为占满一行。
+   原因：气泡是 flex item，宽度是「shrink-to-fit」—— 里面的卡片宽度由**元信息那一行**
+   （`gpt-image-2.5` + `2048x1536` 约 160px）决定，img 又被 align-items:stretch 拉到同一宽度，
+   于是图片永远只有 ~150px 宽，跟缩略图多少像素无关。要图变大，先得让气泡有确定的宽度。 */
+.image-msg.assistant .img-bubble{background:transparent;color:var(--text);border-radius:0;padding:10px 0;max-width:100%;width:100%;display:flex;flex-direction:column;gap:8px}
 .image-msg .img-bubble p{margin:4px 0;white-space:pre-wrap}
 .image-msg .img-bubble p:first-child{margin-top:0}
 .image-msg .img-bubble p:last-child{margin-bottom:0}
@@ -535,8 +543,11 @@ body.image-view-open.sidebar-hidden .image-view{left:0}
 .img-ref-count{font-size:11px;opacity:0.8;align-self:center}
 
 /* 生成的图片卡片 */
-.image-card{display:flex;flex-direction:column;gap:6px;max-width:100%}
-.image-card img{max-width:100%;max-height:60vh;border-radius:12px;display:block;cursor:pointer;background:var(--bg3);box-shadow:var(--shadow);
+.image-card{display:flex;flex-direction:column;gap:6px;max-width:100%;width:100%}
+/* v3.0.3：缩略图从 96px 提到 1024px，显示上让它铺满气泡宽度（406px 屏实测 351px，是原来的 2 倍多）。
+   480px 是宽屏上限：平板/横屏时不要一张图顶满整屏。
+   width/height 显式 auto，避免被别处的 width:100% 覆盖成拉伸变形。 */
+.image-card img{max-width:min(100%,480px);max-height:60vh;width:auto;height:auto;border-radius:12px;display:block;cursor:pointer;background:var(--bg3);box-shadow:var(--shadow);
   /* v124: 长按要出我们自己的菜单，必须关掉系统「保存图片 / 打开图片」的原生长按菜单，
      否则真机上系统菜单会先抢走这次长按（对话气泡那边也是这么处理的，见 .msg-bubble）。 */
   -webkit-touch-callout:none;-webkit-user-select:none;user-select:none}
@@ -655,6 +666,52 @@ body.image-view-open.sidebar-hidden .image-view{left:0}
 .image-error-dismiss{background:transparent;color:inherit;border-color:currentColor;opacity:.7}
 .image-error-dismiss:hover{opacity:1;filter:none}
 
+/* ===== v3.0.3: 生图错误卡片（两行式） =====
+   旧做法是直接复用对话的 .interrupted-bar：reason（flex:1 basis 0）+ 4 个 nowrap 按钮挤一行，
+   393px 屏上 reason 被压到 1 个汉字宽 → 中文按字断行 → 「已停止等待——…」竖排 11 行，
+   整块 470px 高，几乎占满一屏（2026-10-20 截图）。
+   现在结构与样式一起改：原因独占一行（可折行），动作另起一行右对齐、按需换行。
+   **别再退回单行 flex**：一行里塞 4 个按钮 + 一段中文，在 393px 下没有解。 */
+.img-error-card{
+  display:flex;flex-direction:column;gap:8px;width:100%;max-width:100%;box-sizing:border-box;
+  padding:10px 12px;border-radius:10px;
+  background:color-mix(in srgb,var(--warning) 9%,transparent);
+  border:1px solid color-mix(in srgb,var(--warning) 28%,transparent);
+}
+.img-error-head{display:flex;align-items:flex-start;gap:6px;min-width:0}
+.img-error-icon{flex:0 0 auto;font-size:13px;line-height:1.5;color:var(--warning-text)}
+.img-error-text{
+  flex:1 1 auto;min-width:0;font-size:13px;line-height:1.5;color:var(--warning-text);
+  word-break:break-word;overflow-wrap:anywhere;white-space:pre-wrap;
+  display:-webkit-box;-webkit-box-orient:vertical;-webkit-line-clamp:3;overflow:hidden;
+}
+.img-error-text.expanded{display:block;-webkit-line-clamp:unset;overflow:visible}
+.img-error-actions{display:flex;flex-wrap:wrap;gap:6px;justify-content:flex-end}
+.img-error-actions .continue-btn{padding:4px 10px;font-size:12px;line-height:1.5;white-space:nowrap}
+/* 错误卡片占满一行时不套气泡的透明留白，直接顶到边距 */
+.image-msg.img-error-msg{padding:10px 16px}
+.image-msg.img-error-msg .img-bubble{padding:0;max-width:100%;width:100%}
+
+/* ===== v3.0.3: 历史里长提示词默认收折 =====
+   4 行以内照旧全显示；超过 4 行由 JS 加 .is-collapsed + 「展开」按钮（见 bindPromptCollapse）。
+   只在真的溢出时才收，短提示词不会平白多一个按钮。 */
+.img-prompt-text{margin:4px 0;white-space:pre-wrap;word-break:break-word}
+.img-prompt-text.is-collapsed{
+  display:-webkit-box;-webkit-box-orient:vertical;-webkit-line-clamp:4;overflow:hidden;
+}
+.img-prompt-toggle{
+  display:block;margin:2px 0 0;padding:2px 8px;border:none;border-radius:999px;
+  background:rgba(0,0,0,.14);color:inherit;font-size:11px;line-height:1.5;cursor:pointer;
+  opacity:.8;align-self:flex-start;
+}
+.img-prompt-toggle:active{opacity:1}
+.image-msg.user .img-bubble .img-prompt-toggle{margin-left:auto}
+.image-msg.assistant .img-prompt-toggle{background:var(--bg3);color:var(--text2)}
+
+/* v3.0.3: 追加批次容器 —— display:contents 让新插入的卡片与既有卡片同层排布，
+   不产生额外盒子（否则 .image-stream.has-error 的 flex 列会把整批当一项） */
+.image-batch{display:contents}
+
 /* 空态里的「去配置」引导按钮 */
 .image-empty-cta{margin-top:14px;padding:8px 18px;border:1px solid var(--primary);border-radius:999px;background:transparent;color:var(--primary);font-size:13px;cursor:pointer;transition:background .15s,color .15s}
 .image-empty-cta:hover,.image-empty-cta:active{background:var(--primary);color:var(--on-primary)}
@@ -664,6 +721,10 @@ body.image-view-open.sidebar-hidden .image-view{left:0}
 .image-load-earlier .img-action-btn{border:1px solid var(--border);background:var(--bg2);color:var(--text2);font-size:12px;padding:6px 14px;border-radius:999px}
 .image-load-earlier .img-action-btn:hover{color:var(--primary);border-color:var(--primary)}
 
+/* v3.0.3: 只有旧版 96px 缩略图、原图文件又已丢失的记录 —— 不给它铺满卡片。
+   96px 拉到 350px 只是把马赛克放大，2 倍左右是「能看清是什么」与「不糊成一片」的折中。
+   由 image-gen.js 的 _setCardSrc 在 onload 时按 naturalWidth 打标。 */
+.image-card img.img-lowres{max-width:200px}
 /* 缩略图加载中的占位底色（避免列表在图片到达前是一片空白方块） */
 .image-card img{background:var(--bg3)}
 

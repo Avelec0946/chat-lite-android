@@ -774,20 +774,33 @@ function updateImageAdvancedVisibility() {
 
 // ===== v123: 错误条与图片菜单 =====
 
-// 结构化错误条：与对话界面 .interrupted-bar 同款（⚠ + 原因 + 下一步动作）
-//   v123 之前错误是一次性 DOM，切出视图即消失，也没有重试入口。
+// 结构化错误条：v3.0.3 起改为**两行式错误卡片**（原因一行 / 动作一行）。
+//   历史：v123 直接复用对话界面的 .interrupted-bar —— 那是「一句原因 + 一个按钮」的形状，
+//   生图这边塞了 4 个按钮，393px 屏上原因被挤成 1 个字宽，中文按字断行变成竖排，
+//   整块高 470px（2026-10-20 截图）。所以这里不再复用对话的结构，独立成卡片。
 function buildImageErrorBar() {
   var err = state._imageLastError;
   var wrap = document.createElement('div');
-  wrap.className = 'image-msg assistant';
+  wrap.className = 'image-msg assistant img-error-msg';
   var bubble = document.createElement('div');
   bubble.className = 'img-bubble';
-  var bar = document.createElement('div');
-  bar.className = 'interrupted-bar';
+  var card = document.createElement('div');
+  card.className = 'img-error-card';
+  // 第一行：⚠ + 原因（独占一整行，可正常折行；超 3 行折叠，点一下展开）
+  var head = document.createElement('div');
+  head.className = 'img-error-head';
+  var icon = document.createElement('span');
+  icon.className = 'img-error-icon';
+  icon.textContent = '⚠';
   var reason = document.createElement('span');
-  reason.className = 'interrupted-reason';
-  reason.textContent = '⚠ ' + (err && err.message ? err.message : '生成失败');
-  bar.appendChild(reason);
+  reason.className = 'img-error-text';
+  reason.textContent = (err && err.message) ? err.message : '生成失败';
+  head.appendChild(icon);
+  head.appendChild(reason);
+  card.appendChild(head);
+  // 第二行：动作按钮（右对齐、按需换行，不再和原因抢宽度）
+  var actions = document.createElement('div');
+  actions.className = 'img-error-actions';
   if (state._imageLastRequest) {
     var retryBtn = document.createElement('button');
     retryBtn.className = 'continue-btn';
@@ -798,7 +811,7 @@ function buildImageErrorBar() {
     retryBtn.addEventListener('click', function() {
       retryLastImageGeneration({ submit: true });
     });
-    bar.appendChild(retryBtn);
+    actions.appendChild(retryBtn);
     // v124: 计划要求的「复制提示词」——失败时最常用的下一步是改措辞重发
     var copyBtn = document.createElement('button');
     copyBtn.className = 'continue-btn image-error-dismiss';
@@ -811,7 +824,7 @@ function buildImageErrorBar() {
         showToast(ok ? '提示词已复制' : '复制失败', ok ? 'success' : 'warn');
       });
     });
-    bar.appendChild(copyBtn);
+    actions.appendChild(copyBtn);
     // v124: 计划要求的「检查接口」——直接跳设置并展开生图分组，省掉「自己找」的几步
     var setupBtn2 = document.createElement('button');
     setupBtn2.className = 'continue-btn image-error-dismiss';
@@ -823,7 +836,7 @@ function buildImageErrorBar() {
         if (grp) { grp.open = true; grp.scrollIntoView({ block: 'start', behavior: 'smooth' }); }
       }, 80);
     });
-    bar.appendChild(setupBtn2);
+    actions.appendChild(setupBtn2);
   }
   var dismissBtn = document.createElement('button');
   dismissBtn.className = 'continue-btn image-error-dismiss';
@@ -832,10 +845,31 @@ function buildImageErrorBar() {
     state._imageLastError = null;
     renderImageStream();
   });
-  bar.appendChild(dismissBtn);
-  bubble.appendChild(bar);
+  actions.appendChild(dismissBtn);
+  card.appendChild(actions);
+  bubble.appendChild(card);
   wrap.appendChild(bubble);
   return wrap;
+}
+
+// v3.0.3: 错误文案超过 3 行时，点一下展开/收起（长文案不再只能看到前三行）
+function bindErrorTextExpand(root) {
+  if (!root) return;
+  var nodes = root.querySelectorAll('.img-error-text');
+  for (var i = 0; i < nodes.length; i++) {
+    (function(el) {
+      if (el.dataset.expandBound === '1') return;
+      el.dataset.expandBound = '1';
+      // 折叠状态下 scrollHeight 会大于 clientHeight（line-clamp 生效时）
+      if (el.scrollHeight - el.clientHeight <= 2) return;
+      el.style.cursor = 'pointer';
+      el.title = '点一下展开全文';
+      el.addEventListener('click', function() {
+        var expanded = el.classList.toggle('expanded');
+        el.title = expanded ? '点一下收起' : '点一下展开全文';
+      });
+    })(nodes[i]);
+  }
 }
 
 // v123: 复制文本，Async Clipboard 失败时回退到 execCommand。
@@ -1006,6 +1040,261 @@ function showGalleryMenu(event) {
 // v124: 长按出菜单后短暂抑制随后的 click（passive 手势里 preventDefault 无效，只能自己让路）
 var _suppressImageClickUntil = 0;
 
+// ===== v3.0.3: 卡片模板 / 懒加载 / 事件绑定，拆成可复用的小件 =====
+//   拆的理由：首屏渲染与「生成完只追加新卡片」必须共用同一份模板与同一套绑定
+//   （同一个语义写两遍必然分叉，见看板 §4.24）。
+
+// 单条记录 = 用户气泡 + 图片卡。首屏与追加共用。
+function buildImagePairHtml(img) {
+  // v123: 优先缩略图（列表只加载小图），没有缩略图才回退全尺寸 / 异步读文件
+  var hasThumbField = !!img.thumbDataUrl || !!img.thumbName;
+  // v124 修（v123 缺陷）：此前把「有原图文件名」也判成「有缩略图」——
+  //   于是存量图（v123 之前生成的，没有 thumbName）走进缩略图分支、读不到小图后
+  //   回退全尺寸并缓存进内存；同时 needAsync 恒为 false，异步分支成了死代码。
+  //   现在严格按「有没有缩略图文件」分流：有 → 只读小图；没有 → 读原图并顺手补一张。
+  var needThumb = hasThumbField;
+  var isExt = !!img.externalUrl;                     // v120: 尚未落地的外链图
+  var needAsync = !hasThumbField && !isExt && !!img.fileName;
+  // v69: 参考图缩略图示意（从 img.referenceImages 读取，不可点击）
+  var refThumbsHtml = '';
+  if (img.referenceImages && img.referenceImages.length > 0) {
+    refThumbsHtml = '<div class="img-ref-thumbs">';
+    for (var ri = 0; ri < img.referenceImages.length; ri++) {
+      refThumbsHtml += '<img class="img-ref-thumb" src="' + img.referenceImages[ri] + '" alt="参考图' + (ri + 1) + '">';
+    }
+    refThumbsHtml += '<span class="img-ref-count">' + img.referenceImages.length + ' 张参考图</span></div>';
+  }
+  // v3.0.3: 长提示词默认收折（bindPromptCollapse 负责量行数并挂「展开」）
+  var html = '<div class="image-msg user"><div class="img-bubble">' +
+    '<p class="img-prompt-text">' + escapeHtml(img.prompt || '(无提示词)') + '</p>' + refThumbsHtml +
+    '</div></div>';
+  html += '<div class="image-msg assistant"><div class="img-bubble"><div class="image-card">' +
+    // v3.0.3: 不再把 src 写进 HTML —— 交给 IntersectionObserver 只加载「快进视野」的那几张。
+    //   30 张卡片同时读文件+解码是切换图库时那一顿的直接来源。
+    '<img alt="生成的图片" data-image-id="' + img.id + '"' +
+      ' decoding="async"' +
+      (needAsync ? ' data-need-async="1"' : '') +
+      (needThumb ? ' data-need-thumb="1"' : '') +
+      (isExt ? ' data-external="1" data-need-external="1"' : '') +
+      imageAspectStyle(img) + '>' +
+    '<div class="image-card-meta">' +
+      '<span class="meta-tag">' + escapeHtml(img.model || '-') + '</span>' +
+      '<span class="meta-tag">' + escapeHtml(img.actualSize || img.size || '-') + '</span>' +
+      (img.negativePrompt ? '<span class="meta-tag">neg</span>' : '') +
+      (isExt ? '<span class="meta-tag meta-external">外链</span>' : '') +
+    '</div>' +
+    // v124 修（v123 缺陷）：计划要求「卡片默认只留一个 ⋯」，v123 仍是「保存到相册 + ⋯」
+    //   （外链还多一个「重新下载」）。这里收回菜单里 —— 菜单已含保存/分享/重新下载，功能不减。
+    //   外链图保留一个显式的「重新下载」，因为那是它唯一能自救的动作。
+    '<div class="image-card-actions">' +
+      (isExt ? '<button class="img-action-btn" data-action="refetch" data-id="' + img.id + '">重新下载</button>' : '') +
+      '<button class="img-action-btn" data-action="more" data-id="' + img.id + '">⋯</button>' +
+    '</div>' +
+  '</div></div></div>';
+  return html;
+}
+
+// 预留显示比例：图片还没解码时就把位置占住，避免「先塌成一条、再猛地撑开」的跳版。
+//   新数据用缩略图自身像素；存量数据退到 actualSize（形如 '2048x1152'）。
+function imageAspectStyle(img) {
+  var w = 0, h = 0;
+  if (img && img.thumbW && img.thumbH) { w = img.thumbW; h = img.thumbH; }
+  else if (img && img.actualSize) {
+    var m = /(\d+)\s*[x×*]\s*(\d+)/i.exec(String(img.actualSize));
+    if (m) { w = parseInt(m[1], 10); h = parseInt(m[2], 10); }
+  }
+  if (!w || !h) return '';
+  return ' style="aspect-ratio:' + w + '/' + h + '"';
+}
+
+// 懒加载：只在卡片进入「视野 ±800px」时才去读文件/设 src。
+var _imageCardObserver = null;
+function getImageCardObserver() {
+  if (_imageCardObserver) return _imageCardObserver;
+  if (typeof IntersectionObserver !== 'function') return null;
+  var root = document.getElementById('image-stream');
+  _imageCardObserver = new IntersectionObserver(function(entries) {
+    for (var i = 0; i < entries.length; i++) {
+      if (!entries[i].isIntersecting) continue;
+      _imageCardObserver.unobserve(entries[i].target);
+      loadImageCardSrc(entries[i].target);
+    }
+  }, { root: root || null, rootMargin: '800px 0px' });
+  return _imageCardObserver;
+}
+
+function observeImageCards(root) {
+  if (!root) return;
+  var nodes = root.querySelectorAll('img[data-image-id]');
+  var ob = getImageCardObserver();
+  for (var i = 0; i < nodes.length; i++) {
+    var el = nodes[i];
+    if (el.dataset.observed === '1') continue;
+    el.dataset.observed = '1';
+    if (ob) ob.observe(el);
+    else loadImageCardSrc(el);   // 没有 IntersectionObserver 就退回「全加载」
+  }
+}
+
+function _setCardSrc(imgEl, url) {
+  imgEl.dataset.loading = '';
+  imgEl.dataset.loaded = '1';
+  // v3.0.3: 只有旧版 96px 缩略图、原图又已不在的记录 —— 不要给它铺满卡片
+  //   （96px 拉到 350px 只是把马赛克放大）。按解码后的真实像素打标，CSS 负责收窄。
+  imgEl.onload = function() {
+    if (imgEl.naturalWidth && imgEl.naturalWidth < 220 && !imgEl.classList.contains('img-lowres')) {
+      imgEl.classList.add('img-lowres');
+      imgEl.title = '原图文件已丢失，这是旧版留下的缩略图';
+    }
+  };
+  imgEl.src = url;
+}
+
+// 真正取图（幂等：同一张卡只会走一次）
+function loadImageCardSrc(imgEl) {
+  if (!imgEl || imgEl.dataset.loaded === '1' || imgEl.dataset.loading === '1') return;
+  var imageId = imgEl.dataset.imageId;
+  var imgObj = (settings.images || []).find(function(x) { return x.id === imageId; });
+  if (!imgObj) return;
+  imgEl.dataset.loading = '1';
+  // 外链：直接挂 URL，图床可达就显示（失败由 error 监听补提示）
+  if (imgEl.dataset.needExternal === '1') {
+    _setCardSrc(imgEl, imgObj.externalUrl);
+    return;
+  }
+  // 有缩略图文件/内存缩略图 → 只读小图
+  if (imgEl.dataset.needThumb === '1') {
+    getImageThumbUrl(imgObj).then(function(thumbUrl) {
+      if (thumbUrl) { _setCardSrc(imgEl, thumbUrl); return; }
+      // 缩略图文件丢了 → 回退原图（并提示，而不是留一块灰底）
+      getImageDataUrl(imgObj).then(function(dataUrl) {
+        if (dataUrl) _setCardSrc(imgEl, dataUrl);
+        else { imgEl.dataset.loading = ''; showBrokenImageNote(imgEl, imgObj); }
+      });
+    });
+    return;
+  }
+  // 存量图（没有缩略图字段）→ 读原图，顺手补一张缩略图
+  if (imgEl.dataset.needAsync === '1') {
+    getImageDataUrl(imgObj).then(function(dataUrl) {
+      if (!dataUrl) {
+        // v120: 读不出内容 = 历史空文件残骸，明确说明，而不是留一块灰底让人猜
+        imgEl.dataset.loading = '';
+        showBrokenImageNote(imgEl, imgObj);
+        return;
+      }
+      _setCardSrc(imgEl, dataUrl);
+      if (!imgObj.externalUrl) backfillImageThumbnail(imgObj, dataUrl);
+    });
+    return;
+  }
+  // 兜底：浏览器模式下只存了 dataUrl 的记录（没有 thumbName / fileName）
+  if (imgObj.dataUrl) { _setCardSrc(imgEl, imgObj.dataUrl); return; }
+  imgEl.dataset.loading = '';
+}
+
+// 长提示词收折：超过 4 行才收，且给出「展开 / 收起」
+function bindPromptCollapse(root) {
+  if (!root) return;
+  var nodes = root.querySelectorAll('.img-prompt-text');
+  for (var i = 0; i < nodes.length; i++) {
+    (function(el) {
+      if (el.dataset.collapseBound === '1') return;
+      el.dataset.collapseBound = '1';
+      // 先按「已收折」量一次：放得下 4 行就当没这回事，放不下才收 + 给按钮
+      el.classList.add('is-collapsed');
+      var clipped = (el.scrollHeight - el.clientHeight) > 4;
+      if (!clipped) { el.classList.remove('is-collapsed'); return; }
+      var btn = document.createElement('button');
+      btn.type = 'button';
+      btn.className = 'img-prompt-toggle';
+      btn.textContent = '展开';
+      btn.addEventListener('click', function() {
+        var collapsed = el.classList.toggle('is-collapsed');
+        btn.textContent = collapsed ? '展开' : '收起';
+        imageHaptic('tap');   // 展开/收起给一下最轻的触感，别让人怀疑「点到了没」
+      });
+      if (el.parentNode) el.parentNode.insertBefore(btn, el.nextSibling);
+    })(nodes[i]);
+  }
+}
+
+// 卡片上的全部交互（幂等：data-bound 标记，重复调用不会重复绑）
+function bindImageStreamEvents(root) {
+  if (!root) return;
+  // 点击预览
+  // v123 修：列表里 img 的 src 是**缩略图**（96px），此前直接把 imgEl.src 传给预览，
+  //   结果点开看到的是模糊小图。改为只把 id 传进去，由 showImagePreview 自己取原图，
+  //   缩略图仅作为「打开前的一帧占位」，原图读回来后再替换。
+  root.querySelectorAll('img[data-image-id]').forEach(function(imgEl) {
+    if (imgEl.dataset.bound === '1') return;
+    imgEl.dataset.bound = '1';
+    imgEl.addEventListener('click', function() {
+      // v124: 长按刚出过菜单时，这一下 click 属于同一次手势的尾巴，不该再弹大图预览
+      if (Date.now() < _suppressImageClickUntil) return;
+      showImagePreview(imgEl.src, imgEl.dataset.imageId);
+    });
+    // v120: 外链加载失败兜底（图床过期 / 临时不可达）——补一条可读提示，不让人对着一块灰底发愣
+    if (imgEl.dataset.external === '1') {
+      var showNote = function() {
+        if (imgEl.dataset.errShown) return;
+        imgEl.dataset.errShown = '1';
+        var card = imgEl.closest ? imgEl.closest('.image-card') : null;
+        if (card && !card.querySelector('.image-external-note')) {
+          var note = document.createElement('div');
+          note.className = 'image-external-note';
+          note.textContent = '外链暂时加载不出来（图床可能已过期）。可点「重新下载」重试，或稍后再看。';
+          card.insertBefore(note, imgEl.nextSibling);
+        }
+      };
+      imgEl.addEventListener('error', showNote);
+      // 绑定前就已失败的情况（缓存命中 error 可能同步触发，错过监听）
+      if (imgEl.complete && imgEl.naturalWidth === 0 && imgEl.getAttribute('src')) showNote();
+    }
+    // v123: 长按图片卡片出菜单（与对话气泡菜单一致：600ms、移动 >15px 取消）
+    var timer = null, startX = 0, startY = 0, fired = false;
+    var cancel = function() { if (timer) { clearTimeout(timer); timer = null; } };
+    imgEl.addEventListener('touchstart', function(e) {
+      if (e.touches.length !== 1) { cancel(); return; }
+      startX = e.touches[0].clientX; startY = e.touches[0].clientY; fired = false;
+      cancel();
+      timer = setTimeout(function() {
+        timer = null; fired = true;
+        showImageCardMenu({ clientX: startX, clientY: startY, preventDefault: function() {} }, imgEl.dataset.imageId);
+      }, 600);
+    }, { passive: true });
+    imgEl.addEventListener('touchmove', function(e) {
+      if (!e.touches || !e.touches.length) return;
+      if (Math.abs(e.touches[0].clientX - startX) > 15 || Math.abs(e.touches[0].clientY - startY) > 15) cancel();
+    }, { passive: true });
+    imgEl.addEventListener('touchend', function() {
+      cancel();
+      // v124 修：v123 在这里用 e.preventDefault() 想挡住长按后的 click —— 但 touchstart 是
+      //   {passive:true}，该手势已被标记为不可取消，preventDefault 只会在控制台报错，click 照发。
+      //   改成「打一个短暂的时间戳标记」，由 click 处理器自己让路（见上面 data-image-id 的 click 绑定）。
+      if (fired) { fired = false; _suppressImageClickUntil = Date.now() + 700; }
+    });
+    imgEl.addEventListener('touchcancel', cancel);
+    // 桌面端：右键同样出菜单
+    imgEl.addEventListener('contextmenu', function(e) { e.preventDefault(); showImageCardMenu(e, imgEl.dataset.imageId); });
+  });
+  // 操作按钮
+  root.querySelectorAll('.img-action-btn').forEach(function(btn) {
+    if (btn.dataset.bound === '1') return;
+    btn.dataset.bound = '1';
+    btn.addEventListener('click', function(ev) {
+      var action = btn.dataset.action;
+      var id = btn.dataset.id;
+      if (action === 'more') { ev.stopPropagation(); showImageCardMenu(ev, id); }
+      else if (action === 'save') saveImageToDevice(id);
+      else if (action === 'refetch') refetchExternalImage(id, false);
+    });
+  });
+  // 长提示词收折 + 错误文案展开
+  bindPromptCollapse(root);
+  bindErrorTextExpand(root);
+}
+
 function renderImageStream() {
   var stream = document.getElementById('image-stream');
   if (!stream) return;
@@ -1015,6 +1304,7 @@ function renderImageStream() {
     //   会被挤出可视区（实测只剩顶部一条边）。有错误时改成纵向排列：
     //   空态让位、错误条排在它下方并保持可见。
     stream.classList.toggle('has-error', !!state._imageLastError);
+    state._imageRenderedCount = 0;
     stream.innerHTML = '<div class="image-empty" id="image-empty">' +
       '<svg width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" opacity="0.4"><rect x="3" y="3" width="18" height="18" rx="2"/><circle cx="8.5" cy="8.5" r="1.5"/><polyline points="21 15 16 10 5 21"/></svg>' +
       '<h2>生图</h2><p>输入提示词，生成图片</p>' +
@@ -1048,47 +1338,14 @@ function renderImageStream() {
     html += '<div class="image-load-earlier"><button type="button" class="img-action-btn" id="btn-image-load-earlier">显示更早的 ' + startIdx + ' 条</button></div>';
   }
   for (var i = startIdx; i < images.length; i++) {
-    var img = images[i];
-    // v123: 优先缩略图（列表只加载小图），没有缩略图才回退全尺寸 / 异步读文件
-    var imgSrc = img.thumbDataUrl || '';
-    // v124 修（v123 缺陷）：此前把「有原图文件名」也判成「有缩略图」——
-    //   于是存量图（v123 之前生成的，没有 thumbName）走进缩略图分支、读不到小图后
-    //   回退全尺寸并缓存进内存；同时 needAsync 恒为 false，异步分支成了死代码。
-    //   现在严格按「有没有缩略图文件」分流：有 → 只读小图；没有 → 读原图并顺手补一张。
-    var needThumb = !imgSrc && !!img.thumbName;
-    var needAsync = !imgSrc && !img.thumbName && !!img.fileName;
-    var isExt = !!img.externalUrl;  // v120: 尚未落地的外链图
-    if (!imgSrc && !needThumb && !needAsync && isExt) imgSrc = img.externalUrl;
-    // v69: 参考图缩略图示意（从 img.referenceImages 读取，不可点击）
-    var refThumbsHtml = '';
-    if (img.referenceImages && img.referenceImages.length > 0) {
-      refThumbsHtml = '<div class="img-ref-thumbs">';
-      for (var ri = 0; ri < img.referenceImages.length; ri++) {
-        refThumbsHtml += '<img class="img-ref-thumb" src="' + img.referenceImages[ri] + '" alt="参考图' + (ri + 1) + '">';
-      }
-      refThumbsHtml += '<span class="img-ref-count">' + img.referenceImages.length + ' 张参考图</span></div>';
-    }
-    html += '<div class="image-msg user"><div class="img-bubble"><p>' + escapeHtml(img.prompt || '(无提示词)') + '</p>' + refThumbsHtml + '</div></div>';
-    html += '<div class="image-msg assistant"><div class="img-bubble"><div class="image-card">' +
-      '<img src="' + imgSrc + '" alt="生成的图片" loading="lazy" data-image-id="' + img.id + '"' + (needAsync ? ' data-need-async="1"' : '') + (needThumb ? ' data-need-thumb="1"' : '') + (isExt ? ' data-external="1"' : '') + '>' +
-      '<div class="image-card-meta">' +
-        '<span class="meta-tag">' + escapeHtml(img.model || '-') + '</span>' +
-        '<span class="meta-tag">' + escapeHtml(img.actualSize || img.size || '-') + '</span>' +
-        (img.negativePrompt ? '<span class="meta-tag">neg</span>' : '') +
-        (isExt ? '<span class="meta-tag meta-external">外链</span>' : '') +
-      '</div>' +
-      // v124 修（v123 缺陷）：计划要求「卡片默认只留一个 ⋯」，v123 仍是「保存到相册 + ⋯」
-      //   （外链还多一个「重新下载」）。这里收回菜单里 —— 菜单已含保存/分享/重新下载，功能不减。
-      //   外链图保留一个显式的「重新下载」，因为那是它唯一能自救的动作。
-      '<div class="image-card-actions">' +
-        (isExt ? '<button class="img-action-btn" data-action="refetch" data-id="' + img.id + '">重新下载</button>' : '') +
-        '<button class="img-action-btn" data-action="more" data-id="' + img.id + '">⋯</button>' +
-      '</div>' +
-    '</div></div></div>';
+    html += buildImagePairHtml(images[i]);
   }
   // v124: 重建 DOM 会把 scrollTop 归零，所以「原来是不是贴着底」必须在赋值前量。
   var _wasPinned = (stream.scrollHeight - stream.scrollTop - stream.clientHeight) < 160;
   stream.innerHTML = html;
+  // v3.0.3: 记住「这次渲染到了第几条」——生成完成后若尾部只是追加，就只插入新卡片，
+  //   不再整表重建（重建会把 30 张缩略图全部重读一遍，那是出图后那一顿的来源）。
+  state._imageRenderedCount = images.length;
   // v123: 上一次失败的错误条（结构化留存，重渲染后仍在）
   if (state._imageLastError) stream.appendChild(buildImageErrorBar());
   // v123: 「显示更早」——逐页展开（每次再加载 30 条）
@@ -1109,103 +1366,10 @@ function renderImageStream() {
       }, 0);
     });
   }
-  // v123: 缩略图异步加载（列表主路径）—— 只读 96px 小图，不碰全尺寸原图
-  stream.querySelectorAll('img[data-need-thumb="1"]').forEach(function(imgEl) {
-    var imageId = imgEl.dataset.imageId;
-    var imgObj = (settings.images || []).find(function(x) { return x.id === imageId; });
-    if (!imgObj) return;
-    getImageThumbUrl(imgObj).then(function(thumbUrl) {
-      if (thumbUrl) { imgEl.src = thumbUrl; imgEl.removeAttribute('data-need-thumb'); return; }
-      // 没有缩略图（旧数据）→ 回退原图
-      getImageDataUrl(imgObj).then(function(dataUrl) {
-        if (dataUrl) imgEl.src = dataUrl; else showBrokenImageNote(imgEl, imgObj);
-      });
-    });
-  });
-  // 异步加载 Filesystem 中的图片（APK 模式，无缩略图的旧数据）
-  //   v124: 读到原图后顺手补一张 96px 缩略图并落盘 —— 存量图也能在下次渲染时走小图路径，
-  //         否则「缩略图止血」永远只对新图生效（v123 的实际状态）。
-  stream.querySelectorAll('img[data-need-async="1"]').forEach(function(imgEl) {
-    var imageId = imgEl.dataset.imageId;
-    var imgObj = (settings.images || []).find(function(x) { return x.id === imageId; });
-    if (!imgObj) return;
-    getImageDataUrl(imgObj).then(function(dataUrl) {
-      if (!dataUrl) {
-        // v120: 读不出内容 = 历史空文件残骸，明确说明，而不是留一块灰底让人猜
-        showBrokenImageNote(imgEl, imgObj);
-        return;
-      }
-      imgEl.src = dataUrl;
-      if (!imgObj.externalUrl) backfillImageThumbnail(imgObj, dataUrl);
-    });
-  });
-  // 绑定图片点击预览
-  // v123 修：列表里 img 的 src 是**缩略图**（96px），此前直接把 imgEl.src 传给预览，
-  //   结果点开看到的是模糊小图。改为只把 id 传进去，由 showImagePreview 自己取原图，
-  //   缩略图仅作为「打开前的一帧占位」，原图读回来后再替换。
-  stream.querySelectorAll('img[data-image-id]').forEach(function(imgEl) {
-    imgEl.addEventListener('click', function() {
-      // v124: 长按刚出过菜单时，这一下 click 属于同一次手势的尾巴，不该再弹大图预览
-      if (Date.now() < _suppressImageClickUntil) return;
-      showImagePreview(imgEl.src, imgEl.dataset.imageId);
-    });
-  });
-  // v120: 外链加载失败兜底（图床过期 / 临时不可达）——补一条可读提示，不让人对着一块灰底发愣
-  stream.querySelectorAll('img[data-external="1"]').forEach(function(imgEl) {
-    var showNote = function() {
-      if (imgEl.dataset.errShown) return;
-      imgEl.dataset.errShown = '1';
-      var card = imgEl.closest ? imgEl.closest('.image-card') : null;
-      if (card && !card.querySelector('.image-external-note')) {
-        var note = document.createElement('div');
-        note.className = 'image-external-note';
-        note.textContent = '外链暂时加载不出来（图床可能已过期）。可点「重新下载」重试，或稍后再看。';
-        card.insertBefore(note, imgEl.nextSibling);
-      }
-    };
-    imgEl.addEventListener('error', showNote);
-    // 绑定前就已失败的情况（缓存命中 error 可能同步触发，错过监听）
-    if (imgEl.complete && imgEl.naturalWidth === 0) showNote();
-  });
-  // 绑定操作按钮
-  stream.querySelectorAll('.img-action-btn').forEach(function(btn) {
-    btn.addEventListener('click', function(ev) {
-      var action = btn.dataset.action;
-      var id = btn.dataset.id;
-      if (action === 'more') { ev.stopPropagation(); showImageCardMenu(ev, id); }
-      else if (action === 'save') saveImageToDevice(id);
-      else if (action === 'refetch') refetchExternalImage(id, false);
-    });
-  });
-
-  // v123: 长按图片卡片出菜单（与对话气泡菜单一致：600ms、移动 >15px 取消）
-  stream.querySelectorAll('img[data-image-id]').forEach(function(imgEl) {
-    var timer = null, startX = 0, startY = 0, fired = false;
-    var cancel = function() { if (timer) { clearTimeout(timer); timer = null; } };
-    imgEl.addEventListener('touchstart', function(e) {
-      if (e.touches.length !== 1) { cancel(); return; }
-      startX = e.touches[0].clientX; startY = e.touches[0].clientY; fired = false;
-      cancel();
-      timer = setTimeout(function() {
-        timer = null; fired = true;
-        showImageCardMenu({ clientX: startX, clientY: startY, preventDefault: function() {} }, imgEl.dataset.imageId);
-      }, 600);
-    }, { passive: true });
-    imgEl.addEventListener('touchmove', function(e) {
-      if (!e.touches || !e.touches.length) return;
-      if (Math.abs(e.touches[0].clientX - startX) > 15 || Math.abs(e.touches[0].clientY - startY) > 15) cancel();
-    }, { passive: true });
-    imgEl.addEventListener('touchend', function(e) {
-      cancel();
-      // v124 修：v123 在这里用 e.preventDefault() 想挡住长按后的 click —— 但 touchstart 是
-      //   {passive:true}，该手势已被标记为不可取消，preventDefault 只会在控制台报错，click 照发。
-      //   改成「打一个短暂的时间戳标记」，由 click 处理器自己让路（见下面 data-image-id 的 click 绑定）。
-      if (fired) { fired = false; _suppressImageClickUntil = Date.now() + 700; }
-    });
-    imgEl.addEventListener('touchcancel', cancel);
-    // 桌面端：右键同样出菜单
-    imgEl.addEventListener('contextmenu', function(e) { e.preventDefault(); showImageCardMenu(e, imgEl.dataset.imageId); });
-  });
+  // v3.0.3: 绑定交互（点击/长按/操作按钮/长提示词收折/错误文案展开）与懒加载观察
+  //   拆成两件幂等的小事，追加路径复用同一个入口，避免「首屏绑一套、追加再绑一套」。
+  bindImageStreamEvents(stream);
+  observeImageCards(stream);
   // 滚动（v124 修）：v123 每次渲染都无条件滚到底，导致顶部的「显示更早」按钮刚出现就被滚出视口、
   //   点一下又跳走。现在只在「渲染前本来就贴着底」时才跟随到底，否则保持原位。
   if (_wasPinned) setTimeout(function() { stream.scrollTop = stream.scrollHeight; }, 0);
@@ -1224,6 +1388,61 @@ function renderImageStream() {
     setImageSendIcon(true);
   }
 }
+// v3.0.3: 只把「这一轮新生成的」卡片追加到列表尾部，不整表重建。
+//   为什么要它：出图后原本调 renderImageStream()，那会把最近 30 条全部重写一遍 ——
+//   30 张缩略图重新读文件、重新解码，用户看到的是「图出来了，但界面先卡一下」。
+//   只有在「视图上已渲染到的位置正好是数组尾部」时才走这条快路径，其余情况一律回退整表重建
+//   （例如用户正停在「更早」的某一页、或期间删过图）。
+function appendImageMessages(newImgs) {
+  var stream = document.getElementById('image-stream');
+  if (!stream || !newImgs || newImgs.length === 0) return false;
+  // 空态还在（图库原本是空的，或刚被清空）→ 让整表重建负责处理空态节点
+  if (document.getElementById('image-empty')) return false;
+  var html = '';
+  for (var i = 0; i < newImgs.length; i++) html += buildImagePairHtml(newImgs[i]);
+  var batch = document.createElement('div');
+  batch.className = 'image-batch';
+  batch.innerHTML = html;
+  // 上一轮失败留下的错误卡片要摘掉（这一次已经成功，state._imageLastError 已清空，
+  //   但那是数据、DOM 还在，留着会出现「图已出来、下面还挂着上次的报错」）
+  var staleErr = stream.querySelectorAll('.img-error-msg');
+  for (var k = 0; k < staleErr.length; k++) staleErr[k].remove();
+  // 生成中的占位要排在新内容之前（它是「正在进行」的那一轮，不是结果）
+  var anchor = document.getElementById('image-loading-msg');
+  stream.insertBefore(batch, anchor || null);
+  bindImageStreamEvents(batch);
+  observeImageCards(batch);
+  state._imageRenderedCount = (settings.images || []).length;
+  // 「显示更早」的条数跟着变（它算的是「没渲染出来的条数」）
+  var earlierBtn = document.getElementById('btn-image-load-earlier');
+  if (earlierBtn) {
+    var total = (settings.images || []).length;
+    var hiddenCount = Math.max(0, total - Math.min(total, state._imagePageSize || 30));
+    if (hiddenCount > 0) earlierBtn.textContent = '显示更早的 ' + hiddenCount + ' 条';
+    else earlierBtn.parentNode && earlierBtn.parentNode.remove();
+  }
+  // 刚生成完 = 用户就是想看新图，直接跟随到底（对齐对话界面「发完就滚到底」的直觉）
+  requestAnimationFrame(function() { stream.scrollTop = stream.scrollHeight; });
+  return true;
+}
+
+
+// v3.0.3: 失败时只追加一张错误卡片，不整表重建（理由同 appendImageMessages：
+//   重建会把列表里 30 张缩略图全部重读，报错当下先卡一下，观感最差）。
+//   返回 false 表示这条快路径不适用（例如图库为空，需要 has-error 的纵向布局）。
+function appendImageErrorBar() {
+  var stream = document.getElementById('image-stream');
+  if (!stream) return false;
+  if (document.getElementById('image-empty')) return false;
+  var stale = stream.querySelectorAll('.img-error-msg');
+  for (var i = 0; i < stale.length; i++) stale[i].remove();
+  var loading = document.getElementById('image-loading-msg');
+  stream.insertBefore(buildImageErrorBar(), loading || null);
+  bindErrorTextExpand(stream);
+  requestAnimationFrame(function() { stream.scrollTop = stream.scrollHeight; });
+  return true;
+}
+
 // v120: 「历史空文件残骸」的可读说明。
 //   v120 之前，外链下载失败时会把 URL 当 base64 写入，落下 0 字节文件并把地址一起丢掉 ——
 //   这些记录在磁盘上永远读不出内容。此处如实告知，并引导删除后重新生成。
@@ -1268,7 +1487,13 @@ function showImagePreview(src, imgId) {
     var previewImgObj = (settings.images || []).find(function(x) { return x.id === imgId; });
     if (previewImgObj && !previewImgObj.externalUrl) {
       getImageDataUrl(previewImgObj).then(function(fullUrl) {
-        if (!fullUrl) return;
+        if (!fullUrl) {
+          // v3.0.3: 原图文件不在了（该包实测存在这种记录）—— 预览里只剩旧版 96px 缩略图，
+          //   必须如实说清楚，否则用户放大后只会觉得「这个 App 的图好糊」。
+          var hint = document.querySelector('.image-preview-overlay .image-preview-hint');
+          if (hint) hint.textContent = '原图文件已丢失，当前只显示旧版缩略图';
+          return;
+        }
         var cur = document.querySelector('.image-preview-overlay img');
         if (!cur || !cur.isConnected) return;
         cur.src = fullUrl;
@@ -1516,15 +1741,19 @@ function compressImageForGeneration(file) {
 // settings.images 只存元数据 + fileName；dataUrl 在 APK 模式下存到 Filesystem，浏览器模式仍存 dataUrl
 var IMAGE_STORE_DIR = 'chatlite_images';  // Filesystem 目录名（DATA）
 
-// v123: 生成缩略图（最长边 96px，JPEG 0.72）。图库列表用它，避免每次渲染都塞全尺寸 dataUrl —— 这是 OOM 的直接止血。
-//   返回 { thumbDataUrl, w, h }；失败返回 null（调用方回退到原图，不阻断主流程）。
+// v123: 生成缩略图（v3.0.3 起最长边 1024px / JPEG 0.78）。图库列表用它，避免每次渲染都塞全尺寸 dataUrl。
+//   96px（v123 的原值）在 2K/3x 屏上铺满卡片宽度时只有设备像素的 ~9%，糊到影响观感。
+//   尺寸怎么定的：卡片实测 351 CSS px、dpr 3 → 需要 1053 设备像素才 1:1，1024 正好吻合；
+//   体积：4:3 一张约 90~140 KB（落盘），列表最多 30 张 → ~4 MB，仍远低于全尺寸原图。
+//   返回 { thumbDataUrl, w, h, thumbW, thumbH }；失败返回 null（调用方回退到原图，不阻断主流程）。
+//   w/h = 原图像素（用于「实际尺寸」展示）；thumbW/thumbH = 缩略图自身像素（渲染时占位用）。
 function buildImageThumbnail(dataUrl) {
   return new Promise(function(resolve) {
     try {
       var probe = new Image();
       probe.onload = function() {
         try {
-          var maxSide = 96;
+          var maxSide = 1024;
           var scale = Math.min(1, maxSide / Math.max(probe.naturalWidth || 1, probe.naturalHeight || 1));
           var tw = Math.max(1, Math.round((probe.naturalWidth || 1) * scale));
           var th = Math.max(1, Math.round((probe.naturalHeight || 1) * scale));
@@ -1532,11 +1761,15 @@ function buildImageThumbnail(dataUrl) {
           canvas.width = tw;
           canvas.height = th;
           var ctx = canvas.getContext('2d');
+          // 缩小绘制时给浏览器一个质量开关：低端机也能拿到像样的下采样
+          try { ctx.imageSmoothingEnabled = true; ctx.imageSmoothingQuality = 'high'; } catch (eSm) {}
           ctx.drawImage(probe, 0, 0, tw, th);
           resolve({
-            thumbDataUrl: canvas.toDataURL('image/jpeg', 0.72),
+            thumbDataUrl: canvas.toDataURL('image/jpeg', 0.78),
             w: probe.naturalWidth || 0,
-            h: probe.naturalHeight || 0
+            h: probe.naturalHeight || 0,
+            thumbW: tw,
+            thumbH: th
           });
         } catch (e) { resolve(null); }
       };
@@ -1598,6 +1831,71 @@ function backfillImageThumbnail(img, dataUrl) {
   }).then(function() {
     delete _thumbBackfilling[img.id];
   });
+}
+
+// v3.0.3: 老缩略图升级（最长边 < 900 或没有记录尺寸的，都算「v123 时代的 96px」）。
+//   逐张做、做完就存、把新尺寸记进 thumbW/thumbH —— 记了尺寸下次启动就不会再做。
+//   失败也打标（thumbUpgraded），否则每次启动都会重试同一张读不出来的图。
+var _legacyThumbRunning = false;
+function isLegacyThumb(rec) {
+  if (!rec || rec.thumbUpgraded) return false;
+  if (rec.externalUrl || !rec.fileName) return false;
+  var side = Math.max(rec.thumbW || 0, rec.thumbH || 0);
+  return side < 900;   // 新规格最长边 1024；老规格 96
+}
+async function _upgradeOneLegacyThumb(rec) {
+  try {
+    var full = await getImageDataUrl(rec);
+    if (!full) { rec.thumbUpgraded = true; return false; }
+    var meta = await buildImageThumbnail(full);
+    if (!meta || !meta.thumbDataUrl) { rec.thumbUpgraded = true; return false; }
+    var name = await writeThumbFile(meta.thumbDataUrl, rec.id);
+    if (name) { rec.thumbName = name; rec.thumbDataUrl = null; }
+    else { rec.thumbDataUrl = meta.thumbDataUrl; }
+    rec.thumbW = meta.thumbW;
+    rec.thumbH = meta.thumbH;
+    rec.thumbUpgraded = true;
+    // 内存里可能还留着老缩略图 —— 丢掉，让 getImageThumbUrl 重新从文件读新的
+    rec.thumbDataUrl = null;
+    return true;
+  } catch (e) {
+    rec.thumbUpgraded = true;
+    console.warn('upgrade legacy thumb failed:', rec && rec.id, e);
+    return false;
+  }
+}
+// 排队跑：新的优先、每张之间让出主线程、一次最多 24 张（剩下的下次启动继续）。
+function scheduleLegacyThumbUpgrade() {
+  if (_legacyThumbRunning) return;
+  var all = settings.images || [];
+  var queue = [];
+  for (var i = all.length - 1; i >= 0; i--) {   // 倒序 = 最新的先升
+    if (isLegacyThumb(all[i])) queue.push(all[i]);
+    if (queue.length >= 24) break;
+  }
+  if (!queue.length) return;
+  _legacyThumbRunning = true;
+  var idx = 0, done = 0;
+  function step() {
+    if (idx >= queue.length) {
+      _legacyThumbRunning = false;
+      // 只有「升级了东西、且当前没在生成」时才重建列表 —— 否则会打断正在跑的那一轮
+      if (done > 0) {
+        saveImageProviders();
+        if (!state._imageGenerating) renderImageStream();
+      }
+      console.log('[image-gen] 已升级 ' + done + ' 张老缩略图（1024px）');
+      return;
+    }
+    var rec = queue[idx++];
+    _upgradeOneLegacyThumb(rec).then(function(changed) {
+      if (changed) done++;
+      // 每张之间留点空档：这几步要读全尺寸原图 + 画 canvas，连着做会顶到掉帧
+      setTimeout(step, 80);
+    });
+  }
+  // 启动后先让界面把首屏画完，再开始升级
+  setTimeout(step, 1500);
 }
 
 // v123: 读缩略图（优先文件，其次内存字段，最后回退原图）
@@ -1911,22 +2209,27 @@ function currentImageRefLimit() {
 
 // ===== v123: 交互一致性辅助 =====
 
-// 生图反馈振感：start / success / error 三种节拍。
+// 生图反馈振感：start / success / error / stop 四种节拍。
 //   独立开关 settings.imageHaptic（默认开）+ 沿用 settings.hapticFeedback 总开关；
-//   降级链由 haptics.js 的 _fallbackHaptic 负责（rich-haptics → CapHaptics → navigator.vibrate）。
+//   降级链：haptics.js 的 hapticPattern（AHAP 合成 → 逐拍 → _fallbackHaptic）→ CapHaptics → vibrate。
+//   v3.0.3 改：不再借用 triggerHapticFeedback。它是按字符节拍设计的（一次只响一下 + 时间闸门），
+//   用它表达「完成 / 失败」只能得到单点，听感就是「嗡一下」，做不出上行/下行的音型。
 function imageHaptic(kind) {
   if (settings.imageHaptic === false) return;
   if (settings.hapticFeedback === false) return;
+  var name = (kind === 'success') ? 'imageDone'
+           : (kind === 'error') ? 'imageFail'
+           : (kind === 'stop') ? 'imageStop'
+           : (kind === 'tap') ? 'tap'
+           : 'imageStart';
   try {
-    if (typeof triggerHapticFeedback === 'function') {
-      // 借用现有五档节奏里的字符/句末节拍，三类事件用不同内容触发不同质感
-      if (kind === 'success') triggerHapticFeedback('。');
-      else if (kind === 'error') triggerHapticFeedback('！');
-      else triggerHapticFeedback('a');
-    } else if (typeof _fallbackHaptic === 'function') {
-      _fallbackHaptic(kind === 'success' ? 'CLICK' : 'TICK');
+    if (typeof hapticPattern === 'function') { hapticPattern(name); return; }
+  } catch (e) { /* 落到兜底 */ }
+  try {
+    if (typeof _fallbackHaptic === 'function') {
+      _fallbackHaptic(kind === 'success' ? 'click' : (kind === 'error' ? 'thud' : 'soft'));
     }
-  } catch (e) { /* 振感失败绝不影响生图主流程 */ }
+  } catch (e2) { /* 振感失败绝不影响生图主流程 */ }
 }
 
 // 发送键同坑位双语义：空闲 ▶ / 生成中 ■（与对话界面 #btn-send ↔ #btn-stop 一致）
@@ -2206,8 +2509,10 @@ async function generateImage() {
     var finalHint = prefixDiff
       ? '<details class="img-prompt-final"><summary>已套用前缀 / 模板，点开看实际发送内容</summary><pre>' + escapeHtml(prompt) + '</pre></details>'
       : '';
-    userMsg.innerHTML = '<div class="img-bubble"><p>' + escapeHtml(rawPrompt) + '</p>' + refThumbsHtml + finalHint + '</div>';
+    userMsg.innerHTML = '<div class="img-bubble"><p class="img-prompt-text">' + escapeHtml(rawPrompt) + '</p>' + refThumbsHtml + finalHint + '</div>';
     stream.appendChild(userMsg);
+    // v3.0.3: 长提示词同样收折（与历史卡片一致，不然刚发完的长提示词会占满一屏）
+    bindPromptCollapse(userMsg);
     // 加载占位
     var loadingMsg = document.createElement('div');
     loadingMsg.className = 'image-msg assistant';
@@ -2254,6 +2559,7 @@ async function generateImage() {
     var savedCount = 0;
     var fallbackCount = 0;
     var pendingExternalIds = [];  // v120: 本次生成中回退成外链的图，稍后静默再试一次落地
+    var newImgObjs = [];          // v3.0.3: 本轮新入库的记录，用于「只追加不重建」
     for (var i = 0; i < results.length; i++) {
       var item = results[i];
       var dataUrl = '';
@@ -2306,6 +2612,9 @@ async function generateImage() {
         // v123: 缩略图（APK 落文件、浏览器留内存）；渲染列表优先用它
         thumbName: thumbName,
         thumbDataUrl: (thumbName || !thumbMeta) ? null : thumbMeta.thumbDataUrl,
+        // v3.0.3: 缩略图自身像素 —— 渲染时先用它把显示比例占住，解码前不跳版
+        thumbW: (thumbMeta && thumbMeta.thumbW) || null,
+        thumbH: (thumbMeta && thumbMeta.thumbH) || null,
         // v120: 外链地址永久保留，供「重新下载」与「打开链接」使用
         externalUrl: externalUrl,
         prompt: rawPrompt,   // v123: 存用户原话（不是拼接后的最终串），回填/复制才符合直觉
@@ -2327,6 +2636,7 @@ async function generateImage() {
       };
       if (!settings.images) settings.images = [];
       settings.images.push(imgObj);
+      newImgObjs.push(imgObj);
       savedCount++;
     }
     // v120: 外链静默落地——隔 2.5s 再试一次下载（图床瞬时打嗝多半已恢复），
@@ -2340,7 +2650,12 @@ async function generateImage() {
     //   「切回视图时恢复加载占位」的逻辑，在已经出图的结果下面再补一个「生成中…」，
     //   真机实测出现过「图已出、下面还挂着转圈」的错误观感。
     state._imageGenerating = false;
-    renderImageStream();
+    // v3.0.3: 尾部纯追加时走快路径（只插入新卡片），否则整表重建。
+    //   判据：上一次渲染正好停在数组尾部（期间没有删图、没有翻页错位）。
+    var _canAppend = (state._imageRenderedCount === settings.images.length - newImgObjs.length)
+      && !document.getElementById('image-empty')
+      && newImgObjs.length > 0;
+    if (!(_canAppend && appendImageMessages(newImgObjs))) renderImageStream();
     updateImageGalleryCount();
     if (indicator) indicator.className = 'image-status-indicator ok';
     var doneMsg = '生成完成，共 ' + savedCount + ' 张' + (fallbackCount > 0 ? '（其中 ' + fallbackCount + ' 张暂以外链显示，后台会自动重试下载）' : '');
@@ -2377,7 +2692,12 @@ async function generateImage() {
     };
     // v123 修：同样先清 generating 标记，避免错误条下面再挂一个「生成中…」
     state._imageGenerating = false;
-    renderImageStream();  // 整流重建后，错误条仍会出现在末尾（由 renderImageStream 负责渲染）
+    // v3.0.3: 列表没变（这一轮一张都没入库）→ 只追加错误卡片；
+    //   列表变了（部分成功）→ 整表重建，保证图和错误条的位置关系正确。
+    var _nothingAdded = (state._imageRenderedCount === (settings.images || []).length);
+    if (!(_nothingAdded && appendImageErrorBar())) {
+      renderImageStream();  // 整表重建后，错误条仍会出现在末尾（由 renderImageStream 负责渲染）
+    }
     imageHaptic('error');
     showToast(errMsg, 'warn');
     console.error('generateImage failed:', e);
@@ -3045,6 +3365,9 @@ async function purgeOrphanImageFiles(keepNames) {
 
 // F1: 生图界面事件监听初始化
 function initImageView() {
+  // v3.0.3: 提前探测触觉引擎 —— 生图的「起手/完成/失败」都是有音型的手感，
+  //   等第一次真的要用时再去 async 探测，就只剩 CapHaptics 的「粗一下」了。
+  try { if (typeof prewarmHaptics === 'function') prewarmHaptics(); } catch (e) {}
   var btnOpen = document.getElementById('btn-open-image-view');
   if (btnOpen) btnOpen.addEventListener('click', function() { toggleImageView(true); });
   // v123: 顶栏入口（与分支/导出/导入/设置同排，对齐对话界面的功能入口直觉）
@@ -3247,6 +3570,8 @@ function initImageView() {
     if (state._imageGenerating && state._imageAbortController) {
       state._imageStopRequested = true;  // v99: 标记用户主动停止（区分超时）
       state._imageAbortController.abort();
+      // v3.0.3: 主动停止给一声「收」，与失败（下行双拍）区分开 —— 这是用户的决定，不是意外
+      imageHaptic('stop');
       // v121: 如实告知——APK 走 CapacitorHttp 原生通道，请求无法真正中止
       showToast('已停止等待（服务端可能仍在生成）', 'info');
     } else {
@@ -3443,6 +3768,8 @@ async function migrateImportedImagesToFilesystem() {
       if (!tName) continue;
       rec.thumbName = tName;
       rec.thumbDataUrl = null;
+      rec.thumbW = meta.thumbW;
+      rec.thumbH = meta.thumbH;
       thumbAdded++;
       if (thumbAdded % 5 === 0) saveImageProviders();  // 分批落盘，避免一次性大写入
     } catch (e2) {
@@ -3455,6 +3782,11 @@ async function migrateImportedImagesToFilesystem() {
     if (migrated > 0) console.log('已迁移 ' + migrated + ' 张图片到 Filesystem');
     if (thumbAdded > 0) console.log('已为 ' + thumbAdded + ' 张存量图补上缩略图');
   }
+  // v3.0.3: 老缩略图升级（96px → 1024px）。
+  //   96px 是 v123 定的「止血值」，在手机上铺满卡片时糊得明显（用户 2026-10-27 反馈的正是这个）。
+  //   升级要读全尺寸原图，代价不小 —— 所以不在这里同步跑，排到空闲时按「新的优先、每批少量」推进，
+  //   一次跑完反而会让启动变卡。没升级完的图仍能显示（就是糊一点），不存在「看不到」。
+  scheduleLegacyThumbUpgrade();
   // v121: 顺带回收孤儿文件（导入覆盖、以及早期「清空图库不删文件」留下的无主文件）。
   //   安全阀：记录为空时绝不动手 —— 无法区分「确实没有图」与「图库尚未加载完」，
   //   宁可漏删，不可误删；用户主动清空图库那条路径由 clearImageGallery 负责收尾。
@@ -3463,6 +3795,14 @@ async function migrateImportedImagesToFilesystem() {
   for (var j = 0; j < images.length; j++) {
     if (images[j].fileName) keep.push(images[j].fileName);
     if (images[j].thumbName) keep.push(images[j].thumbName);  // v123: 缩略图也是「有主文件」
+  }
+  // v3.0.3 安全阀：有记录、但一条文件名都没留下时**不要**回收。
+  //   这种状态下「所有文件都是孤儿」和「记录丢了 fileName 字段」长得一模一样，
+  //   而删掉是不可逆的（2026-10-27 实测该包 chatlite_images 目录被清空、86 条记录只剩 96px 缩略图）。
+  //   留着只是占空间，清了就是永久丢数据 —— 两种代价不对称，选留。
+  if (!keep.length) {
+    console.warn('[image-gen] 有 ' + images.length + ' 条记录但没有任何文件名，跳过孤儿文件回收（防误删）');
+    return;
   }
   var removedCount = await purgeOrphanImageFiles(keep);
   if (removedCount > 0) console.log('[image-gen] 已回收孤儿文件 ' + removedCount + ' 个');
