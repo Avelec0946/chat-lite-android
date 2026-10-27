@@ -1,16 +1,17 @@
 package com.avelec.chatlite;
 
+import android.content.Intent;
 import android.net.Uri;
 import android.util.Base64;
 
-import com.getcapacitor.JSArray;
 import com.getcapacitor.JSObject;
 import com.getcapacitor.Plugin;
 import com.getcapacitor.PluginCall;
 import com.getcapacitor.PluginMethod;
+import com.getcapacitor.annotation.ActivityCallback;
 import com.getcapacitor.annotation.CapacitorPlugin;
 
-import org.json.JSONArray;
+import androidx.activity.result.ActivityResult;
 import org.json.JSONObject;
 
 import java.io.BufferedInputStream;
@@ -69,6 +70,22 @@ public class BackupArchivePlugin extends Plugin {
         File f = new File(path);
         if (f.isAbsolute()) return f;
         return new File(filesDir(), path);
+    }
+
+    /**
+     * 读备份包用的路径解析：**先 CACHE 再 files**。
+     *   create() 把 zip 写到 CACHE（导出产物，临时）；stage() 把用户选的文件落到 files（导入暂存）。
+     *   两种来源都要能用相对名访问，所以这里两边都找。
+     */
+    private File resolveArchive(String path) {
+        if (path == null) return null;
+        File f = new File(path);
+        if (f.isAbsolute()) return f;
+        File inCache = new File(cacheDir(), path);
+        if (inCache.exists()) return inCache;
+        File inFiles = new File(filesDir(), path);
+        if (inFiles.exists()) return inFiles;
+        return inCache;   // 都不存在时返回 cache 路径，报错信息里能看出
     }
 
     private static void copyStream(InputStream in, OutputStream out, byte[] buf) throws IOException {
@@ -259,7 +276,7 @@ public class BackupArchivePlugin extends Plugin {
     private ZipFile openZip(String path, String uri) throws IOException {
         if (uri != null && !uri.isEmpty()) {
             // content:// → 先拷到 cache，再按普通文件打开（ZipFile 需要随机访问）
-            File tmp = new File(cacheDir(), "import-src.zip");
+            File tmp = new File(filesDir(), "import-src.zip");
             try (InputStream in = getContext().getContentResolver().openInputStream(Uri.parse(uri));
                  OutputStream out = new FileOutputStream(tmp)) {
                 if (in == null) return null;
@@ -267,7 +284,7 @@ public class BackupArchivePlugin extends Plugin {
             }
             return new ZipFile(tmp);
         }
-        File f = path == null ? null : new File(cacheDir(), path);
+        File f = path == null ? null : resolveArchive(path);
         if (f == null || !f.exists()) return null;
         return new ZipFile(f);
     }
@@ -401,6 +418,164 @@ public class BackupArchivePlugin extends Plugin {
         } catch (Exception e) {
             if (!target.exists() && old.exists()) old.renameTo(target);
             call.reject("提交失败（已回滚）：" + e.getMessage());
+        }
+    }
+
+    // ── 4b) 系统文件选择器（WebView 的 <input type=file> 只能给 JS 一个 File 对象，
+    //        几百 MB 的 zip 没法经过 JS 内存；所以选择这一步也放到原生）────────
+
+    /** pickArchive() → { uri, name, size }（用户用系统选择器挑一个 zip） */
+    @PluginMethod
+    public void pickArchive(PluginCall call) {
+        Intent intent = new Intent(Intent.ACTION_OPEN_DOCUMENT);
+        intent.addCategory(Intent.CATEGORY_OPENABLE);
+        intent.setType("*/*");
+        intent.putExtra(Intent.EXTRA_MIME_TYPES, new String[]{
+                "application/zip", "application/x-zip-compressed", "application/octet-stream"});
+        try {
+            startActivityForResult(call, intent, "archivePicked");
+        } catch (Exception e) {
+            call.reject("无法打开文件选择器：" + e.getMessage());
+        }
+    }
+
+    @ActivityCallback
+    private void archivePicked(PluginCall call, ActivityResult result) {
+        if (call == null) return;
+        if (result.getResultCode() != android.app.Activity.RESULT_OK) {
+            call.reject("未选择文件");
+            return;
+        }
+        Uri uri = result.getData() != null ? result.getData().getData() : null;
+        if (uri == null) {
+            call.reject("没有拿到文件");
+            return;
+        }
+        try {
+            getContext().getContentResolver().takePersistableUriPermission(
+                    uri, Intent.FLAG_GRANT_READ_URI_PERMISSION);
+        } catch (Exception ignore) { /* 部分提供方不支持持久化权限 */ }
+        long size = 0;
+        try {
+            android.database.Cursor c = getContext().getContentResolver()
+                    .query(uri, null, null, null, null);
+            if (c != null) {
+                int idx = c.getColumnIndex(android.provider.OpenableColumns.SIZE);
+                if (idx >= 0 && c.moveToFirst()) size = c.getLong(idx);
+                c.close();
+            }
+        } catch (Exception ignore) {}
+        JSObject ret = new JSObject();
+        ret.put("uri", uri.toString());
+        ret.put("name", "import-staging.zip");
+        ret.put("size", size);
+        call.resolve(ret);
+    }
+
+    /**
+     * stage({ uri, outPath? }) → { path, size, ms }
+     *   把 content:// 的文件复制到 app files 目录（一次复制，之后所有操作都走本地路径，
+     *   避免每次 info/readText/extract 都重拷一遍几百 MB）。
+     */
+    @PluginMethod
+    public void stage(PluginCall call) {
+        String uriStr = call.getString("uri", null);
+        String outPath = call.getString("outPath", "import-staging.zip");
+        if (uriStr == null) { call.reject("缺少 uri"); return; }
+        long t0 = System.currentTimeMillis();
+        File out = new File(filesDir(), outPath);
+        try (InputStream in = getContext().getContentResolver().openInputStream(Uri.parse(uriStr));
+             OutputStream os = new BufferedOutputStream(new FileOutputStream(out), 64 * 1024)) {
+            if (in == null) { call.reject("无法读取所选文件"); return; }
+            copyStream(in, os, new byte[64 * 1024]);
+        } catch (Exception e) {
+            out.delete();
+            call.reject("复制到本地失败：" + e.getMessage());
+            return;
+        }
+        JSObject ret = new JSObject();
+        ret.put("path", outPath);
+        ret.put("size", out.length());
+        ret.put("ms", System.currentTimeMillis() - t0);
+        call.resolve(ret);
+    }
+
+    /**
+     * readChunk({ path, entry, offset, length }) → { data(base64), eof }
+     *   按字节区间读包内条目 —— data.json 可能上百 MB，JS 侧要分块读回来做流式解析，
+     *   而 Capacitor Filesystem.readFile 没有 offset，只能由原生按区间给。
+     */
+    @PluginMethod
+    public void readChunk(PluginCall call) {
+        String path = call.getString("path", null);
+        String entry = call.getString("entry", "data.json");
+        long offset = call.getLong("offset", 0L);
+        int length = call.getInt("length", 2 * 1024 * 1024);
+        if (path == null) { call.reject("缺少 path"); return; }
+        if (length <= 0 || length > 8 * 1024 * 1024) length = 2 * 1024 * 1024;
+        try {
+            File f = resolveArchive(path);
+            ZipFile zip = new ZipFile(f);
+            ZipEntry e = zip.getEntry(entry);
+            if (e == null) { zip.close(); call.reject("备份里没有 " + entry); return; }
+            byte[] buf = new byte[length];
+            int got = 0;
+            try (InputStream in = zip.getInputStream(e)) {
+                long skipped = 0;
+                while (skipped < offset) {
+                    long s = in.skip(offset - skipped);
+                    if (s <= 0) { if (in.read() < 0) break; skipped++; }
+                    else skipped += s;
+                }
+                while (got < length) {
+                    int n = in.read(buf, got, length - got);
+                    if (n < 0) break;
+                    got += n;
+                }
+            }
+            zip.close();
+            JSObject ret = new JSObject();
+            ret.put("data", Base64.encodeToString(buf, 0, got, Base64.NO_WRAP));
+            ret.put("read", got);
+            ret.put("eof", got < length);
+            call.resolve(ret);
+        } catch (Exception ex) {
+            call.reject("读取分块失败：" + ex.getMessage());
+        }
+    }
+
+    /** cleanDir({ dir }) → { ok }（导入失败时清掉 staging 目录） */
+    @PluginMethod
+    public void cleanDir(PluginCall call) {
+        String dir = call.getString("dir", IMAGES_DIR + ".new");
+        File f = resolve(dir);
+        try {
+            deleteRecursive(f);
+            JSObject ret = new JSObject();
+            ret.put("ok", true);
+            call.resolve(ret);
+        } catch (Exception e) {
+            call.reject("清理失败：" + e.getMessage());
+        }
+    }
+
+    /** entrySize({ path, entry }) → { size }（给 JS 端做进度百分比用） */
+    @PluginMethod
+    public void entrySize(PluginCall call) {
+        String path = call.getString("path", null);
+        String entry = call.getString("entry", "data.json");
+        if (path == null) { call.reject("缺少 path"); return; }
+        try {
+            File f = resolveArchive(path);
+            ZipFile zip = new ZipFile(f);
+            ZipEntry e = zip.getEntry(entry);
+            long size = (e == null) ? -1 : e.getSize();
+            zip.close();
+            JSObject ret = new JSObject();
+            ret.put("size", size);
+            call.resolve(ret);
+        } catch (Exception ex) {
+            call.reject("读取条目大小失败：" + ex.getMessage());
         }
     }
 

@@ -94,15 +94,205 @@ const data = {
   }
 }
 
+// ===== 数据管理 v2：全量备份（单文件 .zip，含图库原图 / 缩略图）=====
+// 动机与完整审计见 DSH 工作区《数据管理-v2-审计与设计.md》；看板 §2.4-E / §2.5。
+// v1 的「导出全部数据」只导出 JSON 元数据，**图库文件从来不跟着走** —— 换设备/换包后
+// 图库只剩 96px 缩略图（2026-10-27 用户实际踩到）。v2 把它装进一个 zip 单文件。
+// zip 的读写在原生插件 BackupArchive 里做（Capacitor Filesystem 无法随机访问 zip）。
+
+function _backupPlugin() {
+  try {
+    return (typeof Capacitor !== 'undefined' && Capacitor.Plugins && Capacitor.Plugins.BackupArchive) || null;
+  } catch (e) { return null; }
+}
+
+// 剥掉「可由原图重建」的大字段：dataUrl、thumbDataUrl。
+//   注意 v1 的 bug：剥的是 thumbnailDataUrl —— 而真实字段叫 thumbDataUrl，
+//   那个字段根本不存在，等于一次都没剥（所以备份里混着 96px 缩略图 base64）。
+//   referenceImages **保留**：那是用户自己选的文件，属于内容，剥了就永久丢。
+function buildExportSettingsV2() {
+  const s = Object.assign({}, settings);
+  if (Array.isArray(s.images)) {
+    s.images = s.images.map(function (img) {
+      if (!img || typeof img !== 'object') return img;
+      const lite = Object.assign({}, img);
+      lite.dataUrl = null;
+      lite.thumbDataUrl = null;
+      lite.thumbnailDataUrl = null;
+      return lite;
+    });
+  }
+  return s;
+}
+
+async function exportAllDataV2() {
+  await ensureDataLoaded();
+  const plugin = _backupPlugin();
+  if (!plugin || !isCapacitor() || !CapFilesystem || !CapShare) {
+    showToast('全量备份需要 APK 版（网页版请用「导出全部数据」）', 'warn');
+    return;
+  }
+  showToast('正在准备全量备份...', 'info');
+  await new Promise(function (r) { setTimeout(r, 50); });
+
+  const stamp = new Date().toISOString().slice(0, 19).replace(/[:T]/g, '-');
+  const zipName = 'chat-lite-backup-' + stamp + '.zip';
+  const jsonName = 'chat-lite-data-' + stamp + '.json';
+  try {
+    // 1) data.json —— 沿用分块流式导出（峰值 = 单批 200KB，不随数据量涨）
+    await exportAllDataStreamed(jsonName, buildExportSettingsV2(), { version: 2, format: 'chat-lite-backup-zip' });
+    // 2) 打包：data.json + 图库原图 + 缩略图（STORE 不压缩，333MB 约 2s）
+    const imgCount = (settings.images || []).length;
+    showToast('正在打包 ' + imgCount + ' 张图片...', 'info');
+    const res = await plugin.create({
+      outPath: zipName,
+      dataJsonPath: jsonName,
+      imagesDir: 'chatlite_images',
+      manifest: {
+        appVersion: '3.0.4',
+        conversations: (state.conversations || []).length,
+        providers: (state.providers || []).length,
+        imageRecords: imgCount
+      }
+    });
+    // 3) 交给用户（存文件 / 发微信 / 传电脑）
+    const uri = await CapFilesystem.getUri({ path: zipName, directory: 'CACHE' });
+    await CapShare.share({
+      title: 'chat-lite 全量备份',
+      text: zipName,
+      url: uri.uri,
+      dialogTitle: '保存全量备份到...'
+    });
+    const mb = (res.size / 1048576).toFixed(1);
+    showToast('全量备份已生成（' + mb + 'MB，含 ' + (res.images || 0) + ' 张原图）', 'success');
+  } catch (err) {
+    console.error('Export v2 failed:', err);
+    showToast('全量备份失败：' + ((err && err.message) || err), 'danger');
+  } finally {
+    // 中间产物清掉（CACHE 会被系统回收，但别留垃圾）
+    try { await CapFilesystem.deleteFile({ path: jsonName, directory: 'CACHE' }); } catch (e) {}
+    // 旧的备份包也别堆着 —— 一个 333MB 的包导出几次就能把 CACHE 撑满
+    try {
+      var ls = await CapFilesystem.readdir({ path: '', directory: 'CACHE' });
+      var zips = ls.files.filter(function (f) { return /^chat-lite-backup-.*\.zip$/.test(f.name); });
+      zips.sort(function (a, b) { return (b.mtime || 0) - (a.mtime || 0); });
+      for (var zi = 2; zi < zips.length; zi++) {   // 只留最近 2 个
+        try { await CapFilesystem.deleteFile({ path: zips[zi].name, directory: 'CACHE' }); } catch (e4) {}
+      }
+    } catch (e5) {}
+  }
+}
+
+// ===== v2 导入：单文件 zip =====
+// 流程：系统选择器挑文件 → 落地到 app 目录 → 先说清"里面有什么" → 导入前自动备份 →
+//       图片解到 staging（正式目录一个字节都不动）→ 流式读 data.json 落库 →
+//       图库目录原子替换 → 清理。任何一步失败：staging 删掉，正式数据原样。
+async function importAllDataV2FromFile(e) {
+  const input = e && e.target;
+  if (input && input.files) input.value = '';   // 允许重复选同一个文件
+  const plugin = _backupPlugin();
+  if (!plugin || !CapFilesystem) {
+    showToast('当前版本不支持全量备份导入，请更新 App', 'warn');
+    return;
+  }
+  const modeEl = document.getElementById('import-mode-select');
+  const mode = modeEl ? modeEl.value : 'overwrite';
+  let stagedPath = null;
+  try {
+    showToast('请选择备份文件（.zip）...', 'info');
+    const picked = await plugin.pickArchive();
+    if (!picked || !picked.uri) return;          // 用户取消
+    showToast('正在准备备份文件...', 'info');
+    const staged = await plugin.stage({ uri: picked.uri });
+    stagedPath = staged.path;
+
+    // 1) 先把"里面有什么"讲清楚 —— 旧备份没有图片，这次必须让人看见
+    const info = await plugin.info({ path: stagedPath });
+    const mb = ((info.bytes || 0) / 1048576).toFixed(1);
+    const lines = ['这份备份包含：',
+      '· ' + (info.entries || 0) + ' 个条目，共 ' + mb + ' MB'];
+    if (info.images) {
+      lines.push('· 图库原图 ' + info.images + ' 张' + (info.thumbs ? '，缩略图 ' + info.thumbs + ' 张' : ''));
+    } else {
+      lines.push('· 不含图片（这是一份纯文本备份，图库不会带过来）');
+    }
+    if (info.manifest && info.manifest.conversations != null) {
+      lines.push('· 会话 ' + info.manifest.conversations + ' 条');
+    }
+    lines.push('');
+    lines.push('导入方式：' + (mode === 'merge' ? '合并（按 ID 去重）' : '覆盖（替换当前全部数据）'));
+    if (!confirm(lines.join('\n') + '\n\n确定导入吗？')) {
+      await _cleanupImportStaging(stagedPath);
+      return;
+    }
+
+    // 2) 导入前自动备份 —— v1 的 APK 流式路径**根本没有这一步**（审计 P0-3）
+    await _autoBackupBeforeImport(plugin);
+
+    // 3) 图片解到 staging（正式目录不动）
+    showToast('正在解包图片...', 'info');
+    const ex = await plugin.extractImages({ path: stagedPath, stagingDir: 'chatlite_images.new' });
+
+    // 4) 流式读 data.json 并落库（复用 v1 的扫描器与落库逻辑）
+    showToast('正在写入数据...', 'info');
+    await importAllDataStreamed(makeZipChunkReader(plugin, stagedPath, 'data.json'));
+
+    // 5) 图库目录原子替换
+    await plugin.commitStaging({ stagingDir: 'chatlite_images.new', targetDir: 'chatlite_images' });
+
+    // 6) 收尾
+    await _cleanupImportStaging(stagedPath);
+    showToast('全量备份导入完成（' + (ex.images || 0) + ' 张原图）', 'success');
+    if (typeof renderImageStream === 'function') renderImageStream();
+    if (typeof scheduleLegacyThumbUpgrade === 'function') scheduleLegacyThumbUpgrade();
+  } catch (err) {
+    console.error('Import v2 failed:', err);
+    try { if (plugin) await plugin.cleanDir({ dir: 'chatlite_images.new' }); } catch (e2) {}
+    showToast('全量备份导入失败：' + ((err && err.message) || err), 'danger');
+  }
+}
+
+// 导入前的自动兜底备份：把**当前**数据打成一个 zip 放到 files 目录（不经过系统分享）
+async function _autoBackupBeforeImport(plugin) {
+  try {
+    const stamp = new Date().toISOString().slice(0, 19).replace(/[:T]/g, '-');
+    const jsonName = 'pre-import-' + stamp + '.json';
+    const zipName = 'pre-import-' + stamp + '.zip';
+    await exportAllDataStreamed(jsonName, buildExportSettingsV2(), { version: 2, format: 'chat-lite-pre-import' });
+    await plugin.create({
+      outPath: zipName, dataJsonPath: jsonName, imagesDir: 'chatlite_images',
+      manifest: { note: '导入前自动备份', at: new Date().toISOString() }
+    });
+    // CACHE 会被系统回收 → 复制到 files 目录留存
+    try {
+      await CapFilesystem.copy({ from: zipName, to: zipName, directory: 'CACHE', toDirectory: 'DATA' });
+    } catch (e2) { /* 复制失败就留在 CACHE 里 */ }
+    try { await CapFilesystem.deleteFile({ path: jsonName, directory: 'CACHE' }); } catch (e3) {}
+    showToast('已自动备份当前数据（' + zipName + '）', 'info');
+  } catch (e) {
+    console.warn('pre-import backup failed:', e);
+    showToast('注意：导入前自动备份失败，原数据将无法恢复', 'warn');
+  }
+}
+
+async function _cleanupImportStaging(path) {
+  try {
+    if (path) await CapFilesystem.deleteFile({ path: path, directory: 'DATA' });
+  } catch (e) {}
+}
+
 // 分块流式导出（APK 专用，根治大备份 OOM）：
 // 头部一次 writeFile，conversations 逐批 appendFile（每 30 条 或累计 200KB 刷盘一次），尾部一次 appendFile。
 // 峰值内存 = 单批字符串 + 进度计数，与数据总量无关。
-async function exportAllDataStreamed(fileName, exportSettings) {
+async function exportAllDataStreamed(fileName, exportSettings, opts) {
+  // v3.0.4: opts 可指定 version / format（v2 备份包里的 data.json 用它标记自己）
+  opts = opts || {};
   const DIR = 'CACHE';
   const convs = state.conversations || [];
   const total = convs.length;
-  const head = '{"version":1,"exportedAt":"' + new Date().toISOString() + '","convGroups":' +
-    JSON.stringify(state.convGroups || []) + ',"conversations":[';
+  const head = '{"version":' + (opts.version || 1) + ',"format":' +
+    JSON.stringify(opts.format || 'chat-lite-json') + ',"exportedAt":"' + new Date().toISOString() +
+    '","convGroups":' + JSON.stringify(state.convGroups || []) + ',"conversations":[';
   await CapFilesystem.writeFile({ path: fileName, data: head, directory: DIR, encoding: 'utf8', recursive: true });
   let first = true;          // 是否文件内第一条 conversation（控制逗号）
   let buf = [];
@@ -306,7 +496,7 @@ function importAllDataFromFile(e) {
   // 预防式更新（v87）：APK + 覆盖模式走流式分块导入（根治大备份 JSON.parse 全量 OOM 卡退）
   // 其他场景（Web / merge 模式 / 小文件）保持原全量路径
   if (isCapacitor() && mode === 'overwrite' && typeof File !== 'undefined' && file.slice) {
-    importAllDataStreamed(file).then(function(ok) {
+    importAllDataStreamed(makeFileChunkReader(file)).then(function(ok) {
       if (ok) {
         showToast('已覆盖导入数据', 'success');
         e.target.value = '';
@@ -333,6 +523,7 @@ function importAllDataFromFile(e) {
 }
 
 // ===== 流式分块导入（APK 覆盖模式专用，根治 108MB 级大备份 OOM） =====
+const CHUNK_TOTAL_MARK = 2 * 1024 * 1024 * 10;   // 每 20MB 报一次进度
 // 原理：File.slice 分块 readAsText（2MB/块）+ 增量扫描 conversations 数组逐条 JSON.parse，
 //      峰值内存 = 单块缓冲 + 单条会话对象，与总量无关；头部/尾部小字段最后整体 parse。
 // 数据安全：overwrite 语义下先清空再逐条填充；解析失败 toast 报错（main 数据源仍在，可重新导出）。
@@ -407,9 +598,53 @@ function createConvScanner() {
   };
 }
 
-async function importAllDataStreamed(file) {
-  const CHUNK = 2 * 1024 * 1024;   // 2MB/块
-  const total = file.size;
+// 分块读取器：v1 从 File 对象切片，v2 从 zip 条目按字节区间读（原生插件）。
+//   统一接口：{ total: number|null, next(): Promise<{text, bytes, done}> }
+function makeFileChunkReader(file) {
+  const CHUNK = 2 * 1024 * 1024;
+  let offset = 0;
+  return {
+    total: file.size,
+    next: function () {
+      return new Promise(function (resolve, reject) {
+        if (offset >= file.size) { resolve({ text: '', bytes: 0, done: true }); return; }
+        const end = Math.min(offset + CHUNK, file.size);
+        const blob = file.slice(offset, end);
+        const r = new FileReader();
+        r.onload = function () {
+          const bytes = end - offset;
+          offset = end;
+          resolve({ text: r.result || '', bytes: bytes, done: offset >= file.size });
+        };
+        r.onerror = function () { reject(r.error || new Error('read failed')); };
+        r.readAsText(blob);
+      });
+    }
+  };
+}
+
+function makeZipChunkReader(plugin, path, entry) {
+  const CHUNK = 2 * 1024 * 1024;
+  let offset = 0;
+  return {
+    total: null,
+    next: async function () {
+      const r = await plugin.readChunk({ path: path, entry: entry, offset: offset, length: CHUNK });
+      const bytes = r.read || 0;
+      offset += bytes;
+      let text = '';
+      if (bytes > 0) {
+        const bin = atob(r.data || '');
+        const arr = new Uint8Array(bin.length);
+        for (var i = 0; i < bin.length; i++) arr[i] = bin.charCodeAt(i);
+        text = new TextDecoder('utf-8').decode(arr);
+      }
+      return { text: text, bytes: bytes, done: !!r.eof || bytes === 0 };
+    }
+  };
+}
+
+async function importAllDataStreamed(reader) {
   const scanner = createConvScanner();
   const newConvs = [];
   let headText = '';
@@ -417,32 +652,26 @@ async function importAllDataStreamed(file) {
   let inConvs = false;      // 已进入 conversations 数组（headText 停止累积）
   let done = false;
   let offset = 0;
+  const total = reader.total || 0;
 
-  function readChunk(start, end) {
-    return new Promise(function(resolve, reject) {
-      const blob = file.slice(start, end);
-      const r = new FileReader();
-      r.onload = () => resolve(r.result);
-      r.onerror = () => reject(r.error || new Error('read failed'));
-      r.readAsText(blob);
-    });
-  }
-
-  while (offset < total) {
-    const end = Math.min(offset + CHUNK, total);
-    const text = await readChunk(offset, end);
-    const res = scanner.feed(text);
-    if (!inConvs) {
-      if (res.found) { headText += text.slice(0, res.found.posInChunk); inConvs = true; }
-      else headText += text;   // phase 0 整块累积
+  while (true) {
+    const chunk = await reader.next();
+    const text = chunk.text;
+    if (text) {
+      const res = scanner.feed(text);
+      if (!inConvs) {
+        if (res.found) { headText += text.slice(0, res.found.posInChunk); inConvs = true; }
+        else headText += text;   // phase 0 整块累积
+      }
+      for (let k = 0; k < res.objs.length; k++) {
+        newConvs.push(JSON.parse(res.objs[k]));   // 逐条 parse（单条小）
+      }
+      if (res.done) { done = true; if (res.tailText !== null) tailText += res.tailText; }   // 累积（phase 2 每块都是 tail 片段，覆盖会丢前段）
+      else if (done && res.tailText !== null) { tailText += res.tailText; }
+      offset += chunk.bytes || text.length;
     }
-    for (let k = 0; k < res.objs.length; k++) {
-      newConvs.push(JSON.parse(res.objs[k]));   // 逐条 parse（单条小）
-    }
-    if (res.done) { done = true; if (res.tailText !== null) tailText += res.tailText; }   // 累积（phase 2 每块都是 tail 片段，覆盖会丢前段）
-    else if (done && res.tailText !== null) { tailText += res.tailText; }
-    offset = end;
-    if (offset % (CHUNK * 10) === 0) {
+    if (chunk.done) break;
+    if (total && offset % (CHUNK_TOTAL_MARK) === 0) {
       showToast('导入中 ' + Math.min(100, Math.round(offset / total * 100)) + '%…', 'info');
     }
     await new Promise(r => setTimeout(r, 0));   // yield

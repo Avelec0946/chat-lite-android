@@ -637,6 +637,13 @@ async function init() {
   if (btnImportAll) btnImportAll.addEventListener('click', () => { document.getElementById('import-all-file-input').click(); });
   var importAllInput = document.getElementById('import-all-file-input');
   if (importAllInput) importAllInput.addEventListener('change', importAllDataFromFile);
+  // v3.0.4: 全量备份（单文件 zip，含图库原图）——见 io.js exportAllDataV2 / importAllDataV2
+  var btnExportAllV2 = document.getElementById('btn-export-all-v2');
+  if (btnExportAllV2) btnExportAllV2.addEventListener('click', exportAllDataV2);
+  var btnImportAllV2 = document.getElementById('btn-import-all-v2');
+  if (btnImportAllV2) btnImportAllV2.addEventListener('click', () => { document.getElementById('import-all-v2-file-input').click(); });
+  var importAllV2Input = document.getElementById('import-all-v2-file-input');
+  if (importAllV2Input) importAllV2Input.addEventListener('change', importAllDataV2FromFile);
   document.querySelector('#branch-drawer .branch-drawer-backdrop').addEventListener('click', closeBranchDrawer);
 
   $('btn-save-settings').addEventListener('click', saveSettingsHandler);
