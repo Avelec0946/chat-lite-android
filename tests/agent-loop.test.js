@@ -373,11 +373,15 @@ console.log('\n[tool_calls 归并]');
     ok('原生通道的 system 提示词没被注入任何东西',
       requests[0].messages[0].role === 'system' && requests[0].messages[0].content === '你是助手',
       JSON.stringify(requests[0].messages[0].content));
-    ok('日期挂在 web_search 的 description 上（原生）',
-      /当前日期：?\s*\d{4}-\d{2}-\d{2}/.test(requests[0].tools[0].function.description || ''));
-    ok('文本协议的说明块里也带日期', /当前日期：?\s*\d{4}-\d{2}-\d{2}/.test(requests[1].messages[0].content));
+    // 日期必须是**运行时算出来的那个值**，不是写死的字符串
+    var today = vm.runInContext('agentTodayStr()', sandbox);
+    ok('日期挂在 web_search 的 description 上（原生），且用的是运行时值',
+      (requests[0].tools[0].function.description || '').indexOf('本机日期 ' + today) >= 0,
+      requests[0].tools[0].function.description);
+    ok('文本协议的说明块里也带日期（同一个运行时值）',
+      requests[1].messages[0].content.indexOf('本机日期 ' + today) >= 0);
     ok('日期只到天、不带时分（带时分等于每分钟换一次 system，前缀缓存全废）',
-      !/当前日期：?\s*\d{4}-\d{2}-\d{2}\s*\d{2}:/.test(requests[1].messages[0].content) &&
+      !/\d{4}-\d{2}-\d{2}\s*\d{2}:/.test(requests[1].messages[0].content) &&
       !/\d{4}-\d{2}-\d{2}\s*\d{2}:/.test(requests[0].tools[0].function.description || ''));
     ok('除 web_search 外的工具定义原样不动',
       requests[0].tools.length === 1);

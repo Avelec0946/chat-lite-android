@@ -507,14 +507,21 @@ function agentToolProtocolPrompt(round, maxRounds) {
 // ★ v3.0.14：日期不再单独占一行 system，而是**挂在 web_search 的工具说明上**。
 //   两个理由：① 原生通道的 system 提示词因此**一个字符都不变**（DeepSeek 完全不受影响）；
 //   ② 它出现在模型"决定怎么搜"的位置上，比在 system 开头更贴题，也不跟系统指令抢注意力。
+// ★ v3.0.15：文案改成「本机日期」，并显式说明它从哪来、能用来干什么。
+//   为什么要写清楚：这行字是**模型每次请求都读得到的事实**，不是搜索来的 ——
+//   用户问「今天几号」它会直接答（这是对的：搜索引擎不知道"你的今天"），
+//   但如果只写「当前日期」，模型会当成宇宙真理去讲，用户无从知道它其实来自设备时钟。
 function agentTodayStr() {
   var d = new Date();
   function p2(n) { return n < 10 ? '0' + n : String(n); }
   return d.getFullYear() + '-' + p2(d.getMonth() + 1) + '-' + p2(d.getDate());
 }
 
+// 只到天、不带时分：带上时分等于每分钟换一次前缀，缓存全废（§4.24）。
 function agentDateHint() {
-  return '（当前日期 ' + agentTodayStr() + '。搜索词里不要自己编日期：需要「今天 / 最近」就直接写这些词，或用 after: 运算符。）';
+  return '（本机日期 ' + agentTodayStr() + '：这是用户设备的当前日期。'
+    + '问「今天几号」这类问题就按它回答，不必为此搜索；但拼搜索词时不要自己编日期，'
+    + '需要「今天 / 最近」就直接写这些词，或用 after: 运算符。）';
 }
 
 // 原生通道：把日期拼进 web_search 的 description（工具定义本来就要发，等于零额外开销）。
