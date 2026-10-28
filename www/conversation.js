@@ -385,10 +385,16 @@ function renderMessages() {
     const sourcesHtml = (msg.role === 'assistant' && msg.webSources && msg.webSources.length &&
       typeof renderWebSearchSourcesHtml === 'function')
       ? renderWebSearchSourcesHtml(msg.webSources) : '';
+    // v3.0.8: 工具调用轨迹（它自己搜了什么、抓了哪页）。放在正文之前 —— 那是"决策过程"，
+    //   和"结果"（来源卡片）分列两头，读起来才是「先做了什么，再得出了什么」。
+    const traceHtml = (msg.role === 'assistant' && msg.toolTrace && msg.toolTrace.length &&
+      typeof agentTraceHtml === 'function')
+      ? agentTraceHtml(msg.toolTrace) : '';
 
     div.innerHTML = `
       <div class="msg-bubble">
         ${msg.title && msg.title !== '对话根节点' ? `<div class="msg-title">${escapeHtml(msg.title)}</div>` : ''}
+        ${traceHtml}
         ${content}
         ${sourcesHtml}
         ${renderSiblingArrows(msg, conv)}

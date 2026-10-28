@@ -7,7 +7,7 @@
 <title>chat-lite</title>
 <link rel="stylesheet" href="vendor/highlight/github-dark.min.css?v=116">
 <link rel="stylesheet" href="vendor/katex/katex.min.css?v=116">
-<link rel="stylesheet" href="style.css?v=136">
+<link rel="stylesheet" href="style.css?v=137">
   <meta name="theme-color" content="#7c3aed">
   <link rel="manifest" href="manifest.json">
 </head>
@@ -330,7 +330,7 @@
               <span class="toggle-slider"></span>
             </label>
           </label>
-          <span class="setting-hint">开启后每次提问前自动检索网页，结果只用于本次回答（不写进对话历史）。密钥与条数在「联网搜索」分组里配置。</span>
+          <span class="setting-hint">开启后模型会拿到 <code>web_search</code> / <code>fetch_url</code> 两个工具，由它自己判断要不要联网、搜什么。工具结果只用于本次回答，不写进对话历史。密钥与默认条数在「联网搜索」分组里配置。</span>
           <label class="setting-row setting-row-col">
             <span>系统提示词</span>
             <textarea id="system-prompt" class="setting-textarea" rows="3" placeholder="输入系统提示词..."></textarea>
@@ -867,7 +867,7 @@
         <details class="setting-group setting-group-collapsible" data-group-key="web-search">
           <summary class="setting-group-summary">联网搜索 <span class="setting-scope">全局配置·按会话开关</span></summary>
           <div class="setting-group-body">
-          <span class="setting-hint">走 DeepSeek 官方「网页搜索 / 网页抓取」接口（<code>/v1/tools/search</code>、<code>/v1/tools/fetch</code>）。按成功请求计费：5 元 / 千次（Search、Fetch 各算各的，失败与空结果不计费）。这里是全局配置；<strong>开关在「本次对话 → 联网搜索」</strong>（按会话生效）。</span>
+          <span class="setting-hint">把 DeepSeek 官方的「网页搜索 / 网页抓取」接口（<code>/v1/tools/search</code>、<code>/v1/tools/fetch</code>）包装成<b>两个工具</b>交给模型：<code>web_search</code> 与 <code>fetch_url</code>。<b>要不要联网、搜什么词、搜几次、要不要再抓某页全文，全由模型自己决定</b> —— 不需要联网的问题它会直接回答，不会白发一次检索。<br>按成功请求计费：5 元 / 千次（Search、Fetch 各算各的，失败与空结果不计费）。这里是全局配置；<strong>开关在「本次对话 → 联网搜索」</strong>（按会话生效）。</span>
           <label class="setting-row">
             <span>密钥来源</span>
             <select id="ws-mode-select" class="setting-select">
@@ -893,22 +893,17 @@
           </div>
           <span class="setting-hint" id="ws-target-hint"></span>
           <label class="setting-row">
-            <span>结果条数</span>
-            <input id="ws-count" class="setting-input setting-num" type="number" min="1" max="50" step="1" value="6" title="1~50，默认 6。条数不影响单次计费。">
+            <span>默认条数</span>
+            <input id="ws-count" class="setting-input setting-num" type="number" min="1" max="10" step="1" value="6" title="1~10，默认 6。这是模型没在参数里指定条数时用的值；条数不影响单次计费。">
           </label>
           <label class="setting-row">
-            <span>正文深度</span>
+            <span>搜索返回</span>
             <select id="ws-content-mode" class="setting-select">
               <option value="summary">摘要（省时省钱）</option>
               <option value="content">正文（Search 一次带回）</option>
-              <option value="fetch">正文 + 抓取（更准，按条加钱）</option>
             </select>
           </label>
-          <span class="setting-hint">摘要：每条 600~800 字的长摘要，多数问答够用。正文：Search 直接返回网页正文，上下文更大。正文+抓取：再对最相关的前几条调 Fetch 拿完整 Markdown，最准但要额外计费、也最慢。</span>
-          <label class="setting-row" id="ws-fetch-top-row" style="display:none">
-            <span>抓取条数</span>
-            <input id="ws-fetch-top" class="setting-input setting-num" type="number" min="1" max="3" step="1" value="2" title="1~3，默认 2。Fetch 有目标域名 QPS 限制，不宜过多。">
-          </label>
+          <span class="setting-hint">摘要：每条 600~800 字的长摘要，多数问答够用。正文：Search 直接返回网页正文，上下文更大。需要看某一页全文时，模型会自己再调 <code>fetch_url</code> 抓取 —— 抓哪几页由它决定，不再由客户端写死。</span>
           <label class="setting-row">
             <span>显示来源</span>
             <label class="toggle-switch">
@@ -967,16 +962,18 @@
 <script src="vendor/katex/katex.min.js?v=116"></script>
 <!-- LaTeX 渲染层：须在 katex.min.js 之后、chat.js 之前加载 -->
 <script src="latex.js?v=119"></script>
-<script src="db.js?v=132"></script>
+<script src="db.js?v=133"></script>
 <script src="haptics.js?v=116"></script>
 <script src="providers.js?v=102"></script>
 <!-- v3.0.5: 联网搜索（DeepSeek Search / Fetch）。必须在 providers.js 之后（用 normalizeBaseUrl/getProvider）、chat.js 之前 -->
-<script src="web-search.js?v=3"></script>
+<script src="web-search.js?v=5"></script>
+<!-- v3.0.8: 带工具的对话回合引擎（模型→工具→模型）。依赖 web-search.js 的工具定义，须在 chat.js 之前 -->
+<script src="agent-loop.js?v=1"></script>
 <!-- v3.0.7: 会话标题自动命名。必须在 providers.js 之后（用 getProvider/buildUpstreamPayload）、chat.js 之前（sendFromMessage 调它） -->
 <script src="auto-title.js?v=2"></script>
 <script src="image-gen.js?v=126"></script>
-<script src="conversation.js?v=116"></script>
-<script src="chat.js?v=136"></script>
+<script src="conversation.js?v=117"></script>
+<script src="chat.js?v=137"></script>
 <script src="io.js?v=128"></script>
 <script src="gesture-helpers.js?v=102"></script>
 <script src="app.js?v=131"></script>

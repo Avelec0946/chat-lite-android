@@ -1,14 +1,13 @@
 // ===== tests/web-search.test.js =====
-// 联网搜索（DeepSeek Search / Fetch）的纯逻辑回归测试
+// 联网搜索「工具层」的回归测试（node 直接跑，不联网）
 //   node tests/web-search.test.js
 //
-// 为什么需要这个文件：联网搜索的正确性**大部分不在网络层**，而在
-//   「用谁的 key」「结果拼成什么形状」「拼到哪条消息上」这三件事。
-//   这三件事全都不联网也能测，而且一旦写错，表现是"模型答得像模像样但引用了不存在的链接"——
-//   最贵的那种错误（用户会当真）。
-//
-// 做法：web-search.js 是普通脚本（顶层只有常量与函数声明），可以整体丢进 vm 沙箱；
-//   只注入 document/fetch/settings/state 这些最小桩。db.js 里抠 migrateWebSearchSettings。
+// 为什么需要：v3.0.6 起联网搜索是**交给模型的工具**（function calling），不再是"每条消息自动检索"。
+//   于是正确性集中在三件事上，且全都不联网也能测：
+//     ① 工具有没有被正确描述（描述写错，模型就不会在该搜的时候搜、或在不该搜的时候乱搜）；
+//     ② 参数解析与请求体是否正确（query / count / need_content）；
+//     ③ 失败是否变成「给模型的文本」而不是「抛异常把对话搞崩」。
+//   v3.0.5 的「把检索结果拼进上下文」那套断言已随实现一起删除 —— 那套行为本身被判定为错的。
 
 'use strict';
 
@@ -18,7 +17,6 @@ var vm = require('vm');
 
 var failures = 0;
 var passes = 0;
-
 function ok(name, cond, detail) {
   if (cond) { passes++; console.log('  \u2713 ' + name); }
   else { failures++; console.log('  \u2717 ' + name + (detail ? '  \u2192 ' + detail : '')); }
@@ -44,9 +42,8 @@ function extractFn(src, name) {
   return src.slice(start, end);
 }
 
-// ---------- 沙箱 ----------
-var calls = [];   // 记录发出的 HTTP 请求，供断言
-var responses = [];  // 按调用顺序出队
+var calls = [];
+var responses = [];
 var sandbox = {
   console: console, JSON: JSON, Object: Object, Array: Array, Math: Math, Date: Date,
   String: String, Number: Number, Boolean: Boolean, Promise: Promise,
@@ -71,11 +68,10 @@ var sandbox = {
   },
   document: { getElementById: function() { return null; } },
   currentConv: function() { return null; },
-  hapticPattern: function() {},
   settings: {},
   state: { providers: [], abortController: null },
   fetch: function(url, opts) {
-    calls.push({ url: url, body: opts && opts.body ? JSON.parse(opts.body) : null });
+    calls.push({ url: url, body: opts && opts.body ? JSON.parse(opts.body) : null, headers: opts && opts.headers });
     var r = responses.shift();
     if (!r) return Promise.reject(new Error('没有预置响应：' + url));
     if (r.reject) return Promise.reject(r.reject);
@@ -89,223 +85,140 @@ var sandbox = {
 vm.createContext(sandbox);
 vm.runInContext(fs.readFileSync(path.join(__dirname, '..', 'www', 'web-search.js'), 'utf8'), sandbox);
 
-// migrateWebSearchSettings 在 db.js
 var dbSrc = fs.readFileSync(path.join(__dirname, '..', 'www', 'db.js'), 'utf8');
 vm.runInContext(extractFn(dbSrc, 'clampNum'), sandbox);
 vm.runInContext(extractFn(dbSrc, 'defaultWebSearchSettings'), sandbox);
 vm.runInContext(extractFn(dbSrc, 'migrateWebSearchSettings'), sandbox);
 
-// ---------- 迁移与默认值 ----------
+// ---------- 设置迁移 ----------
 console.log('\n[migrateWebSearchSettings]');
 (function() {
   var def = vm.runInContext('defaultWebSearchSettings()', sandbox);
   ok('默认复用接口管理（mode=inherit）', def.mode === 'inherit', def.mode);
-  ok('默认不自动开启（defaultOn=false）', def.defaultOn === false);
+  ok('默认不自动开启', def.defaultOn === false);
   ok('默认摘要模式', def.contentMode === 'summary');
-  ok('默认信任的是 DeepSeek 官方地址', /api\.deepseek\.com/.test(def.baseUrl));
+  ok('默认条数 6（工具上限 10）', def.count === 6);
+  ok('已无 fetchTop 字段（抓取由模型决定）', def.fetchTop === undefined);
+  ok('默认信任 DeepSeek 官方地址', /api\.deepseek\.com/.test(def.baseUrl));
 
-  var m = vm.runInContext('migrateWebSearchSettings(undefined)', sandbox);
-  ok('空对象/undefined → 全套默认值', m.count === 6 && m.mode === 'inherit');
-
-  // 只增不改：用户只改过 count，其它字段不能被默认值覆盖
-  var m2 = vm.runInContext('migrateWebSearchSettings({count: 12, mode: "custom", baseUrl: "https://gw.example.com", apiKey: "sk-x"})', sandbox);
-  ok('用户改过的字段保留', m2.count === 12 && m2.mode === 'custom' && m2.apiKey === 'sk-x', JSON.stringify(m2));
-  ok('没改过的字段补默认', m2.showSources === true && m2.fetchTop === 2);
-
-  var m3 = vm.runInContext('migrateWebSearchSettings({count: 999, fetchTop: 99, contentMode: "weird"})', sandbox);
-  ok('count 越界收敛到 50', m3.count === 50, String(m3.count));
-  ok('fetchTop 越界收敛到 3', m3.fetchTop === 3, String(m3.fetchTop));
-  ok('非法 contentMode 回落 summary', m3.contentMode === 'summary');
+  var m = vm.runInContext('migrateWebSearchSettings({count: 12})', sandbox);
+  ok('count 越界收敛到 10（与工具定义一致）', m.count === 10, String(m.count));
+  var m2 = vm.runInContext('migrateWebSearchSettings({contentMode: "fetch"})', sandbox);
+  ok("老的 'fetch' 档迁移成 'content'", m2.contentMode === 'content', m2.contentMode);
+  var m3 = vm.runInContext('migrateWebSearchSettings({contentMode: "weird"})', sandbox);
+  ok('非法档位回落 summary', m3.contentMode === 'summary');
+  var m4 = vm.runInContext('migrateWebSearchSettings({mode: "custom", apiKey: "sk-x"})', sandbox);
+  ok('用户改过的字段保留', m4.mode === 'custom' && m4.apiKey === 'sk-x');
 })();
 
-// ---------- 端点拼接 ----------
-console.log('\n[端点拼接]');
+// ---------- 工具定义 ----------
+console.log('\n[工具定义]');
 (function() {
-  var f = sandbox.wsEndpointUrl;
-  ok('基址无 /v1 → 补 /v1', f('https://api.deepseek.com', '/tools/search') === 'https://api.deepseek.com/v1/tools/search', f('https://api.deepseek.com', '/tools/search'));
-  ok('基址已带 /v1 → 不重复', f('https://api.deepseek.com/v1', '/tools/search') === 'https://api.deepseek.com/v1/tools/search', f('https://api.deepseek.com/v1', '/tools/search'));
-  ok('尾部斜杠被吃掉', f('https://api.deepseek.com/', '/tools/fetch') === 'https://api.deepseek.com/v1/tools/fetch');
-})();
-
-// ---------- 密钥来源 ----------
-console.log('\n[密钥来源]');
-(function() {
-  sandbox.state.providers = [
-    { id: 'p1', name: '中转站', template: 'openai', baseUrl: 'https://api.kkaiapi.com', apiKey: 'sk-relay' },
-    { id: 'p2', name: 'DeepSeek', template: 'deepseek', baseUrl: 'https://api.deepseek.com', apiKey: 'sk-ds' }
-  ];
-  var pick = sandbox.wsPickProvider('');
-  ok('自动挑中 DeepSeek 官方，而不是排在前面的中转站', pick && pick.id === 'p2', pick && pick.id);
-
-  sandbox.settings = { webSearch: { mode: 'inherit', providerId: '' } };
-  var t = sandbox.wsResolveTarget();
-  ok('复用模式解析出官方地址与密钥', t.ok && t.baseUrl === 'https://api.deepseek.com' && t.apiKey === 'sk-ds', JSON.stringify(t));
-
-  // 显式选中转站 → 尊重用户选择
-  sandbox.settings = { webSearch: { mode: 'inherit', providerId: 'p1' } };
-  var t2 = sandbox.wsResolveTarget();
-  ok('显式选中的接口优先', t2.ok && t2.apiKey === 'sk-relay', JSON.stringify(t2));
-
-  // 只有中转站、没有 DeepSeek → 自动模式必须报错（不能悄悄用别人的 key）
-  sandbox.state.providers = [{ id: 'p1', name: '中转站', template: 'openai', baseUrl: 'https://api.kkaiapi.com', apiKey: 'sk-relay' }];
-  sandbox.settings = { webSearch: { mode: 'inherit', providerId: '' } };
-  var t3 = sandbox.wsResolveTarget();
-  ok('没有 DeepSeek 接口时如实报错，不瞎挑', t3.ok === false && /没有 DeepSeek 接口/.test(t3.reason), t3.reason);
-
-  // 自定义模式
-  sandbox.settings = { webSearch: { mode: 'custom', baseUrl: 'https://api.deepseek.com/', apiKey: '' } };
-  var t4 = sandbox.wsResolveTarget();
-  ok('自定义模式缺密钥 → 报错', t4.ok === false && /密钥为空/.test(t4.reason), t4.reason);
-
-  sandbox.settings = { webSearch: { mode: 'custom', baseUrl: 'https://api.deepseek.com/', apiKey: 'sk-custom' } };
-  var t5 = sandbox.wsResolveTarget();
-  ok('自定义模式地址去尾斜杠', t5.ok && t5.baseUrl === 'https://api.deepseek.com', t5.baseUrl);
-})();
-
-// ---------- 注入块 ----------
-console.log('\n[上下文注入]');
-(function() {
-  var block = sandbox.buildWebSearchBlock({ results: [] });
-  ok('空结果要求如实说没查到', /没有查到/.test(block), block.slice(0, 40));
-  ok('空结果明确禁止编造链接', /不要编造/.test(block));
-
-  var block2 = sandbox.buildWebSearchBlock({
-    query: 'q',
-    results: [
-      { idx: 1, title: '标题A', url: 'https://a.example.com/1', siteName: '站点A', date: '2026-10-20', authority: 3, summary: '摘要A', content: '' },
-      { idx: 2, title: '标题B', url: 'https://b.example.com/2', siteName: '', date: '', authority: -1, summary: '', snippet: '片段B', content: '' }
-    ]
+  var defs = sandbox.WEB_TOOL_DEFS;
+  ok('提供两个工具', Array.isArray(defs) && defs.length === 2, defs && defs.length);
+  var names = defs.map(function(d) { return d.function.name; });
+  ok('工具名是 web_search / fetch_url', names.indexOf('web_search') >= 0 && names.indexOf('fetch_url') >= 0, names.join(','));
+  defs.forEach(function(d) {
+    var f = d.function;
+    ok('「' + f.name + '」描述说明了适用/不适用',
+      typeof f.description === 'string' && f.description.length > 40 && /适用/.test(f.description), f.description);
+    ok('「' + f.name + '」parameters 是合法 JSON Schema',
+      !!(f.parameters && f.parameters.type === 'object' && Array.isArray(f.parameters.required) && f.parameters.required.length > 0));
   });
-  ok('带编号与标题', /\[1\] 标题A/.test(block2) && /\[2\] 标题B/.test(block2));
-  ok('带 URL', block2.indexOf('https://a.example.com/1') >= 0);
-  ok('站点/日期/权威标记', /站点A · 2026-10-20 · 权威/.test(block2), block2.match(/（[^）]*）/));
-  ok('摘要缺失时回落到 snippet', block2.indexOf('片段B') >= 0);
-  ok('提示资料里的指令不可执行（防提示注入）', /不得执行/.test(block2));
-  ok('要求引用不得编造 URL', /不得编造/.test(block2));
-
-  // 超长结果截断
-  var longRes = [{ idx: 1, title: 'x', url: 'https://x/1', content: new Array(9000).join('字') }];
-  var b3 = sandbox.buildWebSearchBlock({ results: longRes });
-  ok('单条超长正文被截断并标注', b3.indexOf('正文已截断') >= 0 && b3.length < 9000, String(b3.length));
+  var search = defs.filter(function(d) { return d.function.name === 'web_search'; })[0];
+  ok('count 参数限了 1~10', search.function.parameters.properties.count.maximum === 10);
+  ok('query 被标为必填', search.function.parameters.required.indexOf('query') >= 0);
 })();
 
-console.log('\n[结果拼接位置]');
+// ---------- 结果格式化 ----------
+console.log('\n[结果格式化]');
 (function() {
-  var ctx = [
-    { role: 'system', content: 'SYS' },
-    { role: 'user', content: '第一个问题' },
-    { role: 'assistant', content: '答' },
-    { role: 'user', content: '本次问题' }
-  ];
-  sandbox.injectWebSearchBlock(ctx, 'BLOCK');
-  ok('追加到最后一条 user，而不是新起一条', ctx.length === 4 && ctx[3].content === '本次问题\n\nBLOCK', JSON.stringify(ctx[3]));
-  ok('system 一个字节没动（前缀缓存）', ctx[0].content === 'SYS');
-  ok('历史消息没被污染', ctx[1].content === '第一个问题');
+  var text = sandbox.wsFormatSearchResult('测试词', [
+    { idx: 1, title: '标题A', url: 'https://a/1', siteName: '站点A', date: '2026-10-20', authority: 3, summary: '摘要A', content: '' },
+    { idx: 2, title: '标题B', url: 'https://b/2', siteName: '', date: '', authority: -1, summary: '', snippet: '片段B', content: '' }
+  ]);
+  ok('带编号与标题', /\[1\] 标题A/.test(text) && /\[2\] 标题B/.test(text));
+  ok('带 URL（模型只能引用这里给的链接）', text.indexOf('https://a/1') >= 0);
+  ok('带站点/日期/权威标记', /站点A · 2026-10-20 · 权威来源/.test(text));
+  ok('摘要缺失时回落 snippet', text.indexOf('片段B') >= 0);
+  ok('提示可再抓正文', /fetch_url/.test(text));
 
-  // 状态栏注入的伪 user 必须跳过
-  var ctx2 = [
-    { role: 'system', content: 'SYS' },
-    { role: 'user', content: '真正的问题' },
-    { role: 'user', content: '【格式要求】你必须在本次回复的最末尾输出状态栏' }
-  ];
-  sandbox.injectWebSearchBlock(ctx2, 'BLOCK');
-  ok('跳过【格式要求】伪 user，挂到真问题上', ctx2[1].content === '真正的问题\n\nBLOCK' && ctx2[2].content.indexOf('BLOCK') < 0, JSON.stringify(ctx2));
+  var empty = sandbox.wsFormatSearchResult('x', []);
+  ok('空结果告诉它可以换词或直说没查到', /没有返回任何结果/.test(empty) && /没查到/.test(empty), empty.slice(0, 60));
 
-  // 多模态
-  var ctx3 = [{ role: 'user', content: [{ type: 'text', text: '看图' }, { type: 'image_url', image_url: { url: 'data:,' } }] }];
-  sandbox.injectWebSearchBlock(ctx3, 'BLOCK');
-  ok('多模态消息追加一个 text part', Array.isArray(ctx3[0].content) && ctx3[0].content.length === 3 && ctx3[0].content[2].text === 'BLOCK');
-
-  // 没有任何 user
-  var ctx4 = [{ role: 'system', content: 'SYS' }];
-  sandbox.injectWebSearchBlock(ctx4, 'BLOCK');
-  ok('没有 user 时新起一条（宁可多一条也不丢结果）', ctx4.length === 2 && ctx4[1].role === 'user' && ctx4[1].content === 'BLOCK');
+  var longOne = sandbox.wsFormatSearchResult('x', [{ idx: 1, title: 't', url: 'u', content: new Array(9000).join('字') }]);
+  ok('单条超长正文被截断并标注', longOne.indexOf('已截断') >= 0 && longOne.length < 9000, String(longOne.length));
 })();
 
-// ---------- 真实请求形状（桩 fetch） ----------
-console.log('\n[请求形状]');
+// ---------- 工具执行 ----------
+console.log('\n[runWebTool: web_search]');
 (async function() {
   function reset() { calls.length = 0; responses.length = 0; }
-  sandbox.settings = { webSearch: { mode: 'inherit', providerId: '', count: 5, contentMode: 'summary', fetchTop: 2, showSources: true } };
+  sandbox.settings = { webSearch: { mode: 'inherit', providerId: '', count: 6, contentMode: 'summary', showSources: true } };
   sandbox.state.providers = [{ id: 'p2', name: 'DeepSeek', template: 'deepseek', baseUrl: 'https://api.deepseek.com', apiKey: 'sk-ds' }];
 
-  // ① 摘要模式：只发一次 search，不带 need_content
   reset();
   responses.push({ status: 200, body: { results: [
     { title: 'A', url: 'https://a/1', summary: 'sa', rerank_score: 2.1, authority: 3, site_name: 'SA', date: '2026-10-01T00:00:00+00:00' },
-    { title: 'B', url: 'https://b/2', snippet: 'sb', rerank_score: 1.0 }
+    { title: 'B', url: 'https://b/2', snippet: 'sb' }
   ] } });
-  var r1 = await sandbox.runWebSearch('测试问题', {});
-  ok('只发了 1 次请求', calls.length === 1, 'calls=' + calls.length);
+  var collected = [];
+  var r1 = await sandbox.runWebTool('web_search', { query: '测试词', count: 3 }, { collectSources: function(l) { collected = collected.concat(l); } });
   ok('打到 /v1/tools/search', calls[0].url === 'https://api.deepseek.com/v1/tools/search', calls[0].url);
-  ok('请求体带 query 与 count', calls[0].body.query === '测试问题' && calls[0].body.count === 5, JSON.stringify(calls[0].body));
+  ok('query 用的是模型写的词（不是用户原话）', calls[0].body.query === '测试词');
+  ok('count 用模型给的值', calls[0].body.count === 3, String(calls[0].body.count));
   ok('摘要模式不发 need_content', calls[0].body.need_content === undefined);
-  ok('结果被归一化成 2 条且编号从 1 开始', r1.results.length === 2 && r1.results[0].idx === 1 && r1.results[1].idx === 2);
-  ok('日期被转成 YYYY-MM-DD', r1.results[0].date === '2026-10-01', r1.results[0].date);
+  ok('返回给模型的文本带编号', r1.text.indexOf('[1] A') >= 0);
+  ok('meta 记录条数（UI 要显示）', r1.meta.ok === true && r1.meta.count === 2);
+  ok('来源被收集（供下方来源卡片）', collected.length === 2 && collected[0].url === 'https://a/1');
 
-  // ② 正文模式：need_content=true，且只有 1 次请求
   reset();
   sandbox.settings.webSearch.contentMode = 'content';
   responses.push({ status: 200, body: { results: [{ title: 'A', url: 'https://a/1', content: '正文全文' }] } });
-  var r2 = await sandbox.runWebSearch('q', {});
-  ok('正文模式带 need_content=true', calls[0].body.need_content === true, JSON.stringify(calls[0].body));
-  ok('正文模式不额外抓取', calls.length === 1 && r2.fetched === 0);
+  var r2 = await sandbox.runWebTool('web_search', { query: 'q' });
+  ok('正文模式带 need_content=true', calls[0].body.need_content === true);
+  ok('正文写进了给模型的文本', r2.text.indexOf('正文全文') >= 0);
 
-  // ③ 抓取模式：1 次 search + 前 N 次 fetch，单条失败不影响整轮
-  reset();
-  sandbox.settings.webSearch.contentMode = 'fetch';
-  sandbox.settings.webSearch.fetchTop = 2;
-  responses.push({ status: 200, body: { results: [
-    { title: 'A', url: 'https://a/1', summary: 'sa' },
-    { title: 'B', url: 'https://b/2', summary: 'sb' },
-    { title: 'C', url: 'https://c/3', summary: 'sc' }
-  ] } });
-  responses.push({ status: 200, body: { title: 'A', content: '# A 全文' } });
-  responses.push({ status: 404, body: { error: { message: 'no content' } } });   // 第二条抓取失败
-  var r3 = await sandbox.runWebSearch('q', {});
-  ok('抓取模式发 1+2 次请求', calls.length === 3, 'calls=' + calls.length);
-  ok('失败的那条不阻断整轮', r3.results.length === 3 && r3.fetched === 1, 'fetched=' + r3.fetched);
-  ok('成功的正文被写回', r3.results[0].content === '# A 全文' && r3.results[0].fetched === true);
-  ok('只抓前 N 条（第 3 条没被抓）', r3.results[2].fetched !== true);
-
-  // ④ 错误映射
   reset();
   sandbox.settings.webSearch.contentMode = 'summary';
-  responses.push({ status: 401, body: { error: { message: 'Authentication Fails' } } });
-  var err401 = null;
-  try { await sandbox.runWebSearch('q', {}); } catch (e) { err401 = e; }
-  ok('401 → 文案点明密钥问题并保留原始信息', !!err401 && /密钥无效/.test(err401.message) && /Authentication Fails/.test(err401.message), err401 && err401.message);
-  ok('401 的状态码被带出来（供上层区分）', err401 && err401.wsStatus === 401);
+  var r3 = await sandbox.runWebTool('web_search', {});
+  ok('缺 query 时不发请求、直接说明', calls.length === 0 && r3.meta.ok === false && /不能为空/.test(r3.text), r3.text);
 
   reset();
-  responses.push({ status: 402, body: { error: { message: 'Insufficient Balance' } } });
-  var err402 = null;
-  try { await sandbox.runWebSearch('q', {}); } catch (e) { err402 = e; }
-  ok('402 → 余额不足', !!err402 && /余额不足/.test(err402.message), err402 && err402.message);
+  responses.push({ status: 429, body: { error: { message: 'rate limited' } } });
+  var r4 = await sandbox.runWebTool('web_search', { query: 'q' });
+  ok('限速不抛异常，改成文本回填', r4.meta.ok === false && /触发限速/.test(r4.text), r4.text);
+  ok('失败原因保留上游原文', /rate limited/.test(r4.text));
 
-  // ⑤ 检索失败不阻断：attachWebSearchToContext 必须把原 context 原样还回来
+  console.log('\n[runWebTool: fetch_url]');
   reset();
-  sandbox.settings.webSearch.contentMode = 'summary';
-  sandbox.state.abortController = null;
-  responses.push({ status: 500, body: { error: { message: 'boom' } } });
-  var ctx = [{ role: 'system', content: 'SYS' }, { role: 'user', content: '问题' }];
-  var res = await sandbox.attachWebSearchToContext({ webSearch: true }, ctx, { query: '问题' });
-  ok('搜索失败时 context 原样返回（聊天照发）', res.context === ctx && ctx[1].content === '问题');
-  ok('失败原因进 meta，供上层展示', res.meta && /内部错误/.test(res.meta.error), res.meta && res.meta.error);
-  ok('失败时弹过一次提示', sandbox.__toasts.length >= 1);
+  responses.push({ status: 200, body: { title: '页面标题', content: '# 正文\n内容' } });
+  var collected2 = [];
+  var f1 = await sandbox.runWebTool('fetch_url', { url: 'https://a/1' }, { collectSources: function(l) { collected2 = collected2.concat(l); } });
+  ok('打到 /v1/tools/fetch', calls[0].url === 'https://api.deepseek.com/v1/tools/fetch', calls[0].url);
+  ok('url 原样传入', calls[0].body.url === 'https://a/1');
+  ok('返回标题与正文', f1.meta.ok === true && f1.text.indexOf('页面标题') >= 0 && f1.text.indexOf('# 正文') >= 0);
+  ok('抓取过的页面也进来源列表（标 fetched）', collected2.length === 1 && collected2[0].fetched === true);
 
-  // ⑥ 开关关着 → 一个请求都不发
   reset();
-  var res2 = await sandbox.attachWebSearchToContext({ webSearch: false }, ctx, { query: '问题' });
-  ok('会话开关关着时不发请求', calls.length === 0 && res2.context === ctx);
+  var f2 = await sandbox.runWebTool('fetch_url', { url: 'not-a-url' });
+  ok('非法 url 不发请求', calls.length === 0 && f2.meta.ok === false, f2.text);
 
-  // ⑦ 成功路径：挂 sources、context 被注入
   reset();
-  responses.push({ status: 200, body: { results: [{ title: 'A', url: 'https://a/1', summary: 'sa', site_name: 'SA', date: '2026-10-02T00:00:00+00:00' }] } });
-  var ctx2 = [{ role: 'user', content: '问题' }];
-  var res3 = await sandbox.attachWebSearchToContext({ webSearch: true }, ctx2, { query: '问题' });
-  ok('成功时 context 被注入检索块', res3.context[0].content.indexOf('【联网搜索结果】') > 0);
-  ok('sources 带标题/URL/站点/日期', res3.sources && res3.sources.length === 1 && res3.sources[0].site === 'SA' && res3.sources[0].date === '2026-10-02', JSON.stringify(res3.sources));
+  responses.push({ status: 404, body: { error: { message: 'no content' } } });
+  var f3 = await sandbox.runWebTool('fetch_url', { url: 'https://a/2' });
+  ok('抓不到时如实说失败（不编内容）', f3.meta.ok === false && /失败/.test(f3.text), f3.text);
+
+  reset();
+  var u1 = await sandbox.runWebTool('drop_database', {});
+  ok('未知工具被拒绝', u1.meta.ok === false && /未知工具/.test(u1.text));
+
+  reset();
+  sandbox.settings = { webSearch: { mode: 'custom', baseUrl: 'https://api.deepseek.com', apiKey: '' } };
+  var n1 = await sandbox.runWebTool('web_search', { query: 'q' });
+  ok('没配密钥时不发请求，如实回报', calls.length === 0 && /密钥为空/.test(n1.text), n1.text);
+
+  sandbox.settings = { webSearch: { mode: 'inherit', providerId: '', count: 6, contentMode: 'summary', showSources: true } };
 
   // ---------- 来源卡片 ----------
   console.log('\n[来源卡片]');
@@ -313,17 +226,16 @@ console.log('\n[请求形状]');
     { title: '<script>x</script>', url: 'https://a/1', site: 'SA', date: '2026-10-02', fetched: true },
     { title: '', url: 'https://b/2', site: '', date: '' }
   ]);
-  ok('渲染出 details 容器与条数', /class="web-sources"/.test(html) && /联网来源 · 2 条/.test(html));
-  ok('标题被转义（不执行注入的标签）', html.indexOf('<script>') < 0 && html.indexOf('&lt;script&gt;') > 0);
-  ok('无标题时回落到 URL', html.indexOf('>https://b/2<') > 0);
+  ok('渲染 details 容器与条数', /class="web-sources"/.test(html) && /联网来源 · 2 条/.test(html));
+  ok('默认收折（不带 open）', html.indexOf('web-sources" open') < 0, html.slice(0, 60));
+  ok('标题被转义', html.indexOf('<script>') < 0 && html.indexOf('&lt;script&gt;') > 0);
+  ok('无标题时回落 URL', html.indexOf('>https://b/2<') > 0);
   ok('抓过正文的条目标注出来', html.indexOf('已抓正文') > 0);
-  ok('空数组不渲染任何东西', sandbox.renderWebSearchSourcesHtml([]) === '');
+  ok('空数组不渲染', sandbox.renderWebSearchSourcesHtml([]) === '');
 
   sandbox.settings.webSearch.showSources = false;
   ok('关掉「显示来源」后不渲染', sandbox.renderWebSearchSourcesHtml([{ title: 't', url: 'u' }]) === '');
-  sandbox.settings.webSearch.showSources = true;
 
-  // ---------- 汇总 ----------
   console.log('\n' + passes + ' passed, ' + failures + ' failed');
   process.exit(failures ? 1 : 0);
 })().catch(function(e) {

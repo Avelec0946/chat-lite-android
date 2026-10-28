@@ -179,9 +179,10 @@ function defaultWebSearchSettings() {
     providerId: '',             // inherit 时指定用哪个接口，空 = 自动挑（优先 api.deepseek.com）
     baseUrl: 'https://api.deepseek.com',
     apiKey: '',
-    count: 6,                   // 每次检索返回条数 1~50
-    contentMode: 'summary',     // summary=只要摘要 / content=要正文 / fetch=再抓前 N 条全文
-    fetchTop: 2,                // contentMode=fetch 时抓几条（1~3）
+    // v3.0.8：搜索变成模型可调用的工具后，条数上限跟工具定义对齐（1~10）。
+    //   fetchTop 已删除 —— 「该抓哪几条」不再由客户端写死，改由模型自己调 fetch_url 决定。
+    count: 6,                   // 搜索工具的默认条数 1~10（模型没在参数里指定时用它）
+    contentMode: 'summary',     // summary=只要摘要 / content=Search 直接带回正文
     showSources: true,          // 回复下面显示来源卡片
     defaultOn: false            // 新会话是否默认开启
   };
@@ -198,12 +199,14 @@ function migrateWebSearchSettings(w) {
     out[k] = Object.prototype.hasOwnProperty.call(w, k) && w[k] !== undefined && w[k] !== null ? w[k] : def[k];
   }
   out.mode = out.mode === 'custom' ? 'custom' : 'inherit';
-  out.contentMode = (out.contentMode === 'content' || out.contentMode === 'fetch') ? out.contentMode : 'summary';
+  // 老库里的 'fetch'（v3.0.5 的「正文+抓取」档）已不存在：它等于"客户端替模型决定抓哪几页"。
+  //   迁移成 'content'（保留"想要正文"的原意），剩下的交给模型自己 fetch_url。
+  if (out.contentMode === 'fetch') out.contentMode = 'content';
+  out.contentMode = (out.contentMode === 'content') ? 'content' : 'summary';
   ['providerId', 'baseUrl', 'apiKey'].forEach(function(k) {
     if (typeof out[k] !== 'string') out[k] = def[k];
   });
-  out.count = clampNum(out.count, 1, 50, def.count);
-  out.fetchTop = clampNum(out.fetchTop, 1, 3, def.fetchTop);
+  out.count = clampNum(out.count, 1, 10, def.count);
   out.showSources = out.showSources !== false;
   out.defaultOn = out.defaultOn === true;
   return out;

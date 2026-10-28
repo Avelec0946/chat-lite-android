@@ -1200,6 +1200,180 @@ async function executeNativeRequest(req, assistantMsg, opts) {
 }
 
 // ===== 流式发送 =====
+// ===== v3.0.8: 联网搜索 = 交给模型的工具 =====
+// 这里只做三件事：把工具循环接到消息树上（渲染 / 保存 / 中断），以及把工具轨迹留在气泡里。
+// 真正的「模型→工具→模型」循环在 agent-loop.js；工具定义与执行在 web-search.js。
+
+// 工具轨迹的 HTML。默认展开 —— 用户最想知道的就是「它到底搜了什么词」，
+// 折起来等于把这件事藏了（和来源卡片不一样：那是结果，这是决策过程）。
+function agentTraceHtml(trace) {
+  if (!trace || !trace.length) return '';
+  var items = trace.map(function(t) {
+    var name = t.name === 'fetch_url' ? '抓取网页' : (t.name === 'web_search' ? '搜索' : String(t.name));
+    var arg = '';
+    var a = t.args || {};
+    if (t.name === 'fetch_url') arg = String(a.url || '');
+    else if (a.query) arg = '「' + a.query + '」';
+    var status = '';
+    if (t.status === 'running') status = '<span class="agent-trace-spin"></span>';
+    else if (t.status === 'error') status = '失败';
+    else status = t.summary || '完成';
+    return '<div class="agent-trace-item">' +
+      '<span class="agent-trace-name">' + escapeHtml(name) + '</span>' +
+      '<span class="agent-trace-arg">' + escapeHtml(arg) + '</span>' +
+      '<span class="agent-trace-st">' + status + '</span>' +
+    '</div>';
+  }).join('');
+  return '<details class="agent-trace" open>' +
+    '<summary class="agent-trace-summary">已调用 ' + trace.length + ' 个工具</summary>' +
+    '<div class="agent-trace-list">' + items + '</div>' +
+  '</details>';
+}
+
+// 局部刷新轨迹（不重建整个消息列表 —— 流式期间重建会把刚渲染的正文冲掉再重画）
+function updateAgentTrace(assistantMsg) {
+  if (!assistantMsg) return;
+  var bubble = messagesEl.querySelector('.message[data-id="' + assistantMsg.id + '"] .msg-bubble');
+  if (!bubble) return;
+  var html = agentTraceHtml(assistantMsg.toolTrace);
+  var el = bubble.querySelector('.agent-trace');
+  if (!html) { if (el) el.remove(); return; }
+  var tmp = document.createElement('div');
+  tmp.innerHTML = html;
+  var node = tmp.firstElementChild;
+  if (el) bubble.replaceChild(node, el);
+  else bubble.insertBefore(node, bubble.firstChild);
+}
+
+// 来源去重（模型可能对同一页搜两次、或先搜到再抓正文 —— 卡片里不该出现两条一样的）
+function agentDedupeSources(list) {
+  var seen = {};
+  var out = [];
+  for (var i = 0; i < (list || []).length; i++) {
+    var s = list[i];
+    if (!s || !s.url || seen[s.url]) continue;
+    seen[s.url] = 1;
+    out.push({
+      title: s.title || s.url,
+      url: s.url,
+      site: s.siteName || '',
+      date: s.date || '',
+      authority: (typeof s.authority === 'number') ? s.authority : -1,
+      fetched: !!s.fetched
+    });
+  }
+  return out;
+}
+
+// 接口不支持 tools 时（部分中转站会把未知字段当错误）就是这句 —— 用它决定要不要静默降级。
+function agentIsToolsUnsupported(err) {
+  var m = String((err && err.message) || '');
+  return /tool[s_ ]|tool_choice|function.{0,4}call|不支持|unknown.{0,10}field/i.test(m) &&
+    /400|422|invalid|unsupported|unrecognized|不支持/i.test(m);
+}
+
+// 跑一轮「带工具的对话」。返回 true = 已处理完（含按中断/错误收尾）；false = 请调用方落回普通请求。
+async function runAgentChat(provider, conv, context, assistantMsg) {
+  var sources = [];
+  var trace = [];
+  var lastRender = 0;
+  assistantMsg.toolTrace = trace;
+
+  function renderTrace() {
+    try { updateAgentTrace(assistantMsg); } catch (e) {}
+  }
+
+  var res;
+  try {
+    res = await agentRun({
+      messages: context,
+      tools: (typeof WEB_TOOL_DEFS !== 'undefined') ? WEB_TOOL_DEFS : null,
+      maxRounds: 4,
+      // 工具模式一律直连：浏览器模式下的 /api/chat/completions 是本地代理，
+      //   它不认识 tools / tool_choice，转发过去只会被丢掉（然后模型"凭空"不调工具）。
+      buildRequest: function(msgs, tools) {
+        var body = {
+          messages: msgs,
+          model: conv.model,
+          stream: true,
+          thinkingEnabled: conv.thinkingEnabled !== false
+        };
+        if (tools && tools.length) {
+          body.tools = tools;
+          body.tool_choice = 'auto';
+        }
+        return buildUpstreamPayload(provider, body);
+      },
+      execTool: function(name, args) {
+        return runWebTool(name, args, {
+          collectSources: function(list) { sources = sources.concat(list || []); }
+        });
+      },
+      onDelta: function(kind, text) {
+        if (kind === 'content') assistantMsg.content = (assistantMsg.content || '') + text;
+        else assistantMsg.reasoningContent = (assistantMsg.reasoningContent || '') + text;
+        var now = Date.now();
+        if (!state._isTouching && now - lastRender > 100) {
+          lastRender = now;
+          updateMessageContent(assistantMsg.id, assistantMsg.content, assistantMsg.reasoningContent || '');
+        }
+      },
+      onToolStart: function(call) {
+        trace.push({ name: call.name, args: call.parsedArgs || {}, status: 'running' });
+        renderTrace();
+        scrollToBottom();
+      },
+      onToolEnd: function(call, result) {
+        for (var i = trace.length - 1; i >= 0; i--) {
+          if (trace[i].status === 'running' && trace[i].name === call.name) {
+            var meta = result.meta || {};
+            trace[i].status = (meta.ok === false) ? 'error' : 'ok';
+            if (call.name === 'fetch_url') {
+              trace[i].summary = meta.ok === false ? '失败' : ('正文 ' + Math.round((meta.len || 0) / 100) / 10 + 'k 字');
+            } else {
+              trace[i].summary = (meta.ok === false) ? '失败' : ((meta.count || 0) + ' 条');
+            }
+            break;
+          }
+        }
+        renderTrace();
+      },
+      signal: state.abortController ? state.abortController.signal : null
+    });
+  } catch (e) {
+    if (e && e.name === 'AbortError') {
+      assistantMsg.interrupted = true;
+      assistantMsg.errorMsg = '用户打断';
+      save();
+      renderMessages();
+      return true;
+    }
+    if (agentIsToolsUnsupported(e)) {
+      showToast('当前接口不支持工具调用，联网搜索在这条接口上用不了（本轮已按普通对话重发）', 'warn');
+      return false;
+    }
+    throw e;   // 真错误交给 sendFromMessage 的 catch（保持原来的错误气泡行为）
+  }
+
+  // ---- 收尾 ----
+  // 模型可能一次都没调工具（它判断不需要联网）—— 那就和普通回答一样，什么都不加。
+  assistantMsg.content = res.content || assistantMsg.content || '';
+  assistantMsg.reasoningContent = res.reasoning || assistantMsg.reasoningContent || '';
+  var srcs = agentDedupeSources(sources);
+  if (srcs.length) assistantMsg.webSources = srcs;
+  assistantMsg.versions[0] = { content: assistantMsg.content, timestamp: Date.now(), reason: 'original' };
+  if (res.finishReason === 'length') {
+    assistantMsg.interrupted = true;
+    assistantMsg.errorMsg = '已达模型单次输出上限，内容可能不完整，可点「继续生成」续写';
+  }
+  if (state._isBackground) state._pendingTextNotify = '回复已完成';
+  save();
+  setStatus('ok');
+  renderMessages();
+  scrollToBottom();
+  return true;
+}
+
 async function sendFromMessage(context) {
   const conv = currentConv();
   if (!conv) return;
@@ -1257,26 +1431,21 @@ async function sendFromMessage(context) {
   var isLocal = window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1' || window.location.hostname.startsWith('192.168.') || window.location.hostname.startsWith('172.') || window.location.hostname.startsWith('10.') || window.location.hostname.endsWith('.local');
   var useDirect = isCapacitor() || settings.directMode || !isLocal;
 
-  // ===== v3.0.5: 联网搜索（会话级开关）=====
-  // 位置很关键：必须在 provider 解析后、reqBody 构造前 —— 检索结果要并进 context。
-  // 三条约束（见 web-search.js 顶部）：① 结果不落库、不进 system；② 失败不阻断；③ 只有一处实现。
-  if (typeof attachWebSearchToContext === 'function') {
-    // assistantMsgId 只用于「正在联网检索…」那行提示：挂在**正在生成的那条气泡**里，
-    //   不额外占底栏空间（v3.0.5.1 去掉了底栏地球按钮）。
-    var wsRes = await attachWebSearchToContext(conv, context, { assistantMsgId: assistantMsg.id });
-    if (wsRes && wsRes.context) context = wsRes.context;
-    // 用户检索途中点了停止：如实收尾，**不要**接着把聊天请求发出去
-    if (wsRes && wsRes.meta && wsRes.meta.skipped === 'aborted') {
-      assistantMsg.interrupted = true;
-      assistantMsg.errorMsg = '用户打断';
-      save();
-      renderMessages();
-      return;
-    }
-    if (wsRes && wsRes.sources && wsRes.sources.length) {
-      assistantMsg.webSources = wsRes.sources;
-      if (wsRes.meta) assistantMsg.webSearchMeta = wsRes.meta;
-      save();
+  // ===== v3.0.8: 联网搜索 = 交给模型的工具 =====
+  //   开关打开时，把 web_search / fetch_url 作为 tools 交给模型，**由它自己决定**要不要调、用什么词、调几次。
+  //   （v3.0.5 是"拿到用户那句话直接去搜、结果硬塞进上下文"，那不是工具，是检索管道 —— 模型没有选择权。）
+  if (typeof agentRun === 'function' && typeof webSearchEnabled === 'function' && webSearchEnabled(conv)) {
+    var wsReady = (typeof wsResolveTarget === 'function') ? wsResolveTarget() : { ok: false, reason: '联网搜索未就绪' };
+    if (!wsReady.ok) {
+      // 没配密钥/地址：不阻断这轮对话，只是没有工具可用
+      showToast(wsReady.reason + '（本轮仍会正常回答，只是不能联网）', 'warn');
+    } else {
+      var agentHandled = await runAgentChat(provider, conv, context, assistantMsg);
+      if (agentHandled) return;
+      // 接口不支持 tools：清掉可能的半截输出，落回普通请求
+      assistantMsg.content = '';
+      assistantMsg.reasoningContent = '';
+      assistantMsg.toolTrace = null;
       renderMessages();
     }
   }

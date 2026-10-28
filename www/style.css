@@ -1570,3 +1570,32 @@ body.voice-view-open .btn-voice-entry::after{display:none}
    这里只对这一行做局部处理，不动全局 .setting-row。 */
 #ws-provider-row>span:first-child{white-space:nowrap;flex:0 0 auto}
 #ws-provider-row .setting-select{flex:1;min-width:0}
+
+/* ===== v3.0.8 工具调用轨迹（模型自己搜了什么、抓了哪页）=====
+   和来源卡片的区别：来源是"结果"，这里是"决策过程"。所以它放在正文之前、默认展开。 */
+.agent-trace{
+  margin:0 0 8px;padding:6px 8px;border:1px solid var(--border);border-radius:var(--radius);
+  background:var(--bg2);font-size:12px;
+}
+.agent-trace-summary{
+  cursor:pointer;list-style:none;display:flex;align-items:center;gap:6px;
+  color:var(--text2);font-weight:600;
+}
+.agent-trace-summary::-webkit-details-marker{display:none}
+.agent-trace-summary::before{content:'▸';font-size:11px;transition:transform .18s}
+.agent-trace[open] .agent-trace-summary::before{transform:rotate(90deg)}
+.agent-trace-list{margin-top:6px;display:flex;flex-direction:column;gap:4px}
+.agent-trace-item{display:flex;align-items:baseline;gap:6px;min-width:0;line-height:1.45}
+.agent-trace-name{
+  flex:0 0 auto;padding:0 5px;border-radius:4px;background:var(--bg3);
+  color:var(--text2);font-size:10px;
+}
+.agent-trace-arg{
+  flex:1 1 auto;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;
+  color:var(--text);
+}
+.agent-trace-st{flex:0 0 auto;color:var(--text2);font-size:11px;font-variant-numeric:tabular-nums}
+.agent-trace-spin{
+  display:inline-block;width:9px;height:9px;border-radius:50%;
+  border:2px solid var(--border);border-top-color:var(--primary);animation:wsSpin .7s linear infinite;
+}
