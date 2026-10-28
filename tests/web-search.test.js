@@ -96,17 +96,16 @@ console.log('\n[migrateWebSearchSettings]');
   var def = vm.runInContext('defaultWebSearchSettings()', sandbox);
   ok('默认复用接口管理（mode=inherit）', def.mode === 'inherit', def.mode);
   ok('默认不自动开启', def.defaultOn === false);
-  ok('默认摘要模式', def.contentMode === 'summary');
-  ok('默认条数 6（工具上限 10）', def.count === 6);
+  // v3.0.9：count / contentMode / fetchTop 全部删除 —— 它们都是"客户端替模型决定检索深度"的残留，
+  //   现在条数与要不要正文是 web_search 的工具参数，设置里不该再有一个全局默认值。
+  ok('已无 count 字段（条数是工具参数）', def.count === undefined);
+  ok('已无 contentMode 字段（正文也是工具参数）', def.contentMode === undefined);
   ok('已无 fetchTop 字段（抓取由模型决定）', def.fetchTop === undefined);
   ok('默认信任 DeepSeek 官方地址', /api\.deepseek\.com/.test(def.baseUrl));
 
-  var m = vm.runInContext('migrateWebSearchSettings({count: 12})', sandbox);
-  ok('count 越界收敛到 10（与工具定义一致）', m.count === 10, String(m.count));
-  var m2 = vm.runInContext('migrateWebSearchSettings({contentMode: "fetch"})', sandbox);
-  ok("老的 'fetch' 档迁移成 'content'", m2.contentMode === 'content', m2.contentMode);
-  var m3 = vm.runInContext('migrateWebSearchSettings({contentMode: "weird"})', sandbox);
-  ok('非法档位回落 summary', m3.contentMode === 'summary');
+  var m = vm.runInContext('migrateWebSearchSettings({count: 12, contentMode: "content", fetchTop: 3})', sandbox);
+  ok('老库里的 count/contentMode/fetchTop 被丢弃（不再回填）',
+    m.count === undefined && m.contentMode === undefined && m.fetchTop === undefined, JSON.stringify(m));
   var m4 = vm.runInContext('migrateWebSearchSettings({mode: "custom", apiKey: "sk-x"})', sandbox);
   ok('用户改过的字段保留', m4.mode === 'custom' && m4.apiKey === 'sk-x');
 })();
@@ -127,7 +126,9 @@ console.log('\n[工具定义]');
   });
   var search = defs.filter(function(d) { return d.function.name === 'web_search'; })[0];
   ok('count 参数限了 1~10', search.function.parameters.properties.count.maximum === 10);
+  ok('need_content 是模型可用的参数（决定要不要连正文）', !!search.function.parameters.properties.need_content);
   ok('query 被标为必填', search.function.parameters.required.indexOf('query') >= 0);
+  ok('其余参数都可选（模型有权只给 query）', search.function.parameters.required.length === 1, search.function.parameters.required.join(','));
 })();
 
 // ---------- 结果格式化 ----------
@@ -173,14 +174,17 @@ console.log('\n[runWebTool: web_search]');
   ok('来源被收集（供下方来源卡片）', collected.length === 2 && collected[0].url === 'https://a/1');
 
   reset();
-  sandbox.settings.webSearch.contentMode = 'content';
   responses.push({ status: 200, body: { results: [{ title: 'A', url: 'https://a/1', content: '正文全文' }] } });
-  var r2 = await sandbox.runWebTool('web_search', { query: 'q' });
-  ok('正文模式带 need_content=true', calls[0].body.need_content === true);
+  var r2 = await sandbox.runWebTool('web_search', { query: 'q', need_content: true });
+  ok('模型要正文时带 need_content=true', calls[0].body.need_content === true, JSON.stringify(calls[0].body));
   ok('正文写进了给模型的文本', r2.text.indexOf('正文全文') >= 0);
 
   reset();
-  sandbox.settings.webSearch.contentMode = 'summary';
+  responses.push({ status: 200, body: { results: [{ title: 'B', url: 'https://b/2', summary: 's' }] } });
+  await sandbox.runWebTool('web_search', { query: 'q' });
+  ok('模型没说要正文时不发 need_content', calls[0].body.need_content === undefined);
+
+  reset();
   var r3 = await sandbox.runWebTool('web_search', {});
   ok('缺 query 时不发请求、直接说明', calls.length === 0 && r3.meta.ok === false && /不能为空/.test(r3.text), r3.text);
 

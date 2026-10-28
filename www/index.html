@@ -330,7 +330,7 @@
               <span class="toggle-slider"></span>
             </label>
           </label>
-          <span class="setting-hint">开启后模型会拿到 <code>web_search</code> / <code>fetch_url</code> 两个工具，由它自己判断要不要联网、搜什么。工具结果只用于本次回答，不写进对话历史。密钥与默认条数在「联网搜索」分组里配置。</span>
+          <span class="setting-hint">开启后模型会拿到 <code>web_search</code> / <code>fetch_url</code> 两个工具，由它自己判断要不要联网、搜什么。工具结果只用于本次回答，不写进对话历史。密钥在「联网搜索」分组里配置。</span>
           <label class="setting-row setting-row-col">
             <span>系统提示词</span>
             <textarea id="system-prompt" class="setting-textarea" rows="3" placeholder="输入系统提示词..."></textarea>
@@ -867,7 +867,7 @@
         <details class="setting-group setting-group-collapsible" data-group-key="web-search">
           <summary class="setting-group-summary">联网搜索 <span class="setting-scope">全局配置·按会话开关</span></summary>
           <div class="setting-group-body">
-          <span class="setting-hint">把 DeepSeek 官方的「网页搜索 / 网页抓取」接口（<code>/v1/tools/search</code>、<code>/v1/tools/fetch</code>）包装成<b>两个工具</b>交给模型：<code>web_search</code> 与 <code>fetch_url</code>。<b>要不要联网、搜什么词、搜几次、要不要再抓某页全文，全由模型自己决定</b> —— 不需要联网的问题它会直接回答，不会白发一次检索。<br>按成功请求计费：5 元 / 千次（Search、Fetch 各算各的，失败与空结果不计费）。这里是全局配置；<strong>开关在「本次对话 → 联网搜索」</strong>（按会话生效）。</span>
+          <span class="setting-hint">把 DeepSeek 官方的「网页搜索 / 网页抓取」接口（<code>/v1/tools/search</code>、<code>/v1/tools/fetch</code>）包装成<b>两个工具</b>交给模型：<code>web_search</code> 与 <code>fetch_url</code>。<b>要不要联网、搜什么词、搜几条、要不要连正文、要不要再抓某页全文，全由模型自己决定</b> —— 不需要联网的问题它会直接回答，不会白发一次检索。<br>按成功请求计费：5 元 / 千次（Search、Fetch 各算各的，失败与空结果不计费）。这里是全局配置；<strong>开关在「本次对话 → 联网搜索」</strong>（按会话生效）。</span>
           <label class="setting-row">
             <span>密钥来源</span>
             <select id="ws-mode-select" class="setting-select">
@@ -892,18 +892,7 @@
             <span class="setting-hint">必须是 DeepSeek 兼容的 <code>/v1/tools/search</code> 与 <code>/v1/tools/fetch</code>。</span>
           </div>
           <span class="setting-hint" id="ws-target-hint"></span>
-          <label class="setting-row">
-            <span>默认条数</span>
-            <input id="ws-count" class="setting-input setting-num" type="number" min="1" max="10" step="1" value="6" title="1~10，默认 6。这是模型没在参数里指定条数时用的值；条数不影响单次计费。">
-          </label>
-          <label class="setting-row">
-            <span>搜索返回</span>
-            <select id="ws-content-mode" class="setting-select">
-              <option value="summary">摘要（省时省钱）</option>
-              <option value="content">正文（Search 一次带回）</option>
-            </select>
-          </label>
-          <span class="setting-hint">摘要：每条 600~800 字的长摘要，多数问答够用。正文：Search 直接返回网页正文，上下文更大。需要看某一页全文时，模型会自己再调 <code>fetch_url</code> 抓取 —— 抓哪几页由它决定，不再由客户端写死。</span>
+          <span class="setting-hint">没有「条数 / 要不要正文」这类旋钮了 —— 它们是 <code>web_search</code> 自己的参数（<code>count</code>、<code>need_content</code>），由模型按问题决定。全局设一个默认值，等于又留了个"替它决定"的后门。</span>
           <label class="setting-row">
             <span>显示来源</span>
             <label class="toggle-switch">
@@ -962,11 +951,11 @@
 <script src="vendor/katex/katex.min.js?v=116"></script>
 <!-- LaTeX 渲染层：须在 katex.min.js 之后、chat.js 之前加载 -->
 <script src="latex.js?v=119"></script>
-<script src="db.js?v=133"></script>
+<script src="db.js?v=134"></script>
 <script src="haptics.js?v=116"></script>
 <script src="providers.js?v=102"></script>
 <!-- v3.0.5: 联网搜索（DeepSeek Search / Fetch）。必须在 providers.js 之后（用 normalizeBaseUrl/getProvider）、chat.js 之前 -->
-<script src="web-search.js?v=5"></script>
+<script src="web-search.js?v=6"></script>
 <!-- v3.0.8: 带工具的对话回合引擎（模型→工具→模型）。依赖 web-search.js 的工具定义，须在 chat.js 之前 -->
 <script src="agent-loop.js?v=1"></script>
 <!-- v3.0.7: 会话标题自动命名。必须在 providers.js 之后（用 getProvider/buildUpstreamPayload）、chat.js 之前（sendFromMessage 调它） -->

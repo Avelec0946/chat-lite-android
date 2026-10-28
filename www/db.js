@@ -179,17 +179,16 @@ function defaultWebSearchSettings() {
     providerId: '',             // inherit 时指定用哪个接口，空 = 自动挑（优先 api.deepseek.com）
     baseUrl: 'https://api.deepseek.com',
     apiKey: '',
-    // v3.0.8：搜索变成模型可调用的工具后，条数上限跟工具定义对齐（1~10）。
-    //   fetchTop 已删除 —— 「该抓哪几条」不再由客户端写死，改由模型自己调 fetch_url 决定。
-    count: 6,                   // 搜索工具的默认条数 1~10（模型没在参数里指定时用它）
-    contentMode: 'summary',     // summary=只要摘要 / content=Search 直接带回正文
+    // v3.0.9：count / contentMode 也删了 —— 它们是「客户端替模型决定检索深度」的最后两个残渣。
+    //   条数、要不要正文现在都是 web_search 的工具参数，由模型按问题自己给；
+    //   设置里留着全局默认值，等于又开了一个"替它决定"的后门。
     showSources: true,          // 回复下面显示来源卡片
     defaultOn: false            // 新会话是否默认开启
   };
 }
 
 // 逐字段补默认（只增不改）。和 migrateVoiceSettings 同一套规则：
-//   不能用默认值整体覆盖 —— 用户只改过 count 时，其它字段必须保住原值。
+//   不能用默认值整体覆盖 —— 用户只改过 providerId 时，其它字段必须保住原值。
 function migrateWebSearchSettings(w) {
   var def = defaultWebSearchSettings();
   if (!w || typeof w !== 'object') return def;
@@ -199,14 +198,9 @@ function migrateWebSearchSettings(w) {
     out[k] = Object.prototype.hasOwnProperty.call(w, k) && w[k] !== undefined && w[k] !== null ? w[k] : def[k];
   }
   out.mode = out.mode === 'custom' ? 'custom' : 'inherit';
-  // 老库里的 'fetch'（v3.0.5 的「正文+抓取」档）已不存在：它等于"客户端替模型决定抓哪几页"。
-  //   迁移成 'content'（保留"想要正文"的原意），剩下的交给模型自己 fetch_url。
-  if (out.contentMode === 'fetch') out.contentMode = 'content';
-  out.contentMode = (out.contentMode === 'content') ? 'content' : 'summary';
   ['providerId', 'baseUrl', 'apiKey'].forEach(function(k) {
     if (typeof out[k] !== 'string') out[k] = def[k];
   });
-  out.count = clampNum(out.count, 1, 10, def.count);
   out.showSources = out.showSources !== false;
   out.defaultOn = out.defaultOn === true;
   return out;

@@ -62,11 +62,6 @@ function wsCfg() {
     providerId: w.providerId || '',
     baseUrl: w.baseUrl || 'https://api.deepseek.com',
     apiKey: w.apiKey || '',
-    count: wsClampInt(w.count, 1, 50, 6),
-    // 工具模式下只剩两档：给摘要（模型自己决定要不要再 fetch_url 抓正文）/ 直接给正文。
-    //   v3.0.5 的第三档「正文+抓取」是把「该抓哪几条」写死在客户端 —— 那正是"替模型做决定"，
-    //   现在这件事交给模型自己调 fetch_url。
-    contentMode: (w.contentMode === 'content') ? 'content' : 'summary',
     showSources: w.showSources !== false,
     defaultOn: w.defaultOn === true
   };
@@ -305,6 +300,10 @@ var WEB_TOOL_DEFS = [
             description: '返回条数 1~10，默认 6。条数不影响计费，只影响本次能看到多少候选。',
             minimum: 1,
             maximum: 10
+          },
+          need_content: {
+            type: 'boolean',
+            description: '是否连网页正文一起返回，默认 false（只给 600~800 字摘要）。需要具体细节（名单/数据/原文表述）时设 true —— 能省掉一次 fetch_url 调用，但上下文会明显变大。'
           }
         },
         required: ['query']
@@ -371,9 +370,11 @@ async function runWebTool(name, args, ctx) {
   if (name === 'web_search') {
     var q = String(args.query || '').trim().slice(0, 128);
     if (!q) return { text: '搜索失败：query 不能为空。', meta: { ok: false } };
-    var cfg = wsCfg();
-    var count = wsClampInt(args.count, 1, 10, cfg.count);
-    var needContent = cfg.contentMode === 'content';
+    // 条数与要不要正文**全部来自模型给的参数**，没有全局默认值可配 ——
+    //   这两个旋钮原本挂在设置里，是"客户端替模型决定检索深度"的残留（v3.0.8 之前更彻底：
+    //   连搜索词都是替它决定的）。现在只在模型没填时兜一个最小值：count=6、正文=false。
+    var count = wsClampInt(args.count, 1, 10, 6);
+    var needContent = args.need_content === true;
     try {
       var data = await wsSearch(q, { count: count, needContent: needContent });
       if (ctx.collectSources && data.results.length) ctx.collectSources(data.results);
@@ -464,8 +465,6 @@ function renderWebSearchSettings() {
   modeSel.value = c.mode;
   wsEl('ws-base-url').value = c.baseUrl || '';
   wsEl('ws-api-key').value = c.apiKey || '';
-  wsEl('ws-count').value = String(c.count);
-  wsEl('ws-content-mode').value = c.contentMode;
   wsEl('ws-show-sources').checked = c.showSources;
   wsEl('ws-default-on').checked = c.defaultOn;
 
@@ -482,8 +481,6 @@ function renderWebSearchSettings() {
   if (!modeSel.dataset.wsBound) {
     modeSel.dataset.wsBound = '1';
     modeSel.addEventListener('change', function() { wsApplyModeRows(); });
-    var cm = wsEl('ws-content-mode');
-    if (cm) cm.addEventListener('change', function() { wsApplyModeRows(); });
     var tbtn = wsEl('btn-test-web-search');
     if (tbtn) tbtn.addEventListener('click', function() { testWebSearchConnection(); });
   }
@@ -527,9 +524,6 @@ function saveWebSearchSettingsFromForm() {
   w.providerId = psel ? (psel.value || '') : '';
   w.baseUrl = (wsEl('ws-base-url').value || '').trim() || 'https://api.deepseek.com';
   w.apiKey = (wsEl('ws-api-key').value || '').trim();
-  w.count = wsClampInt(wsEl('ws-count').value, 1, 50, 6);
-  var cm = wsEl('ws-content-mode').value;
-  w.contentMode = (cm === 'content') ? 'content' : 'summary';
   w.showSources = wsEl('ws-show-sources').checked !== false;
   w.defaultOn = wsEl('ws-default-on').checked === true;
   // 会话级开关顺带落盘（面板里那个 checkbox 现在是**唯一**的开关入口）
