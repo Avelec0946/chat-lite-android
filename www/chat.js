@@ -147,10 +147,24 @@ function renderContent(msg) {
   }
 
   // File attachments
+  // v3.0.6: 图片附件在小标签里带一个 48px 缩略图（原来只有「文件名 (大小)」一行字，
+  //   发图时看不出自己发的是哪张）。复用输入区那套 .file-tag-image / .file-thumb，
+  //   尺寸与生图「参考图」那一排一致 —— 文本对话里只要认得出是哪张图就够了，
+  //   不把整张图铺进气泡（那会把一条消息撑到半屏）。
+  //   取图直接切 f.base64（主图，最长边 1024），48px 的方块够用；
+  //   mimeType 优先用记录里的，缺了就按 JPEG —— 压缩管线输出的就是 JPEG。
   if (msg.files && msg.files.length > 0) {
-    html += msg.files.map(f =>
-      `<div class="file-tag" style="margin-bottom:4px">${escapeHtml(f.name)} (${formatSize(f.size)})</div>`
-    ).join('');
+    html += msg.files.map(f => {
+      if (f && f.isImage) {
+        const src = 'data:' + (f.mimeType || 'image/jpeg') + ';base64,' + (f.base64 || f.content || '');
+        // 名字与大小分成两个 span：样式里让大小不折行，否则 "(471.7KB)" 会被拆成两行
+        return `<div class="file-tag file-tag-image" style="margin-bottom:4px">` +
+          `<img class="file-thumb" src="${src}" alt="" />` +
+          `<span class="file-tag-name">${escapeHtml(f.name)}</span>` +
+          `<span class="file-tag-size">(${formatSize(f.size)})</span></div>`;
+      }
+      return `<div class="file-tag" style="margin-bottom:4px">${escapeHtml(f.name)} (${formatSize(f.size)})</div>`;
+    }).join('');
   }
 
   if (msg.isFileOnly) return html;
