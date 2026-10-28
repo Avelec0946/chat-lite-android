@@ -1204,6 +1204,13 @@ async function sendFromMessage(context) {
   const conv = currentConv();
   if (!conv) return;
 
+  // v3.0.7: 会话标题自动命名。
+  //   放在这里而不是 newChat()：新建时还没有任何消息，没东西可概括。
+  //   放在这里而不是 sendMessage()：编辑重发 / 重试 / 以后接的语音都从这条路径进来，
+  //   放一处就全覆盖（auto-title.js 内部自己判定"是不是首轮"，不是首轮直接返回）。
+  //   同步调用、内部 fire-and-forget —— 标题请求再慢也不许拖住本轮聊天。
+  if (typeof maybeAutoTitle === 'function') maybeAutoTitle(conv);
+
   state.loading = true;
   // Create AbortController for this request
   state.abortController = new AbortController();

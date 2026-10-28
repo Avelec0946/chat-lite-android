@@ -144,8 +144,27 @@ function defaultSettings() {
     // v125: 语音通话（详见 voice-模块-架构契约.md §3.1）
     voice: defaultVoiceSettings(),
     // v3.0.5: 联网搜索（DeepSeek Search / Fetch）
-    webSearch: defaultWebSearchSettings()
+    webSearch: defaultWebSearchSettings(),
+    // v3.0.7: 会话标题自动命名
+    autoTitle: defaultAutoTitleSettings()
   };
+}
+
+// v3.0.7: 会话标题自动命名（全局，不分会话）。
+//   为什么默认开（用户明确要求）：改之前 newChat() 写死「对话 N」，
+//   侧栏几十个会话只能靠点开认；而侧栏搜索又是按 title 过滤的，标题没内容等于搜索不可用。
+//   为什么只有 enabled 一个字段：模型生成是主路径、截断是兜底，
+//   用户不需要理解「两段式」—— 他要的是「别叫对话 3」，关掉就是「我不要这个功能」。
+function defaultAutoTitleSettings() {
+  return {
+    enabled: true
+  };
+}
+
+function migrateAutoTitleSettings(t) {
+  var def = defaultAutoTitleSettings();
+  if (!t || typeof t !== 'object') return def;
+  return { enabled: t.enabled !== false };
 }
 
 // v3.0.5: 联网搜索设置的默认值。
@@ -333,6 +352,8 @@ function migrateSettings(s) {
   s.voice = migrateVoiceSettings(s.voice);
   // v3.0.5: 联网搜索（只增不改；老库没有这个字段时补默认）
   s.webSearch = migrateWebSearchSettings(s.webSearch);
+  // v3.0.7: 自动命名会话（默认开；老库没有这个字段时补默认值，用户关过则尊重）
+  s.autoTitle = migrateAutoTitleSettings(s.autoTitle);
   return s;
 }
 

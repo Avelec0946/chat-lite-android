@@ -667,6 +667,15 @@ async function init() {
   // 来源卡片里的链接：APK 交给系统浏览器（不拦截），Web 新开标签页
   messagesEl.addEventListener('click', function(e) { wsOnSourceLinkClick(e); });
 
+  // ===== v3.0.7: 自动命名会话（全局开关，设置 → 常用偏好）=====
+  //   只改 settings，立即落盘；已经在跑的会话不受影响（标题只在首轮生成一次）。
+  var atChk = document.getElementById('autotitle-toggle');
+  if (atChk) atChk.addEventListener('change', function() {
+    if (!settings.autoTitle || typeof settings.autoTitle !== 'object') settings.autoTitle = { enabled: true };
+    settings.autoTitle.enabled = atChk.checked === true;
+    saveSettings();
+  });
+
   sidebarToggle.addEventListener('click', () => sidebar.classList.toggle('hidden'));
   $('theme-checkbox').addEventListener('change', e => {
     document.body.classList.toggle('dark', e.target.checked);
@@ -1459,6 +1468,9 @@ function fillSettingsForm() {
   if (cwInput) cwInput.value = String(Math.round(resolveChatWaitMs() / 1000));
   var hfCheck = document.getElementById('haptic-feedback-check');
   if (hfCheck) hfCheck.checked = settings.hapticFeedback !== false;
+  // v3.0.7: 自动命名会话（全局开关，默认开）
+  var atCheck = document.getElementById('autotitle-toggle');
+  if (atCheck) atCheck.checked = !(settings.autoTitle && settings.autoTitle.enabled === false);
   var ihCheck = document.getElementById('image-haptic-check');
   if (ihCheck) ihCheck.checked = settings.imageHaptic !== false;
   var ulCheck = document.getElementById('render-user-latex-check');

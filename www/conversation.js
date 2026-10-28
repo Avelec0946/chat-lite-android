@@ -266,6 +266,9 @@ function renderSidebar() {
       input.value = oldTitle;
       input.addEventListener('blur', () => {
         conv.title = input.value.trim() || oldTitle;
+        // v3.0.7: 用户亲手起过的名字，自动命名永不再覆盖（哪怕他原样点开又点走）。
+        //   与 voice.enabledSetByUser 同一个思路：区分"默认值"和"用户表过态"。
+        conv.titleSetByUser = true;
         conv.updatedAt = Date.now();
         save();
         renderSidebar();

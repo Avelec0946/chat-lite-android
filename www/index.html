@@ -427,6 +427,15 @@
             <input type="number" id="chat-wait-input" class="setting-select setting-num" min="15" max="3600" step="15" placeholder="默认 300" title="两次数据到达之间的最长等待，每收到一块数据即重新计时。默认 300 秒，范围 15~3600。改动即时生效。">
           </label>
           <span class="setting-hint">两次数据到达之间的最长等待，收到数据即重新计时；超时不会丢弃已收到的内容。长思考模型建议调大。</span>
+          <!-- v3.0.7: 会话标题自动命名（全局）。默认开 —— 改之前新建会话永远叫「对话 3」。 -->
+          <label class="setting-row">
+            <span>自动命名会话</span>
+            <label class="toggle-switch">
+              <input type="checkbox" id="autotitle-toggle" checked>
+              <span class="toggle-slider"></span>
+            </label>
+          </label>
+          <span class="setting-hint">新会话的第一个问题发出后，用消息开头几个字先把标题换掉，再问模型要一个更贴切的短标题（只发一次很小的请求）。关闭后新会话仍叫「对话 N」，可长按标题手动改名。</span>
           <label class="setting-row capacitor-only">
             <span>流式振感反馈</span>
             <label class="toggle-switch">
@@ -958,17 +967,19 @@
 <script src="vendor/katex/katex.min.js?v=116"></script>
 <!-- LaTeX 渲染层：须在 katex.min.js 之后、chat.js 之前加载 -->
 <script src="latex.js?v=119"></script>
-<script src="db.js?v=131"></script>
+<script src="db.js?v=132"></script>
 <script src="haptics.js?v=116"></script>
 <script src="providers.js?v=102"></script>
 <!-- v3.0.5: 联网搜索（DeepSeek Search / Fetch）。必须在 providers.js 之后（用 normalizeBaseUrl/getProvider）、chat.js 之前 -->
 <script src="web-search.js?v=3"></script>
+<!-- v3.0.7: 会话标题自动命名。必须在 providers.js 之后（用 getProvider/buildUpstreamPayload）、chat.js 之前（sendFromMessage 调它） -->
+<script src="auto-title.js?v=1"></script>
 <script src="image-gen.js?v=126"></script>
-<script src="conversation.js?v=114"></script>
-<script src="chat.js?v=135"></script>
+<script src="conversation.js?v=115"></script>
+<script src="chat.js?v=136"></script>
 <script src="io.js?v=128"></script>
 <script src="gesture-helpers.js?v=102"></script>
-<script src="app.js?v=130"></script>
+<script src="app.js?v=131"></script>
 <!-- v125: 语音通话 —— voice-director 是纯函数层（无 DOM/无网络），voice.js 是运行时 -->
 <!-- v127: voice-provider 管独立的语音接口（地址+密钥+模型），与「接口管理」的聊天渠道无关 -->
 <script src="voice-director.js?v=129"></script>
