@@ -529,6 +529,42 @@ function updateMessageContent(msgId, content, reasoning) {
   scrollToBottom();
 }
 
+// ===== v3.0.11: 流式增量入口（唯一）=====
+// 为什么要有这个东西：
+//   模型吐字这个事件，代码里有**四条**到达路径：
+//     ① APK 真流式      executeStreamHttp → consumeChunk
+//     ② Web 流式        sendFromMessage 里的 fetch 循环
+//     ③ Web 续写        sendFromMessageContinue 里的 fetch 循环
+//     ④ 带工具的 agent  runAgentChat → agent-loop.js 的 onDelta（联网搜索开着时走它）
+//   以前每条路径各自实现「累加 + 振感 + 节流重绘」，四份手抄。v3.0.8 加第 ④ 条时漏了振感，
+//   于是出现「联网一开流式震动就没了」—— 看着像振感模块和联网模块互相影响，实际是同一件事写了四遍，
+//   而新增的那一遍少抄了一行。副作用一旦绑在**传输路径**上，每加一条路径就会漏一次。
+//   所以：路径只负责解析字节，把增量交到这里；振感/重绘/滚动只在这一个地方发生。
+//   以后再加流式入口（语音接入、新供应商的非标 SSE）也必须调 applyStreamDelta，不许自己写累加。
+var STREAM_RENDER_INTERVAL = 100;   // markdown 重绘节流（100ms ≈ 10fps）
+var _streamRenderAt = 0;            // 同一时刻只有一条流（state.loading 互斥），单变量足够
+
+// kind: 'content' | 'reasoning'
+function applyStreamDelta(msg, kind, text) {
+  if (!msg || !text) return;
+  // 登记「当前正在流式的消息」：手指按屏期间暂停重绘，松手时 app.js 靠它补最后一次渲染。
+  // 以前只有 APK 真流式登记，联网（agent 路径）没有 —— 滚动一下界面就不跟了。
+  state._streamingMsg = msg;
+  if (kind === 'reasoning') {
+    msg.reasoningContent = (msg.reasoningContent || '') + text;
+  } else {
+    msg.content = (msg.content || '') + text;
+    // 只对正文触发振感：思考链是模型的内部过程，震了反而会把「它开始说话了」这个信号冲淡。
+    triggerHapticFeedback(text);
+  }
+  // 手指按着屏幕滚动时暂停重绘 —— innerHTML 重建会阻塞 touchmove
+  if (state._isTouching) return;
+  var now = Date.now();
+  if (now - _streamRenderAt < STREAM_RENDER_INTERVAL) return;
+  _streamRenderAt = now;
+  updateMessageContent(msg.id, msg.content, msg.reasoningContent || '');   // 内部自带 scrollToBottom
+}
+
 async function continueGeneration(msgId) {
   const conv = currentConv();
   if (!conv || state.loading) return;
@@ -784,8 +820,7 @@ async function executeStreamHttp(req, assistantMsg, opts) {
   let streamId = null;
   let resolved = false;
   let chunkBuffer = '';
-  let lastRenderTime = 0;
-  const RENDER_INTERVAL = 100;  // markdown 渲染节流（100ms，约 10fps）
+  // 渲染节流与振感统一由 applyStreamDelta 负责（v3.0.11），这里不再持有 lastRenderTime
 
   // v122: 完成度追踪 —— 只有「确认正常收尾」才算完成，否则保留内容并标记疑似截断
   let sawDone = false;      // 收到 [DONE]
@@ -877,26 +912,10 @@ async function executeStreamHttp(req, assistantMsg, opts) {
           const delta = choice.delta;
           if (!delta) continue;
 
-          // 思考链增量
+          // 思考链增量 / 内容增量 —— 一律交给 applyStreamDelta（累加 + 振感 + 节流重绘）
           const reasoningText = delta.reasoning_content || delta.thinking || delta.chain_of_thought || '';
-          if (reasoningText) {
-            assistantMsg.reasoningContent = (assistantMsg.reasoningContent || '') + reasoningText;
-          }
-
-          // 内容增量
-          if (delta.content) {
-            assistantMsg.content = (assistantMsg.content || '') + delta.content;
-            // C3: 流式振感反馈（默认关，节流 100ms）
-            triggerHapticFeedback(delta.content);
-          }
-
-          // 渲染节流：触摸滚动时暂停 DOM 更新（避免 innerHTML 重建阻塞 touchmove）
-          const now = Date.now();
-          if (!state._isTouching && now - lastRenderTime > RENDER_INTERVAL) {
-            updateMessageContent(assistantMsg.id, assistantMsg.content, assistantMsg.reasoningContent || '');
-            lastRenderTime = now;
-          }
-          if (!state._isTouching) scrollToBottom();
+          if (reasoningText) applyStreamDelta(assistantMsg, 'reasoning', reasoningText);
+          if (delta.content) applyStreamDelta(assistantMsg, 'content', delta.content);
         } catch(e) {}
       }
     }
@@ -932,8 +951,9 @@ async function executeStreamHttp(req, assistantMsg, opts) {
         if (sseEventCount === 0) {
           const salvaged = salvageNonStreamBody(rawText);
           if (salvaged) {
-            if (salvaged.reasoning) assistantMsg.reasoningContent = (assistantMsg.reasoningContent || '') + salvaged.reasoning;
-            if (salvaged.content) assistantMsg.content = (assistantMsg.content || '') + salvaged.content;
+            // 整段到达也走同一个入口：它是「模型产出了一段文本」，不是另一种东西
+            if (salvaged.reasoning) applyStreamDelta(assistantMsg, 'reasoning', salvaged.reasoning);
+            if (salvaged.content) applyStreamDelta(assistantMsg, 'content', salvaged.content);
             done('', '');
           } else if (gotData) {
             done('truncated', '未收到标准流式数据，可点「继续生成」重试');
@@ -1286,7 +1306,6 @@ function agentIsToolsUnsupported(err) {
 async function runAgentChat(provider, conv, context, assistantMsg) {
   var sources = [];
   var trace = [];
-  var lastRender = 0;
   assistantMsg.toolTrace = trace;
 
   function renderTrace() {
@@ -1320,13 +1339,9 @@ async function runAgentChat(provider, conv, context, assistantMsg) {
         });
       },
       onDelta: function(kind, text) {
-        if (kind === 'content') assistantMsg.content = (assistantMsg.content || '') + text;
-        else assistantMsg.reasoningContent = (assistantMsg.reasoningContent || '') + text;
-        var now = Date.now();
-        if (!state._isTouching && now - lastRender > 100) {
-          lastRender = now;
-          updateMessageContent(assistantMsg.id, assistantMsg.content, assistantMsg.reasoningContent || '');
-        }
+        // 走与其它三条流式路径同一个入口：累加 / 振感 / 节流重绘都收敛在 applyStreamDelta 里。
+        // v3.0.11 之前这里是手抄的「累加 + 重绘」，漏了振感 —— 联网一开就没有流式震动。
+        applyStreamDelta(assistantMsg, kind === 'content' ? 'content' : 'reasoning', text);
       },
       onToolStart: function(call) {
         trace.push({ name: call.name, args: call.parsedArgs || {}, status: 'running' });
@@ -1500,8 +1515,8 @@ async function sendFromMessage(context) {
     const reader = resp.body.getReader();
     const decoder = new TextDecoder();
     let buffer = '';
-    let fullContent = '';
-    let fullReasoning = '';
+    // 唯一真源是 assistantMsg 本身：增量的累加、重绘、振感都在 applyStreamDelta 里做，
+    // 这里不再另存一份 fullContent（两份副本迟早会分叉）。
 
     // v122: web 流式路径此前完全没有超时 —— 请求卡住就永远等下去。
     // 这里补上与 APK 侧同源的空闲超时 + 完成度判定（用 var，catch 里也要读）
@@ -1539,17 +1554,8 @@ async function sendFromMessage(context) {
           const delta = ch0 && ch0.delta;
           if (delta) {
             var reasoningText = delta.reasoning_content || delta.thinking || delta.chain_of_thought || '';
-            if (reasoningText) {
-              fullReasoning += reasoningText;
-              assistantMsg.reasoningContent = fullReasoning;
-            }
-            if (delta.content) {
-              fullContent += delta.content;
-              assistantMsg.content = fullContent;
-              triggerHapticFeedback(delta.content); // C3: web 流式路径也触发振感（保险）
-            }
-            // Update display: pass both reasoning and content
-            updateMessageContent(assistantMsg.id, fullContent, fullReasoning);
+            if (reasoningText) applyStreamDelta(assistantMsg, 'reasoning', reasoningText);
+            if (delta.content) applyStreamDelta(assistantMsg, 'content', delta.content);
           }
         } catch(e) {
           // Skip malformed lines
@@ -1562,14 +1568,13 @@ async function sendFromMessage(context) {
     if (webFinishReason === 'length') {
       assistantMsg.interrupted = true;
       assistantMsg.errorMsg = '已达模型单次输出上限，内容可能不完整，可点「继续生成」续写';
+      assistantMsg.versions[0] = { content: assistantMsg.content || '', timestamp: Date.now(), reason: 'original' };
       save();
       renderMessages();
-    } else if (!webSawDone && !webFinishReason && (fullContent || fullReasoning)) {
+    } else if (!webSawDone && !webFinishReason && (assistantMsg.content || assistantMsg.reasoningContent)) {
       assistantMsg.interrupted = true;
       assistantMsg.errorMsg = '连接被提前中断，回复可能不完整，可点「继续生成」续写';
-      assistantMsg.content = fullContent;
-      assistantMsg.reasoningContent = fullReasoning;
-      assistantMsg.versions[0] = { content: fullContent, timestamp: Date.now(), reason: 'original' };
+      assistantMsg.versions[0] = { content: assistantMsg.content || '', timestamp: Date.now(), reason: 'original' };
       save();
       renderMessages();
       setStatus('err');
@@ -1577,7 +1582,7 @@ async function sendFromMessage(context) {
     }
 
     // Update versions
-    assistantMsg.versions[0] = { content: fullContent, timestamp: Date.now(), reason: 'original' };
+    assistantMsg.versions[0] = { content: assistantMsg.content || '', timestamp: Date.now(), reason: 'original' };
     save();
     setStatus('ok');
     // v67: 后台完成时缓存通知，切回前台显示
@@ -1600,6 +1605,8 @@ async function sendFromMessage(context) {
   } finally {
     state.loading = false;
     state.abortController = null;
+    // 流式收尾的统一清理点：任何路径（含联网的 agent 路径）都在这里摘掉「正在流式」标记
+    state._streamingMsg = null;
     updateSendButton();
     toggleSendStop();
     // v3.0.10: 回复完成 → 才问模型要会话标题。
@@ -1683,8 +1690,8 @@ async function sendFromMessageContinue(context, assistantMsg) {
     const reader = resp.body.getReader();
     const decoder = new TextDecoder();
     let buffer = '';
-    let fullContent = existingContent;
-    let fullReasoning = existingReasoning;
+    // 续写的「已有内容」就在 assistantMsg 里（existingContent 就是它的快照），
+    // 增量统一由 applyStreamDelta 追加，不再维护 fullContent 副本。
 
     // v122: 与 sendFromMessage 同源的空闲超时 + 完成度判定
     var webWaitMs = resolveChatWaitMs();
@@ -1721,16 +1728,8 @@ async function sendFromMessageContinue(context, assistantMsg) {
           const delta = ch0 && ch0.delta;
           if (delta) {
             var reasoningText2 = delta.reasoning_content || delta.thinking || delta.chain_of_thought || '';
-            if (reasoningText2) {
-              fullReasoning += reasoningText2;
-              assistantMsg.reasoningContent = fullReasoning;
-            }
-            if (delta.content) {
-              fullContent += delta.content;
-              assistantMsg.content = fullContent;
-              triggerHapticFeedback(delta.content); // C3: web 流式路径也触发振感（保险）
-            }
-            updateMessageContent(assistantMsg.id, fullContent, fullReasoning);
+            if (reasoningText2) applyStreamDelta(assistantMsg, 'reasoning', reasoningText2);
+            if (delta.content) applyStreamDelta(assistantMsg, 'content', delta.content);
           }
         } catch(e) {}
       }
@@ -1741,22 +1740,20 @@ async function sendFromMessageContinue(context, assistantMsg) {
     if (webFinishReason === 'length') {
       assistantMsg.interrupted = true;
       assistantMsg.errorMsg = '已达模型单次输出上限，内容可能不完整，可点「继续生成」续写';
-      assistantMsg.content = fullContent;
       save();
       renderMessages();
-    } else if (!webSawDone && !webFinishReason && (fullContent !== existingContent || fullReasoning !== existingReasoning)) {
+    } else if (!webSawDone && !webFinishReason &&
+               ((assistantMsg.content || '') !== existingContent || (assistantMsg.reasoningContent || '') !== existingReasoning)) {
       assistantMsg.interrupted = true;
       assistantMsg.errorMsg = '连接被提前中断，回复可能不完整，可点「继续生成」续写';
-      assistantMsg.content = fullContent;
-      assistantMsg.reasoningContent = fullReasoning;
-      assistantMsg.versions[0] = { content: fullContent, timestamp: Date.now(), reason: 'continued' };
+      assistantMsg.versions[0] = { content: assistantMsg.content || '', timestamp: Date.now(), reason: 'continued' };
       save();
       renderMessages();
       setStatus('err');
       return;
     }
 
-    assistantMsg.versions[0] = { content: fullContent, timestamp: Date.now(), reason: 'continued' };
+    assistantMsg.versions[0] = { content: assistantMsg.content || '', timestamp: Date.now(), reason: 'continued' };
     save();
     setStatus('ok');
     // v67: 后台完成时缓存通知，切回前台显示
@@ -1772,6 +1769,8 @@ async function sendFromMessageContinue(context, assistantMsg) {
   } finally {
     state.loading = false;
     state.abortController = null;
+    // 流式收尾的统一清理点：任何路径（含联网的 agent 路径）都在这里摘掉「正在流式」标记
+    state._streamingMsg = null;
     updateSendButton();
     toggleSendStop();
     renderMessages();
