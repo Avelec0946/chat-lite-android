@@ -369,11 +369,18 @@ console.log('\n[tool_calls 归并]');
     ok('文本协议把工具说明并进第一条 system（不新开 system）',
       requests[1].messages[0].role === 'system' && /工具调用协议/.test(requests[1].messages[0].content) &&
       requests[1].messages.filter(function(m) { return m.role === 'system'; }).length === 1);
-    ok('两条通道都带上「当前日期」（模型不知道今天是哪天就会编搜索词）',
-      /当前日期：\d{4}-\d{2}-\d{2}/.test(requests[0].messages[0].content) &&
-      /当前日期：\d{4}-\d{2}-\d{2}/.test(requests[1].messages[0].content));
-    ok('日期只到天、不带时分（带上时分等于每分钟换一次 system，前缀缓存全废）',
-      !/当前日期：\d{4}-\d{2}-\d{2}\s*\d{2}:/.test(requests[1].messages[0].content));
+    // 日期只挂在 web_search 的工具说明上；**原生通道的 system 一个字符都不变**（DeepSeek 不受影响）
+    ok('原生通道的 system 提示词没被注入任何东西',
+      requests[0].messages[0].role === 'system' && requests[0].messages[0].content === '你是助手',
+      JSON.stringify(requests[0].messages[0].content));
+    ok('日期挂在 web_search 的 description 上（原生）',
+      /当前日期：?\s*\d{4}-\d{2}-\d{2}/.test(requests[0].tools[0].function.description || ''));
+    ok('文本协议的说明块里也带日期', /当前日期：?\s*\d{4}-\d{2}-\d{2}/.test(requests[1].messages[0].content));
+    ok('日期只到天、不带时分（带时分等于每分钟换一次 system，前缀缓存全废）',
+      !/当前日期：?\s*\d{4}-\d{2}-\d{2}\s*\d{2}:/.test(requests[1].messages[0].content) &&
+      !/\d{4}-\d{2}-\d{2}\s*\d{2}:/.test(requests[0].tools[0].function.description || ''));
+    ok('除 web_search 外的工具定义原样不动',
+      requests[0].tools.length === 1);
     ok('工具真的被执行了', execCalls.length === 1 && execCalls[0].args.query === '今天科技新闻', JSON.stringify(execCalls));
     ok('工具结果用 role:user 回填（兼容不认 tool 角色的网关）',
       requests[2].messages.some(function(m) { return m.role === 'user' && /示例结果/.test(m.content); }));
@@ -386,12 +393,39 @@ console.log('\n[tool_calls 归并]');
     ok('能力被记为 no（下次直接走文本协议）', vm.runInContext('toolCapState', sandbox)(pv, 'alias') === 'no');
   });
 })
+// ---------- 原生超时（没有状态码）不许被记成「不支持 tools」 ----------
+// 这是实测踩过的假阳性：deepseek 原生一次「等待 300 秒没有新数据」被记成「不支持 tools」，
+// 于是这个模型从此被推去走文本协议。判据必须是「服务器带状态码拒了」，不是「失败了」。
+.then(function() {
+  console.log('\n[降级链 · 超时不算证据]');
+  requests = []; responses = [];
+  var pv = { id: 'pv1', models: [{ id: 'alias', upstreamId: 'real-model' }] };
+  sandbox.settings.toolCapability = {};
+  var dropped = [];
+  responses.push({ reject: new Error('等待 300 秒没有新数据') });
+  responses.push(makeResponse([delta({ content: '文本协议答的' }), finish('stop'), 'data: [DONE]\n\n']));
+  return vm.runInContext('agentRunAdaptive', sandbox)({
+    messages: [{ role: 'user', content: 'q' }],
+    tools: [{ type: 'function', function: { name: 'web_search' } }],
+    provider: pv, model: 'alias',
+    buildRequest: function(msgs, tools) { requests.push({ tools: tools }); return { url: 'u', headers: {}, payload: {} }; },
+    execTool: function() { return Promise.resolve({ text: '', meta: {} }); },
+    onToolsDropped: function(e, engine, unsupported) { dropped.push([engine, unsupported]); }
+  }).then(function(res) {
+    ok('超时后照样降级并答出来', res.content === '文本协议答的' && res.engine === 'text');
+    ok('但**不**记「原生工具不可用」', vm.runInContext('toolCapState', sandbox)(pv, 'alias') === 'unknown');
+    ok('结果里不标 nativeUnsupported', res.nativeUnsupported !== true);
+    ok('回调如实告诉 UI「不是不支持，只是没走通」', dropped.length === 1 && dropped[0][1] === false);
+  });
+})
 // ---------- 已知 no：直接走文本协议，不再白撞 503 ----------
 .then(function() {
   console.log('\n[降级链 · 已知原生不可用]');
   requests = []; responses = [];
   var pv = { id: 'pv1', models: [{ id: 'alias', upstreamId: 'real-model' }] };
   var dropped = [];
+  sandbox.settings.toolCapability = {};
+  vm.runInContext('toolCapLearn', sandbox)(pv, 'alias', false, 'HTTP 503', 503);
   responses.push(makeResponse([delta({ content: '照常回答' }), finish('stop'), 'data: [DONE]\n\n']));
   return vm.runInContext('agentRunAdaptive', sandbox)({
     messages: [{ role: 'user', content: 'q' }],

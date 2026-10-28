@@ -471,16 +471,24 @@ function agentCompactParams(fnDef) {
 }
 
 // 从 WEB_TOOL_DEFS 生成协议说明；没有 WEB_TOOL_DEFS 时返回空串（调用方据此跳过文本通道）。
+// 体量控制：工具描述本来就长（那是"什么时候该用/不该用"的判断依据，删了它会乱调工具），
+//   所以这里只额外加三样东西 —— 日期（挂在 web_search 上）、一句链式提示、一个调用样例。
+//   实测约 650 字符 ≈ 400~450 token，且放在 system 末尾（不抢开头权重）。
 function agentToolProtocolPrompt(round, maxRounds) {
   var defs = (typeof WEB_TOOL_DEFS !== 'undefined' && Array.isArray(WEB_TOOL_DEFS)) ? WEB_TOOL_DEFS : null;
   if (!defs || !defs.length) return '';
+  var dateHint = agentDateHint();
   var lines = [];
   lines.push('【工具调用协议】你可以联网。需要实时或不确定的信息时用下面的工具；常识、推理、写作、代码直接回答，不要调用。');
   for (var i = 0; i < defs.length; i++) {
     var f = defs[i] && (defs[i].function || defs[i]);
     if (!f || !f.name) continue;
-    lines.push('- ' + f.name + ' ' + agentCompactParams(f) + '：' + (f.description || ''));
+    var desc = f.description || '';
+    if (f.name === 'web_search') desc += dateHint;      // 日期挂在"决定怎么搜"的位置上
+    lines.push('- ' + f.name + ' ' + agentCompactParams(f) + '：' + desc);
   }
+  // 链式提示：模型天然倾向"搜一次就答"，不会主动去抓正文 —— 不写这句它就不抓（实测 gemini 就是）。
+  lines.push('如果搜索结果的摘要不够（缺具体数字、原文表述、名单），就再调 fetch_url 把那一页正文抓下来，不要拿摘要猜。');
   lines.push('');
   lines.push('调用方式：**只输出下面这一段，前后不要有任何其它文字**：');
   lines.push(TOOL_CALL_OPEN);
@@ -496,29 +504,44 @@ function agentToolProtocolPrompt(round, maxRounds) {
 //   「今日科技新闻 2024年5月22日」，拿回一堆两年前的旧闻还当成今天的。
 // 为什么只放日期：§4.24 的教训是「逐轮会变的东西绝不能进 system」—— 带上时分等于每分钟
 //   换一次前缀，缓存全废；日期一天变一次，代价可以接受。
-function agentEnvLine() {
+// ★ v3.0.14：日期不再单独占一行 system，而是**挂在 web_search 的工具说明上**。
+//   两个理由：① 原生通道的 system 提示词因此**一个字符都不变**（DeepSeek 完全不受影响）；
+//   ② 它出现在模型"决定怎么搜"的位置上，比在 system 开头更贴题，也不跟系统指令抢注意力。
+function agentTodayStr() {
   var d = new Date();
   function p2(n) { return n < 10 ? '0' + n : String(n); }
-  return '当前日期：' + d.getFullYear() + '-' + p2(d.getMonth() + 1) + '-' + p2(d.getDate()) +
-    '（设备本地时间）。搜索时不要自己编日期：需要「今天 / 最近」就直接写这些词，或用 after: 运算符。';
+  return d.getFullYear() + '-' + p2(d.getMonth() + 1) + '-' + p2(d.getDate());
 }
 
-// 把一行说明并进**第一条 system**（不新开 system 消息，理由同 agentWithProtocol）。
-function agentWithEnv(msgs, line) {
-  var out = (msgs || []).slice();
-  if (!line) return out;
-  if (out[0] && out[0].role === 'system') {
-    out[0] = Object.assign({}, out[0], { content: ((out[0].content || '') + '\n\n' + line).trim() });
-  } else {
-    out.unshift({ role: 'system', content: line });
-  }
-  return out;
+function agentDateHint() {
+  return '（当前日期 ' + agentTodayStr() + '。搜索词里不要自己编日期：需要「今天 / 最近」就直接写这些词，或用 after: 运算符。）';
+}
+
+// 原生通道：把日期拼进 web_search 的 description（工具定义本来就要发，等于零额外开销）。
+// 只改 web_search，别的一个字段都不动 —— 其它工具的行为保持原样。
+function agentToolsWithDate(tools) {
+  if (!tools || !tools.length) return tools;
+  var hint = agentDateHint();
+  return tools.map(function(t) {
+    var f = t && (t.function || t);
+    if (!f || f.name !== 'web_search') return t;
+    return { type: 'function', function: Object.assign({}, f, { description: (f.description || '') + hint }) };
+  });
 }
 
 // 把协议说明并进**第一条 system**（不新开一条 system 消息：不少网关只认开头那一条，
 // 多一条 system 会被静默丢掉甚至报错 —— 这个坑在语音侧已经踩过）。
+// 说明块放在 system 的**末尾**（不是开头）：模型对"最近读到的指令"更敏感，
+// 也避免它顶到用户原始系统提示词前面去抢注意力权重。
 function agentWithProtocol(msgs, proto) {
-  return agentWithEnv(msgs, proto);
+  var out = (msgs || []).slice();
+  if (!proto) return out;
+  if (out[0] && out[0].role === 'system') {
+    out[0] = Object.assign({}, out[0], { content: ((out[0].content || '') + '\n\n' + proto).trim() });
+  } else {
+    out.unshift({ role: 'system', content: proto });
+  }
+  return out;
 }
 
 // 流式拦截器：标记之前的文字照常往外送，标记之后一律扣住（那是给客户端看的，不是给用户看的）。
@@ -689,16 +712,13 @@ async function agentRunAdaptive(o) {
 
   var lastErr = null;
   var nativeTried = false;
-  // 三条通道共用同一份「环境信息」（日期）。放在 buildRequest 外面统一加，
-  //   避免原生/文本两条路各写一遍（§4.24：两处实现必然分叉）。
-  var envLine = agentEnvLine();
-  var rawBuild = o.buildRequest;
 
   for (var i = 0; i < chain.length; i++) {
     var eng = chain[i];
     var produced = false;
     var opts = Object.assign({}, o, {
-      buildRequest: function(msgs, tools) { return rawBuild(agentWithEnv(msgs, envLine), tools); },
+      // 原生通道：日期只挂在 web_search 的说明上（system 提示词一个字符都不动）
+      tools: eng === 'native' ? agentToolsWithDate(o.tools) : o.tools,
       onDelta: function(kind, text) { produced = true; if (o.onDelta) o.onDelta(kind, text); },
       // 工具一开跑就算「已经产生副作用」：再重来一次等于再搜一次、再计一次费
       onToolStart: function(call) { produced = true; if (o.onToolStart) o.onToolStart(call); }
@@ -717,12 +737,19 @@ async function agentRunAdaptive(o) {
     }
 
     res.engine = eng;
-    // 原生通道试过且失败、后面某条通道成功了 → 结论成立（有证据，不是猜）
+    // 原生通道试过且失败、后面某条通道成功了
     if (nativeTried && eng !== 'native') {
-      if (hasKey) toolCapLearn(o.provider, o.model, false, (lastErr && lastErr.message) || 'native tools failed', lastErr && lastErr.status);
-      res.nativeUnsupported = true;
+      var st = lastErr && lastErr.status;
+      // ★ 只有「服务器明确拒了这次请求」（带 HTTP 状态码）才算「通道不兼容」的证据。
+      //   超时 / 断网 / 空响应一律**不记** —— 实测踩过最典型的假阳性：deepseek 原生一次
+      //   「等待 300 秒没有新数据」，被记成了「不支持 tools」，于是这个模型从此被推去走文本协议。
+      //   判据是**结构化事实**（有没有状态码），不是猜错误文案。
+      if (hasKey && typeof st === 'number') {
+        toolCapLearn(o.provider, o.model, false, (lastErr && lastErr.message) || 'native tools rejected', st);
+        res.nativeUnsupported = true;
+      }
       res.nativeError = lastErr;
-      if (o.onToolsDropped) { try { o.onToolsDropped(lastErr, eng); } catch (e3) {} }
+      if (o.onToolsDropped) { try { o.onToolsDropped(lastErr, eng, res.nativeUnsupported === true); } catch (e3) {} }
     }
     return res;
   }

@@ -1377,11 +1377,14 @@ async function runAgentChat(provider, conv, context, assistantMsg) {
         }
         renderTrace();
       },
-      onToolsDropped: function(err, engine) {
+      onToolsDropped: function(err, engine, unsupported) {
         // 这一轮才试出来的（事先不知道）：说一次，别每次发消息都念。
-        //   engine='text' → 联网照常，只是换了通道；engine='plain' → 这轮真没搜。
-        if (engine === 'text') {
+        //   unsupported=true → 服务器明确拒了带 tools 的请求（下次直接走文本协议）
+        //   unsupported=false → 原生这次没走通（超时/断网），没记结论，下次还会先试原生
+        if (engine === 'text' && unsupported) {
           showToast('「' + (conv.model || '当前模型') + '」这条接口不收原生工具调用，已自动改用文本协议（联网照常）', 'success');
+        } else if (engine === 'text') {
+          showToast('原生通道这次没走通，已改用文本协议重试（联网照常）', 'info');
         } else {
           showToast('「' + (conv.model || '当前模型') + '」这条通道这次没走通，本轮按普通对话回答（联网未生效）', 'warn');
         }
