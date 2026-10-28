@@ -31,7 +31,7 @@
 | `gesture-helpers.js` | 手势辅助 |
 | `latex.js` | LaTeX 渲染层（定界符提取 → 占位符穿越 marked → KaTeX 回填）**v116 新增** |
 | `web-search.js` | 联网搜索（DeepSeek Search / Fetch 客户端 + 会话级开关 + 上下文注入 + 来源卡片）**v3.0.5 新增**。本身就是 web 可用的（`wsPostJson` 有 web `fetch` 分支），**不是 APK 专有**；同步时还要一起带：`index.html` 的 `<script src="web-search.js">`、输入区地球按钮、设置面板「联网搜索」分组与「本次对话 → 联网搜索」开关、`style.css` 的 `.ws-*` / `.web-sources*` 规则、`db.js` 的 `defaultWebSearchSettings` / `migrateWebSearchSettings`、`chat.js` 的注入点、`conversation.js` 的来源渲染 |
-| `auto-title.js` | 会话标题自动命名（首条消息 → 截断式占位 → 模型短标题覆盖）**v3.0.7 新增**。纯前端、web 可用；但**web 版走本机中转时不发模型请求**（只保留截断式），判定在 `atAskModel` 里。同步时还要一起带：`index.html` 的 `<script src="auto-title.js">` + 设置面板「常用偏好 → 自动命名会话」开关、`db.js` 的 `defaultAutoTitleSettings` / `migrateAutoTitleSettings`、`chat.js sendFromMessage` 开头的调用、`conversation.js` 手动改名处置 `titleSetByUser`、`app.js` 的开关绑定与 `fillSettingsForm` 回填 |
+| `auto-title.js` | 会话标题自动命名（首条消息 → 截断式占位 → 模型短标题覆盖）**v3.0.7 新增**。纯前端、web 可用；但**web 版走本机中转时不发模型请求**（只保留截断式），判定在 `atAskModel` 里。同步时还要一起带：`index.html` 的 `<script src="auto-title.js">` + 设置面板「常用偏好 → 自动命名会话」开关、`db.js` 的 `defaultAutoTitleSettings` / `migrateAutoTitleSettings`、`chat.js sendFromMessage` 开头的调用、`conversation.js` 手动改名处置 `titleSetByUser` / 新建会话落 `titleAutoEligible`、`app.js` 的开关绑定与 `fillSettingsForm` 回填。**v3.0.7b**：`voice.js` 的 `addUserMsg` 之后也调 `maybeAutoTitle` —— 这条属 APK 专有（主仓库没有语音模块），同步时**不带**；其余照带。 |
 | `vendor/` | **目录（递归同步）**：本地化第三方库——`katex/`（0.16.47，含 20 个 woff2 字体）、`marked/`（12.0.1）、`highlight/`（11.9.0）。**v116 新增**，替代原 cdnjs 引用 |
 | `index.html` | 页面结构 |
 | `style.css` | 样式 |
