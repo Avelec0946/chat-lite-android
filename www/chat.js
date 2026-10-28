@@ -1236,7 +1236,9 @@ async function sendFromMessage(context) {
   // 位置很关键：必须在 provider 解析后、reqBody 构造前 —— 检索结果要并进 context。
   // 三条约束（见 web-search.js 顶部）：① 结果不落库、不进 system；② 失败不阻断；③ 只有一处实现。
   if (typeof attachWebSearchToContext === 'function') {
-    var wsRes = await attachWebSearchToContext(conv, context);
+    // assistantMsgId 只用于「正在联网检索…」那行提示：挂在**正在生成的那条气泡**里，
+    //   不额外占底栏空间（v3.0.5.1 去掉了底栏地球按钮）。
+    var wsRes = await attachWebSearchToContext(conv, context, { assistantMsgId: assistantMsg.id });
     if (wsRes && wsRes.context) context = wsRes.context;
     // 用户检索途中点了停止：如实收尾，**不要**接着把聊天请求发出去
     if (wsRes && wsRes.meta && wsRes.meta.skipped === 'aborted') {

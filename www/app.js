@@ -643,9 +643,9 @@ async function init() {
   settingsPanel.querySelector('.settings-backdrop').addEventListener('click', () => toggleSettings(false));
 
   // ===== v3.0.5: 联网搜索 =====
-  // 输入区的地球按钮 = 会话级开关（和「本次对话 → 联网搜索」是同一件事，两处同步）
-  var wsBtn = document.getElementById('btn-web-search');
-  if (wsBtn) wsBtn.addEventListener('click', function() { toggleWebSearch(); });
+  // 开关**只有一处**：设置 →「本次对话 → 联网搜索」。
+  //   v3.0.5.1 去掉了输入框左侧的地球按钮 —— 用户指出它①挤占输入框、左右不对称，
+  //   ②与设置里的开关功能完全重叠。一个功能两个入口且状态要互相同步，是纯负担。
   var wsChk = document.getElementById('websearch-toggle');
   if (wsChk) wsChk.addEventListener('change', function() {
     var conv = currentConv();
@@ -657,18 +657,15 @@ async function init() {
         wsChk.checked = false;
         conv.webSearch = false;
         save();
-        updateWebSearchButton();
         showToast(t.reason, 'warn');
         return;
       }
     }
     conv.webSearch = wsChk.checked === true;
     save();
-    updateWebSearchButton();
   });
   // 来源卡片里的链接：APK 交给系统浏览器（不拦截），Web 新开标签页
   messagesEl.addEventListener('click', function(e) { wsOnSourceLinkClick(e); });
-  updateWebSearchButton();
 
   sidebarToggle.addEventListener('click', () => sidebar.classList.toggle('hidden'));
   $('theme-checkbox').addEventListener('change', e => {

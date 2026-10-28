@@ -7,7 +7,7 @@
 <title>chat-lite</title>
 <link rel="stylesheet" href="vendor/highlight/github-dark.min.css?v=116">
 <link rel="stylesheet" href="vendor/katex/katex.min.css?v=116">
-<link rel="stylesheet" href="style.css?v=133">
+<link rel="stylesheet" href="style.css?v=134">
   <meta name="theme-color" content="#7c3aed">
   <link rel="manifest" href="manifest.json">
 </head>
@@ -81,9 +81,6 @@
     <div id="input-area" class="input-area">
       <div id="file-preview" class="file-preview" style="display:none"></div>
       <div class="input-row">
-        <button id="btn-web-search" class="btn btn-icon ws-toggle-btn" title="联网搜索：关（当前会话）" aria-pressed="false">
-          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><line x1="2" y1="12" x2="22" y2="12"/><path d="M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z"/></svg>
-        </button>
         <button id="btn-upload" class="btn btn-icon" title="上传文件">
           <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21.44 11.05l-9.19 9.19a6 6 0 0 1-8.49-8.49l9.19-9.19a4 4 0 0 1 5.66 5.66l-9.2 9.19a2 2 0 0 1-2.83-2.83l8.49-8.48"/></svg>
         </button>
@@ -545,75 +542,6 @@
           </div>
         </details>
 
-        <!-- ===== 联网搜索（全局配置 · 会话开关）===== -->
-        <details class="setting-group setting-group-collapsible" data-group-key="web-search">
-          <summary class="setting-group-summary">联网搜索 <span class="setting-scope">全局配置·按会话开关</span></summary>
-          <div class="setting-group-body">
-          <span class="setting-hint">走 DeepSeek 官方「网页搜索 / 网页抓取」接口（<code>/v1/tools/search</code>、<code>/v1/tools/fetch</code>）。按成功请求计费：5 元 / 千次（Search、Fetch 各算各的，失败与空结果不计费）。开关在输入框左侧的地球按钮，或「本次对话 → 联网搜索」。</span>
-          <label class="setting-row">
-            <span>密钥来源</span>
-            <select id="ws-mode-select" class="setting-select">
-              <option value="inherit">复用接口管理</option>
-              <option value="custom">自定义</option>
-            </select>
-          </label>
-          <label class="setting-row" id="ws-provider-row">
-            <span>使用接口</span>
-            <select id="ws-provider-select" class="setting-select"></select>
-          </label>
-          <span class="setting-hint" id="ws-provider-hint">自动只挑 DeepSeek 官方接口（第三方中转站通常没有 tools 接口）。想用别家网关请在右侧下拉里显式选中。</span>
-          <div id="ws-custom-rows" style="display:none">
-            <label class="setting-row setting-row-col">
-              <span>API 地址</span>
-              <input id="ws-base-url" class="setting-input" placeholder="https://api.deepseek.com" autocomplete="off">
-            </label>
-            <label class="setting-row setting-row-col">
-              <span>API 密钥</span>
-              <input id="ws-api-key" class="setting-input" type="password" placeholder="sk-..." autocomplete="off">
-            </label>
-            <span class="setting-hint">必须是 DeepSeek 兼容的 <code>/v1/tools/search</code> 与 <code>/v1/tools/fetch</code>。</span>
-          </div>
-          <span class="setting-hint" id="ws-target-hint"></span>
-          <label class="setting-row">
-            <span>结果条数</span>
-            <input id="ws-count" class="setting-input setting-num" type="number" min="1" max="50" step="1" value="6" title="1~50，默认 6。条数不影响单次计费。">
-          </label>
-          <label class="setting-row">
-            <span>正文深度</span>
-            <select id="ws-content-mode" class="setting-select">
-              <option value="summary">摘要（省时省钱）</option>
-              <option value="content">正文（Search 一次带回）</option>
-              <option value="fetch">正文 + 抓取（更准，按条加钱）</option>
-            </select>
-          </label>
-          <span class="setting-hint">摘要：每条 600~800 字的长摘要，多数问答够用。正文：Search 直接返回网页正文，上下文更大。正文+抓取：再对最相关的前几条调 Fetch 拿完整 Markdown，最准但要额外计费、也最慢。</span>
-          <label class="setting-row" id="ws-fetch-top-row" style="display:none">
-            <span>抓取条数</span>
-            <input id="ws-fetch-top" class="setting-input setting-num" type="number" min="1" max="3" step="1" value="2" title="1~3，默认 2。Fetch 有目标域名 QPS 限制，不宜过多。">
-          </label>
-          <label class="setting-row">
-            <span>显示来源</span>
-            <label class="toggle-switch">
-              <input type="checkbox" id="ws-show-sources" checked>
-              <span class="toggle-slider"></span>
-            </label>
-          </label>
-          <span class="setting-hint">在回复下方列出本次引用的网页（标题 + 站点 + 日期），点标题用系统浏览器打开。</span>
-          <label class="setting-row">
-            <span>新会话默认开启</span>
-            <label class="toggle-switch">
-              <input type="checkbox" id="ws-default-on">
-              <span class="toggle-slider"></span>
-            </label>
-          </label>
-          <span class="setting-hint">只影响此后新建的会话；已有会话保持各自原来的开关状态。</span>
-          <div class="provider-editor-actions">
-            <button id="btn-test-web-search" class="btn btn-small">测试搜索</button>
-            <span id="ws-test-result" class="provider-test-result"></span>
-          </div>
-          </div>
-        </details>
-
         <!-- ===== 模型修饰 ===== -->
         <details class="setting-group setting-group-collapsible" data-group-key="model-prompt" open>
           <summary class="setting-group-summary">模型修饰 <span class="setting-scope">按模型·全局生效</span></summary>
@@ -926,6 +854,75 @@
           </div>
         </details>
 
+        <!-- ===== 联网搜索（全局配置 · 会话开关）===== -->
+        <details class="setting-group setting-group-collapsible" data-group-key="web-search">
+          <summary class="setting-group-summary">联网搜索 <span class="setting-scope">全局配置·按会话开关</span></summary>
+          <div class="setting-group-body">
+          <span class="setting-hint">走 DeepSeek 官方「网页搜索 / 网页抓取」接口（<code>/v1/tools/search</code>、<code>/v1/tools/fetch</code>）。按成功请求计费：5 元 / 千次（Search、Fetch 各算各的，失败与空结果不计费）。这里是全局配置；<strong>开关在「本次对话 → 联网搜索」</strong>（按会话生效）。</span>
+          <label class="setting-row">
+            <span>密钥来源</span>
+            <select id="ws-mode-select" class="setting-select">
+              <option value="inherit">复用接口管理</option>
+              <option value="custom">自定义</option>
+            </select>
+          </label>
+          <label class="setting-row" id="ws-provider-row">
+            <span>使用接口</span>
+            <select id="ws-provider-select" class="setting-select"></select>
+          </label>
+          <span class="setting-hint" id="ws-provider-hint">自动只挑 DeepSeek 官方接口（第三方中转站通常没有 tools 接口）。想用别家网关请在右侧下拉里显式选中。</span>
+          <div id="ws-custom-rows" style="display:none">
+            <label class="setting-row setting-row-col">
+              <span>API 地址</span>
+              <input id="ws-base-url" class="setting-input" placeholder="https://api.deepseek.com" autocomplete="off">
+            </label>
+            <label class="setting-row setting-row-col">
+              <span>API 密钥</span>
+              <input id="ws-api-key" class="setting-input" type="password" placeholder="sk-..." autocomplete="off">
+            </label>
+            <span class="setting-hint">必须是 DeepSeek 兼容的 <code>/v1/tools/search</code> 与 <code>/v1/tools/fetch</code>。</span>
+          </div>
+          <span class="setting-hint" id="ws-target-hint"></span>
+          <label class="setting-row">
+            <span>结果条数</span>
+            <input id="ws-count" class="setting-input setting-num" type="number" min="1" max="50" step="1" value="6" title="1~50，默认 6。条数不影响单次计费。">
+          </label>
+          <label class="setting-row">
+            <span>正文深度</span>
+            <select id="ws-content-mode" class="setting-select">
+              <option value="summary">摘要（省时省钱）</option>
+              <option value="content">正文（Search 一次带回）</option>
+              <option value="fetch">正文 + 抓取（更准，按条加钱）</option>
+            </select>
+          </label>
+          <span class="setting-hint">摘要：每条 600~800 字的长摘要，多数问答够用。正文：Search 直接返回网页正文，上下文更大。正文+抓取：再对最相关的前几条调 Fetch 拿完整 Markdown，最准但要额外计费、也最慢。</span>
+          <label class="setting-row" id="ws-fetch-top-row" style="display:none">
+            <span>抓取条数</span>
+            <input id="ws-fetch-top" class="setting-input setting-num" type="number" min="1" max="3" step="1" value="2" title="1~3，默认 2。Fetch 有目标域名 QPS 限制，不宜过多。">
+          </label>
+          <label class="setting-row">
+            <span>显示来源</span>
+            <label class="toggle-switch">
+              <input type="checkbox" id="ws-show-sources" checked>
+              <span class="toggle-slider"></span>
+            </label>
+          </label>
+          <span class="setting-hint">在回复下方列出本次引用的网页（标题 + 站点 + 日期），点标题用系统浏览器打开。</span>
+          <label class="setting-row">
+            <span>新会话默认开启</span>
+            <label class="toggle-switch">
+              <input type="checkbox" id="ws-default-on">
+              <span class="toggle-slider"></span>
+            </label>
+          </label>
+          <span class="setting-hint">只影响此后新建的会话；已有会话保持各自原来的开关状态。</span>
+          <div class="provider-editor-actions">
+            <button id="btn-test-web-search" class="btn btn-small">测试搜索</button>
+            <span id="ws-test-result" class="provider-test-result"></span>
+          </div>
+          </div>
+        </details>
+
         <!-- ===== 数据管理 ===== -->
         <details class="setting-group setting-group-collapsible" data-group-key="data" open>
           <summary class="setting-group-summary">数据管理 <span class="setting-scope">全量导出/导入</span></summary>
@@ -965,13 +962,13 @@
 <script src="haptics.js?v=116"></script>
 <script src="providers.js?v=102"></script>
 <!-- v3.0.5: 联网搜索（DeepSeek Search / Fetch）。必须在 providers.js 之后（用 normalizeBaseUrl/getProvider）、chat.js 之前 -->
-<script src="web-search.js?v=1"></script>
+<script src="web-search.js?v=3"></script>
 <script src="image-gen.js?v=126"></script>
-<script src="conversation.js?v=113"></script>
-<script src="chat.js?v=132"></script>
+<script src="conversation.js?v=114"></script>
+<script src="chat.js?v=133"></script>
 <script src="io.js?v=128"></script>
 <script src="gesture-helpers.js?v=102"></script>
-<script src="app.js?v=128"></script>
+<script src="app.js?v=129"></script>
 <!-- v125: 语音通话 —— voice-director 是纯函数层（无 DOM/无网络），voice.js 是运行时 -->
 <!-- v127: voice-provider 管独立的语音接口（地址+密钥+模型），与「接口管理」的聊天渠道无关 -->
 <script src="voice-director.js?v=129"></script>

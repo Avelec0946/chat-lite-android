@@ -456,10 +456,6 @@ function renderMessages() {
   });
 
   scrollToBottom();
-  // v3.0.5: 每次重渲染顺带同步联网开关的按钮态。
-  //   放在这里而不是 switchConversation：新会话 / 切会话 / 删除 / 导入都会走到 renderMessages，
-  //   挂在单点必然漏一处（按钮显示「开」，实际会话是关的）。
-  if (typeof updateWebSearchButton === 'function') updateWebSearchButton();
 }
 
 function addLongPress(el, callback) {
