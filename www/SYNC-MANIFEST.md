@@ -1,6 +1,6 @@
 # SYNC-MANIFEST — 双向同步声明
 
-**最后更新**：2026-09-25（v116：LaTeX 适配 + 第三方库全本地化）
+**最后更新**：2026-10-28（v3.0.5：新增共享模块 `web-search.js`（联网搜索），当前只在 APK 仓库）
 **用途**：chat-lite（主仓库）与 chat-lite-android（APK 仓库）按需互相同步时的差异声明
 
 > 两个仓库是**独立的**。任何一方的改进，另一方**不默认跟进**。
@@ -30,6 +30,7 @@
 | `io.js` | 导入导出 + 角色卡 + 格式转换 |
 | `gesture-helpers.js` | 手势辅助 |
 | `latex.js` | LaTeX 渲染层（定界符提取 → 占位符穿越 marked → KaTeX 回填）**v116 新增** |
+| `web-search.js` | 联网搜索（DeepSeek Search / Fetch 客户端 + 会话级开关 + 上下文注入 + 来源卡片）**v3.0.5 新增**。本身就是 web 可用的（`wsPostJson` 有 web `fetch` 分支），**不是 APK 专有**；同步时还要一起带：`index.html` 的 `<script src="web-search.js">`、输入区地球按钮、设置面板「联网搜索」分组与「本次对话 → 联网搜索」开关、`style.css` 的 `.ws-*` / `.web-sources*` 规则、`db.js` 的 `defaultWebSearchSettings` / `migrateWebSearchSettings`、`chat.js` 的注入点、`conversation.js` 的来源渲染 |
 | `vendor/` | **目录（递归同步）**：本地化第三方库——`katex/`（0.16.47，含 20 个 woff2 字体）、`marked/`（12.0.1）、`highlight/`（11.9.0）。**v116 新增**，替代原 cdnjs 引用 |
 | `index.html` | 页面结构 |
 | `style.css` | 样式 |
