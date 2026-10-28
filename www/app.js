@@ -641,6 +641,35 @@ async function init() {
 
   $('btn-save-settings').addEventListener('click', saveSettingsHandler);
   settingsPanel.querySelector('.settings-backdrop').addEventListener('click', () => toggleSettings(false));
+
+  // ===== v3.0.5: 联网搜索 =====
+  // 输入区的地球按钮 = 会话级开关（和「本次对话 → 联网搜索」是同一件事，两处同步）
+  var wsBtn = document.getElementById('btn-web-search');
+  if (wsBtn) wsBtn.addEventListener('click', function() { toggleWebSearch(); });
+  var wsChk = document.getElementById('websearch-toggle');
+  if (wsChk) wsChk.addEventListener('change', function() {
+    var conv = currentConv();
+    if (!conv) return;
+    // 没配密钥时不许打开 —— 打开一个注定失败的开关比不让打开更误导用户
+    if (wsChk.checked) {
+      var t = typeof wsResolveTarget === 'function' ? wsResolveTarget() : { ok: false, reason: '联网搜索未就绪' };
+      if (!t.ok) {
+        wsChk.checked = false;
+        conv.webSearch = false;
+        save();
+        updateWebSearchButton();
+        showToast(t.reason, 'warn');
+        return;
+      }
+    }
+    conv.webSearch = wsChk.checked === true;
+    save();
+    updateWebSearchButton();
+  });
+  // 来源卡片里的链接：APK 交给系统浏览器（不拦截），Web 新开标签页
+  messagesEl.addEventListener('click', function(e) { wsOnSourceLinkClick(e); });
+  updateWebSearchButton();
+
   sidebarToggle.addEventListener('click', () => sidebar.classList.toggle('hidden'));
   $('theme-checkbox').addEventListener('change', e => {
     document.body.classList.toggle('dark', e.target.checked);
@@ -1422,6 +1451,8 @@ function fillSettingsForm() {
   if (mpOverrideRow) mpOverrideRow.style.display = hasOverride ? '' : 'none';
   var mpOverrideTextEl = document.getElementById('model-prompt-override');
   if (mpOverrideTextEl) mpOverrideTextEl.value = (conv && conv.modelPromptOverride) || '';
+  // v3.0.5: 联网搜索设置（全局配置 + 会话开关回填）
+  if (typeof renderWebSearchSettings === 'function') renderWebSearchSettings();
   // C5: 应用分组收折记忆状态
   applyGroupCollapseState();
 }
@@ -1502,6 +1533,8 @@ function saveSettingsHandler() {
   if (fsSelect) settings.fontSize = fsSelect.value;
   if (lsSelect) settings.lineSpacing = lsSelect.value;
   applyDisplaySettings();
+  // v3.0.5: 联网搜索配置写回 settings（下方 saveSettings 统一落盘）
+  if (typeof saveWebSearchSettingsFromForm === 'function') saveWebSearchSettingsFromForm();
   saveSettings();
 
   // 会话级字段

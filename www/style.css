@@ -1520,3 +1520,44 @@ body.voice-view-open .btn-voice-entry::after{display:none}
   max-height:16vh;overflow:auto;word-break:break-word;
 }
 .voice-think-body::-webkit-scrollbar{width:0;height:0;display:none}
+
+/* ===== v3.0.5 联网搜索 =====
+   按钮继承 .btn-icon 的尺寸；这里只管「开/关/检索中」三种状态与来源卡片。
+   颜色全部走变量 —— 两套主题（--bg2/--text/--primary 在两个 :root 里各有一套）。 */
+.ws-toggle-btn{position:relative;opacity:.7;transition:opacity .15s,background .15s,color .15s}
+.ws-toggle-btn:hover{opacity:1}
+.ws-toggle-btn.active{background:var(--primary);color:var(--on-primary);opacity:1}
+.ws-toggle-btn.active:hover{background:var(--primary-hover)}
+.ws-toggle-btn.is-searching{opacity:1}
+.ws-toggle-btn.is-searching::after{
+  content:'';position:absolute;right:4px;top:4px;width:8px;height:8px;border-radius:50%;
+  border:2px solid var(--border);border-top-color:var(--primary);animation:wsSpin .7s linear infinite;
+}
+.ws-toggle-btn.active.is-searching::after{border-color:rgba(255,255,255,.35);border-top-color:#fff}
+@keyframes wsSpin{to{transform:rotate(360deg)}}
+
+/* 来源卡片：正文之后、操作按钮之前 */
+.web-sources{margin-top:10px;padding:8px 10px;border:1px solid var(--border);border-radius:var(--radius);background:var(--bg2)}
+.web-sources-summary{
+  cursor:pointer;list-style:none;display:flex;align-items:center;gap:6px;
+  font-size:12px;font-weight:600;color:var(--text2);
+}
+.web-sources-summary::-webkit-details-marker{display:none}
+.web-sources-summary::before{content:'▸';font-size:11px;transition:transform .18s}
+.web-sources[open] .web-sources-summary::before{transform:rotate(90deg)}
+.web-source-list{margin:6px 0 0;padding:0;list-style:none;display:flex;flex-direction:column;gap:6px}
+.web-source-item{display:flex;flex-direction:column;gap:1px;min-width:0}
+.web-source-link{display:flex;gap:6px;align-items:baseline;color:var(--text);text-decoration:none;font-size:12px;line-height:1.45}
+.web-source-link:hover{color:var(--primary);text-decoration:underline}
+.web-source-idx{
+  flex:0 0 auto;min-width:16px;height:16px;line-height:16px;text-align:center;
+  border-radius:4px;background:var(--bg3);color:var(--text2);font-size:10px;
+}
+.web-source-title{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.web-source-meta{padding-left:22px;font-size:11px;color:var(--text2);opacity:.85}
+.ws-hint-bad{color:var(--danger);opacity:1}
+/* 联网搜索设置行：下拉里的选项文字很长（"自动（优先 DeepSeek 官方接口）"），
+   flex 布局会把它压成 min-content，于是左边标签被挤成一字一行 —— v3.0.2 踩过同一个坑。
+   这里只对这一行做局部处理，不动全局 .setting-row。 */
+#ws-provider-row>span:first-child{white-space:nowrap;flex:0 0 auto}
+#ws-provider-row .setting-select{flex:1;min-width:0}

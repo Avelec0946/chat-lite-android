@@ -79,6 +79,9 @@ function newConversation() {
     title: '新对话',
     model: (state.providers && state.providers[0] && state.providers[0].models && state.providers[0].models[0] && state.providers[0].models[0].id) || 'deepseek-v4-flash',
     providerId: (state.providers && state.providers[0] && state.providers[0].id) || null,
+    // v3.0.5: 联网搜索的初值跟随全局「新会话默认开启」。老会话没有这个字段 = 关，
+    //   所以这里必须显式落一个布尔值，否则新会话会永远停在「未设置」。
+    webSearch: (typeof settings !== 'undefined' && settings && settings.webSearch && settings.webSearch.defaultOn === true),
     rootId: msgId,
     activePath: [msgId],
     messageMap: { [msgId]: rootMsg },
@@ -369,11 +372,17 @@ function renderMessages() {
 
     const content = msg.editing ? renderEditMode(msg) : renderContent(msg);
     const deleteBtnHtml = `<button class="msg-action-btn delete-btn" title="删除">删除</button>`;
+    // v3.0.5: 联网来源卡片。只在 assistant 消息上渲染，且渲染的是**已落库的来源快照**
+    //   （msg.webSources 就是那一次检索的结果，不随后续检索变化 —— 翻历史时才对得上）。
+    const sourcesHtml = (msg.role === 'assistant' && msg.webSources && msg.webSources.length &&
+      typeof renderWebSearchSourcesHtml === 'function')
+      ? renderWebSearchSourcesHtml(msg.webSources) : '';
 
     div.innerHTML = `
       <div class="msg-bubble">
         ${msg.title && msg.title !== '对话根节点' ? `<div class="msg-title">${escapeHtml(msg.title)}</div>` : ''}
         ${content}
+        ${sourcesHtml}
         ${renderSiblingArrows(msg, conv)}
         ${msg.role === 'assistant' && !msg.editing ? `
         <div class="msg-actions">
@@ -447,6 +456,10 @@ function renderMessages() {
   });
 
   scrollToBottom();
+  // v3.0.5: 每次重渲染顺带同步联网开关的按钮态。
+  //   放在这里而不是 switchConversation：新会话 / 切会话 / 删除 / 导入都会走到 renderMessages，
+  //   挂在单点必然漏一处（按钮显示「开」，实际会话是关的）。
+  if (typeof updateWebSearchButton === 'function') updateWebSearchButton();
 }
 
 function addLongPress(el, callback) {

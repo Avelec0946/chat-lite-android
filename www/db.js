@@ -142,8 +142,52 @@ function defaultSettings() {
     imageProviderId: null,
     images: [],
     // v125: 语音通话（详见 voice-模块-架构契约.md §3.1）
-    voice: defaultVoiceSettings()
+    voice: defaultVoiceSettings(),
+    // v3.0.5: 联网搜索（DeepSeek Search / Fetch）
+    webSearch: defaultWebSearchSettings()
   };
+}
+
+// v3.0.5: 联网搜索设置的默认值。
+//   为什么默认 mode='inherit'：用户手上已经有一把 DeepSeek key（接口管理里），
+//   再让他填一遍是多余动作；「复用」是默认路径，「自定义」只在特殊网关下才需要。
+//   为什么 defaultOn=false：Search/Fetch 按次计费（5 元/千次），
+//   一个默认打开的按次计费功能，在用户不知情时就开始花钱 —— 不能这么设计。
+//   开关粒度是**会话级**（conv.webSearch），这里只决定新会话的初值。
+function defaultWebSearchSettings() {
+  return {
+    mode: 'inherit',            // inherit = 复用接口管理里的 DeepSeek 接口；custom = 自己填地址和 key
+    providerId: '',             // inherit 时指定用哪个接口，空 = 自动挑（优先 api.deepseek.com）
+    baseUrl: 'https://api.deepseek.com',
+    apiKey: '',
+    count: 6,                   // 每次检索返回条数 1~50
+    contentMode: 'summary',     // summary=只要摘要 / content=要正文 / fetch=再抓前 N 条全文
+    fetchTop: 2,                // contentMode=fetch 时抓几条（1~3）
+    showSources: true,          // 回复下面显示来源卡片
+    defaultOn: false            // 新会话是否默认开启
+  };
+}
+
+// 逐字段补默认（只增不改）。和 migrateVoiceSettings 同一套规则：
+//   不能用默认值整体覆盖 —— 用户只改过 count 时，其它字段必须保住原值。
+function migrateWebSearchSettings(w) {
+  var def = defaultWebSearchSettings();
+  if (!w || typeof w !== 'object') return def;
+  var out = {};
+  for (var k in def) {
+    if (!Object.prototype.hasOwnProperty.call(def, k)) continue;
+    out[k] = Object.prototype.hasOwnProperty.call(w, k) && w[k] !== undefined && w[k] !== null ? w[k] : def[k];
+  }
+  out.mode = out.mode === 'custom' ? 'custom' : 'inherit';
+  out.contentMode = (out.contentMode === 'content' || out.contentMode === 'fetch') ? out.contentMode : 'summary';
+  ['providerId', 'baseUrl', 'apiKey'].forEach(function(k) {
+    if (typeof out[k] !== 'string') out[k] = def[k];
+  });
+  out.count = clampNum(out.count, 1, 50, def.count);
+  out.fetchTop = clampNum(out.fetchTop, 1, 3, def.fetchTop);
+  out.showSources = out.showSources !== false;
+  out.defaultOn = out.defaultOn === true;
+  return out;
 }
 
 // v125: 语音通话设置的默认值。
@@ -287,6 +331,8 @@ function migrateSettings(s) {
   //   不能整体用默认值覆盖：用户点过一次「音色」就只写了 voiceId，其余字段必须保住默认。
   //   类型也要校验：前端数字输入框存回来是字符串（"700"），range 存回来可能 NaN。
   s.voice = migrateVoiceSettings(s.voice);
+  // v3.0.5: 联网搜索（只增不改；老库没有这个字段时补默认）
+  s.webSearch = migrateWebSearchSettings(s.webSearch);
   return s;
 }
 

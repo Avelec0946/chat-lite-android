@@ -487,9 +487,13 @@ function updateMessageContent(msgId, content, reasoning) {
   if (!contentEl) {
     contentEl = document.createElement('div');
     contentEl.className = 'rendered-content';
+    // v3.0.5：锚点要先避开「联网来源」卡片 —— 否则流式期间新建的正文会插到来源下面，
+    //   用户看到的是「先列来源、再出正文」。来源永远排在正文之后、操作按钮之前。
+    const srcs = el.querySelector('.web-sources');
     const actions = el.querySelector('.msg-actions');
-    if (actions) {
-      el.insertBefore(contentEl, actions);
+    const anchor = srcs || actions;
+    if (anchor) {
+      el.insertBefore(contentEl, anchor);
     } else {
       el.appendChild(contentEl);
     }
@@ -1227,6 +1231,28 @@ async function sendFromMessage(context) {
   }
   var isLocal = window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1' || window.location.hostname.startsWith('192.168.') || window.location.hostname.startsWith('172.') || window.location.hostname.startsWith('10.') || window.location.hostname.endsWith('.local');
   var useDirect = isCapacitor() || settings.directMode || !isLocal;
+
+  // ===== v3.0.5: 联网搜索（会话级开关）=====
+  // 位置很关键：必须在 provider 解析后、reqBody 构造前 —— 检索结果要并进 context。
+  // 三条约束（见 web-search.js 顶部）：① 结果不落库、不进 system；② 失败不阻断；③ 只有一处实现。
+  if (typeof attachWebSearchToContext === 'function') {
+    var wsRes = await attachWebSearchToContext(conv, context);
+    if (wsRes && wsRes.context) context = wsRes.context;
+    // 用户检索途中点了停止：如实收尾，**不要**接着把聊天请求发出去
+    if (wsRes && wsRes.meta && wsRes.meta.skipped === 'aborted') {
+      assistantMsg.interrupted = true;
+      assistantMsg.errorMsg = '用户打断';
+      save();
+      renderMessages();
+      return;
+    }
+    if (wsRes && wsRes.sources && wsRes.sources.length) {
+      assistantMsg.webSources = wsRes.sources;
+      if (wsRes.meta) assistantMsg.webSearchMeta = wsRes.meta;
+      save();
+      renderMessages();
+    }
+  }
 
   var reqBody = {
     messages: context,
