@@ -58,6 +58,9 @@ var sandbox = {
   // v3.0.12：能力登记要读写 settings / saveSettings；upstreamId 映射也要有，
   //   否则「key 该用 upstreamId 而不是显示名」这条断言测不到真东西。
   settings: { toolCapability: {} },
+  // v3.0.13：文本协议的工具清单从 WEB_TOOL_DEFS 生成（只有一份真相）
+  WEB_TOOL_DEFS: [{ type: 'function', function: { name: 'web_search', description: '搜索互联网',
+    parameters: { type: 'object', properties: { query: { type: 'string' }, count: { type: 'integer' } }, required: ['query'] } } }],
   saveSettings: function() { saves++; },
   modelToUpstreamId: function(provider, modelId) {
     var m = (provider && provider.models || []).filter(function(x) { return x.id === modelId; })[0];
@@ -248,7 +251,7 @@ console.log('\n[tool_calls 归并]');
 })
 // ---------- 工具能力登记（v3.0.12）----------
 // 这一节钉住的是「开了联网搜索，对话就整个不可用」那个事故的结构性原因：
-//   能力只能靠证据学（去掉 tools 重发一次）、学到的要记住、记住的要能过期/重置。
+//   能力只能靠证据学（换一条通道重发成不成功）、学到的要记住、记住的要能过期/重置。
 .then(function() {
   console.log('\n[工具能力登记]');
   var pv = { id: 'pv1', models: [{ id: 'alias', upstreamId: 'real-model' }] };
@@ -260,7 +263,7 @@ console.log('\n[tool_calls 归并]');
   saves = 0;
   ok('没有记录时是 unknown（该试还是得试）', capState(pv, 'alias') === 'unknown');
   capLearn(pv, 'alias', false, 'HTTP 503 model_temporarily_unavailable');
-  ok('学到「不支持」', capState(pv, 'alias') === 'no');
+  ok('学到「原生 tools 不可用」', capState(pv, 'alias') === 'no');
   ok('结论已落盘（saveSettings 被调）', saves === 1, 'saves=' + saves);
   var keys = Object.keys(sandbox.settings.toolCapability);
   ok('key 用 upstreamId（改显示名不该让结论失效）', keys.length === 1 && keys[0] === 'pv1|real-model', keys.join(','));
@@ -283,44 +286,109 @@ console.log('\n[tool_calls 归并]');
   capLearn(pv, 'alias', true, 'ok');
   ok('也能记「支持」', capState(pv, 'alias') === 'yes');
 
-  // 没有 settings 时不能崩（早期调用/测试环境）
   var savedSettings = sandbox.settings;
   delete sandbox.settings;
   ok('没有 settings 时返回 unknown 而不是抛异常', capState(pv, 'alias') === 'unknown');
   sandbox.settings = savedSettings;
 })
-// ---------- 降级：这一轮才试出来不支持 ----------
+// ---------- 文本工具协议：解析 ----------
 .then(function() {
-  console.log('\n[降级 · 试出来的]');
+  console.log('\n[文本协议 · 解析]');
+  var parse = vm.runInContext('agentParseToolCalls', sandbox);
+  var one = parse('我先查一下。\n<tool_call>\n{"name":"web_search","arguments":{"query":"今天科技新闻"}}\n</tool_call>');
+  ok('标准形状能解析', one.length === 1 && one[0].name === 'web_search' && one[0].args.query === '今天科技新闻', JSON.stringify(one));
+  var two = parse('<tool_call>{"name":"web_search","arguments":{"query":"a"}}</tool_call><tool_call>{"name":"fetch_url","arguments":{"url":"https://x"}}</tool_call>');
+  ok('一个回复里多个块都能解析', two.length === 2 && two[1].name === 'fetch_url', JSON.stringify(two));
+  var strArgs = parse('<tool_call>{"name":"web_search","arguments":"{\\"query\\":\\"b\\"}"}</tool_call>');
+  ok('arguments 是字符串也能吃（模型常这么写）', strArgs.length === 1 && strArgs[0].args.query === 'b', JSON.stringify(strArgs));
+  var fenced = parse('<tool_call>\n```json\n{"name":"web_search","args":{"query":"c"}}\n```\n</tool_call>');
+  ok('包了 ```json 围栏也能吃', fenced.length === 1 && fenced[0].args.query === 'c', JSON.stringify(fenced));
+  var openAI = parse('<tool_call>{"function":{"name":"web_search","arguments":{"query":"d"}}}</tool_call>');
+  ok('OpenAI 嵌套形状也能吃', openAI.length === 1 && openAI[0].name === 'web_search', JSON.stringify(openAI));
+  var truncated = parse('<tool_call>{"name":"web_search","arguments":{"query":"e"}}');
+  ok('没闭合（被 max_tokens 截断）也能吃', truncated.length === 1 && truncated[0].args.query === 'e', JSON.stringify(truncated));
+  ok('普通文本不会被误判成调用', parse('今天天气不错，没有工具调用。').length === 0);
+})
+// ---------- 文本工具协议：流式拦截 ----------
+.then(function() {
+  console.log('\n[文本协议 · 调用块不能漏到界面上]');
+  var out = [];
+  var sp = vm.runInContext('agentCreateCallSplitter', sandbox)(function(t) { out.push(t); });
+  // 故意把标记切成三段，模拟 TCP 分包
+  sp.push('我先查一下');
+  sp.push('。<tool_');
+  sp.push('call>\n{"name":"web_search"');
+  sp.push(',"arguments":{"query":"x"}}\n</tool_call>');
+  sp.finish();
+  var text = out.join('');
+  ok('标记之前的正文照常输出', text === '我先查一下。', JSON.stringify(text));
+  ok('半个标记不会被当正文漏出去', text.indexOf('<tool') < 0, JSON.stringify(text));
+
+  var out2 = [];
+  var sp2 = vm.runInContext('agentCreateCallSplitter', sandbox)(function(t) { out2.push(t); });
+  sp2.push('正常回答');
+  sp2.push('，没有工具');
+  sp2.finish();
+  ok('没有调用时一个字都不少（尾巴要 flush）', out2.join('') === '正常回答，没有工具', JSON.stringify(out2.join('')));
+})
+// ---------- 降级链：原生失败 → 文本协议接上 ----------
+.then(function() {
+  console.log('\n[降级链 · 原生失败 → 文本协议]');
   requests = []; responses = [];
   var pv = { id: 'pv1', models: [{ id: 'alias', upstreamId: 'real-model' }] };
   sandbox.settings.toolCapability = {};
   var dropped = [];
-  // 第 1 次：带 tools → 503（实测 kkaiapi 上的 gemini 就是这个形状：约 320ms 快速失败）
+  // ① 原生带 tools → 503（实测 kkaiapi 上的 gemini 就是这个形状）
   responses.push(makeResponse(['{"error":{"message":"The requested model is temporarily unavailable.","code":"model_temporarily_unavailable"}}'], { ok: false, status: 503 }));
-  // 第 2 次：不带 tools → 正常流式
-  responses.push(makeResponse([delta({ content: '直接回答' }), finish('stop'), 'data: [DONE]\n\n']));
+  // ② 文本协议 → 模型吐调用块
+  responses.push(makeResponse([
+    delta({ content: '<tool_call>\n{"name":"web_search","arguments":{"query":"今天科技新闻"}}\n</tool_call>' }),
+    finish('tool_calls'), 'data: [DONE]\n\n'
+  ]));
+  // ③ 回填结果后 → 正常作答
+  responses.push(makeResponse([delta({ content: '查到三条，第一条是……' }), finish('stop'), 'data: [DONE]\n\n']));
 
+  var execCalls = [];
   return vm.runInContext('agentRunAdaptive', sandbox)({
-    messages: [{ role: 'user', content: '那你自己联网搜索吧' }],
+    messages: [{ role: 'system', content: '你是助手' }, { role: 'user', content: '帮我查今天科技新闻' }],
     tools: [{ type: 'function', function: { name: 'web_search' } }],
     provider: pv, model: 'alias',
-    buildRequest: function(msgs, tools) { requests.push({ tools: tools }); return { url: 'u', headers: {}, payload: {} }; },
-    execTool: function() { return Promise.resolve({ text: 'x', meta: { ok: true } }); },
+    buildRequest: function(msgs, tools) {
+      requests.push({ tools: tools, messages: JSON.parse(JSON.stringify(msgs)) });
+      return { url: 'u', headers: {}, payload: {} };
+    },
+    execTool: function(name, args) {
+      execCalls.push({ name: name, args: args });
+      return Promise.resolve({ text: '[1] 示例结果', meta: { ok: true, count: 1 } });
+    },
     onDelta: function() {},
-    onToolsDropped: function(e) { dropped.push(e && e.message); }
+    onToolsDropped: function(e, engine) { dropped.push(engine); }
   }).then(function(res) {
-    ok('先带 tools 试了一次', !!requests[0].tools);
-    ok('失败后**自动去掉 tools 重发**', requests.length === 2 && requests[1].tools === null, 'requests=' + requests.length);
-    ok('这一轮照样有回答（对话不死）', res.content === '直接回答', res.content);
-    ok('结果标明降级 + 原因 probe', res.toolsDropped === true && res.droppedReason === 'probe');
-    ok('能力被记为 no', vm.runInContext('toolCapState', sandbox)(pv, 'alias') === 'no');
-    ok('回调一次（用来弹一次 toast，不是每条消息都弹）', dropped.length === 1 && /503/.test(dropped[0]), JSON.stringify(dropped));
+    ok('第一次走原生（带 tools）', !!requests[0].tools);
+    ok('第二次改走文本协议（不带 tools）', requests.length === 3 && requests[1].tools === null, 'requests=' + requests.length);
+    ok('文本协议把工具说明并进第一条 system（不新开 system）',
+      requests[1].messages[0].role === 'system' && /工具调用协议/.test(requests[1].messages[0].content) &&
+      requests[1].messages.filter(function(m) { return m.role === 'system'; }).length === 1);
+    ok('两条通道都带上「当前日期」（模型不知道今天是哪天就会编搜索词）',
+      /当前日期：\d{4}-\d{2}-\d{2}/.test(requests[0].messages[0].content) &&
+      /当前日期：\d{4}-\d{2}-\d{2}/.test(requests[1].messages[0].content));
+    ok('日期只到天、不带时分（带上时分等于每分钟换一次 system，前缀缓存全废）',
+      !/当前日期：\d{4}-\d{2}-\d{2}\s*\d{2}:/.test(requests[1].messages[0].content));
+    ok('工具真的被执行了', execCalls.length === 1 && execCalls[0].args.query === '今天科技新闻', JSON.stringify(execCalls));
+    ok('工具结果用 role:user 回填（兼容不认 tool 角色的网关）',
+      requests[2].messages.some(function(m) { return m.role === 'user' && /示例结果/.test(m.content); }));
+    ok('回填了模型自己说的那句（含调用块）',
+      requests[2].messages.some(function(m) { return m.role === 'assistant' && /<tool_call>/.test(m.content); }));
+    ok('最终回答正常', res.content === '查到三条，第一条是……', res.content);
+    ok('调用块没有漏进正文', res.content.indexOf('<tool_call>') < 0);
+    ok('engine 标为 text', res.engine === 'text');
+    ok('标明「原生不支持」+ 回调一次', res.nativeUnsupported === true && dropped.length === 1 && dropped[0] === 'text');
+    ok('能力被记为 no（下次直接走文本协议）', vm.runInContext('toolCapState', sandbox)(pv, 'alias') === 'no');
   });
 })
-// ---------- 降级：事先已知不支持 → 连试都不试 ----------
+// ---------- 已知 no：直接走文本协议，不再白撞 503 ----------
 .then(function() {
-  console.log('\n[降级 · 已知不支持]');
+  console.log('\n[降级链 · 已知原生不可用]');
   requests = []; responses = [];
   var pv = { id: 'pv1', models: [{ id: 'alias', upstreamId: 'real-model' }] };
   var dropped = [];
@@ -331,42 +399,44 @@ console.log('\n[tool_calls 归并]');
     provider: pv, model: 'alias',
     buildRequest: function(msgs, tools) { requests.push({ tools: tools }); return { url: 'u', headers: {}, payload: {} }; },
     execTool: function() { return Promise.resolve({ text: '', meta: {} }); },
-    onToolsDropped: function(e) { dropped.push(e); }
+    onToolsDropped: function(e, engine) { dropped.push(engine); }
   }).then(function(res) {
     ok('只发一次请求（不再白撞 503）', requests.length === 1, 'requests=' + requests.length);
-    ok('一次就没带 tools', requests[0].tools === null);
-    ok('标明 known', res.droppedReason === 'known' && res.toolsDropped === true);
+    ok('一次就不带 tools', requests[0].tools === null);
+    ok('engine=text、没有「刚试出来」标记', res.engine === 'text' && !res.nativeUnsupported);
     ok('不重复弹提示', dropped.length === 0);
     ok('内容正常', res.content === '照常回答');
   });
 })
-// ---------- 不去工具的错不能算到工具头上 ----------
+// ---------- 三条通道都不行：不误学、抛真实错误 ----------
 .then(function() {
-  console.log('\n[降级 · 两次都失败]');
+  console.log('\n[降级链 · 全都不行]');
   requests = []; responses = [];
   var pv = { id: 'pv1', models: [{ id: 'alias', upstreamId: 'real-model' }] };
   sandbox.settings.toolCapability = {};
   responses.push(makeResponse(['{"error":{"message":"tools rejected"}}'], { ok: false, status: 503 }));
+  responses.push(makeResponse(['{"error":{"message":"text proto rejected"}}'], { ok: false, status: 503 }));
   responses.push(makeResponse(['{"error":{"message":"upstream down"}}'], { ok: false, status: 500 }));
   return vm.runInContext('agentRunAdaptive', sandbox)({
     messages: [], tools: [{}], provider: pv, model: 'alias',
     buildRequest: function(msgs, tools) { requests.push({ tools: tools }); return { url: 'u', headers: {}, payload: {} }; },
     execTool: function() { return Promise.resolve({ text: '', meta: {} }); }
   }).then(function() {
-    ok('两次都失败时不该 resolve', false);
+    ok('三条通道都失败时不该 resolve', false);
   }, function(e) {
-    ok('抛出的是**去掉工具后**那个错误（更真实）', /upstream down/.test(e.message), e.message);
-    ok('不把「上游挂了」误记成「不支持工具」', vm.runInContext('toolCapState', sandbox)(pv, 'alias') === 'unknown');
+    ok('抛的是最后一条通道的错误（最接近真相）', /upstream down/.test(e.message), e.message);
+    ok('三条通道都试过', requests.length === 3, 'requests=' + requests.length);
+    ok('不把「上游挂了」误记成「原生工具不可用」', vm.runInContext('toolCapState', sandbox)(pv, 'alias') === 'unknown');
   });
 })
-// ---------- 已经产生副作用就不重发 ----------
+// ---------- 已经产生副作用就不重来 ----------
 .then(function() {
-  console.log('\n[降级 · 工具已执行后失败]');
+  console.log('\n[降级链 · 工具已执行后失败]');
   requests = []; responses = [];
   var pv = { id: 'pv1', models: [{ id: 'alias', upstreamId: 'real-model' }] };
   sandbox.settings.toolCapability = {};
   var execCount = 0;
-  // 轮 1：调工具 → 轮 2：503
+  // 轮 1：原生通道调工具 → 轮 2：503
   responses.push(makeResponse([
     sse({ choices: [{ delta: { tool_calls: [{ index: 0, id: 'c1', type: 'function', function: { name: 'web_search', arguments: '{"query":"x"}' } }] } }] }),
     finish('tool_calls'), 'data: [DONE]\n\n'
@@ -380,13 +450,13 @@ console.log('\n[tool_calls 归并]');
     ok('工具跑过之后失败应当抛出（不该悄悄重来）', false);
   }, function(e) {
     ok('工具跑过之后失败 → 抛原错误', /boom/.test(e.message), e.message);
-    ok('不重发（否则重复计费）', requests.length === 2 && execCount === 1, 'requests=' + requests.length + ' exec=' + execCount);
+    ok('不换通道重来（否则重复计费）', requests.length === 2 && execCount === 1, 'requests=' + requests.length + ' exec=' + execCount);
     ok('不记能力结论（失败点不在 tools 上）', vm.runInContext('toolCapState', sandbox)(pv, 'alias') === 'unknown');
   });
 })
-// ---------- 取消不重发 ----------
+// ---------- 取消不重来 ----------
 .then(function() {
-  console.log('\n[降级 · 取消]');
+  console.log('\n[降级链 · 取消]');
   requests = []; responses = [];
   var ac = new AbortController();
   ac.abort();
@@ -397,7 +467,7 @@ console.log('\n[tool_calls 归并]');
   }).then(function() {
     ok('已取消应当抛 AbortError', false);
   }, function(e) {
-    ok('取消抛 AbortError 且不重发（只发了一次）', e && e.name === 'AbortError' && requests.length === 1,
+    ok('取消抛 AbortError 且不换通道重来', e && e.name === 'AbortError' && requests.length === 1,
       (e && e.message) + ' requests=' + requests.length);
   });
 })

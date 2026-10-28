@@ -1,6 +1,6 @@
 // ===== agent-loop.js : 带工具的对话回合引擎（v3.0.8）=====
 // 模块名：agent-loop.js
-// 版本：v2（cache-bust；v3.0.12 新增工具能力登记 + agentRunAdaptive 降级入口）
+// 版本：v3（cache-bust；v3.0.12 工具能力登记 + 降级链；v3.0.13 文本工具协议）
 // 新增日期：2026-10-28
 //
 // 职责：一轮「模型 → 工具调用 → 工具结果回填 → 再问模型」的完整循环。
@@ -27,8 +27,8 @@ var AGENT_MAX_TOOL_CALLS = 6;    // 单轮并发工具调用上限（模型偶�
 
 // ===== 工具能力登记（v3.0.12）=====
 // 为什么需要它：v3.0.8 起「联网搜索」会把整轮对话切成「带 tools 的 agent 请求」。
-//   但 tools 是**模型**能力，不是接口能力 —— 同一把 key、同一个中转站里，
-//   deepseek / claude / gpt / glm 支持 function calling，gemini 不支持。
+//   但 `tools` 是**网关/接口**的能力，不是模型的智力 —— 同一把 key、同一个中转站里，
+//   deepseek / claude / gpt / glm 收 tools，gemini 直接 503（详见下面「文本工具协议」一节）。
 //   实测 api.kkaiapi.com（2026-10-29，同一条消息、只差 tools 字段）：
 //     gemini-3.8-flash  无 tools → 200，有 tools → **503 model_temporarily_unavailable**（约 320ms 快速失败）
 //     gemini-3.5-flash  同上
@@ -37,12 +37,14 @@ var AGENT_MAX_TOOL_CALLS = 6;    // 单轮并发工具调用上限（模型偶�
 //   「看错误文案猜」—— 那套正则要求同时出现 tool 字样与 400/422，503 service_error 一条都不匹配，
 //   于是整轮对话直接死在「HTTP 503: {…}」错误气泡里，看着像「联网搜索和别的提供方冲突」。
 //
+// 记的是什么：**原生 `tools` 字段能不能用**（'no' ≠ 这个模型不会调工具，只表示要改走文本协议）。
+//
 // 三条规则（这才是「从底层理顺」的落点，别再往回退）：
-//   ① 能力**只能靠证据学**：判据是「同一轮去掉 tools 重发，成功了没有」，不是猜错误码/文案。
-//      上游怎么表达「不支持」是它的事（400/422/404/405/501/503 都见过），客户端不押这个宝。
+//   ① 能力**只能靠证据学**：判据是「同一轮换一条通道重发，成功了没有」，不是猜错误码/文案。
+//      上游怎么表达「不收 tools」是它的事（400/422/404/405/501/503 都见过），客户端不押这个宝。
 //   ② 学到的结论**要记住**（settings.toolCapability，按 provider|upstreamModel 存），
 //      否则每发一条消息都先挨一次 503 —— 那是把一次性的学习成本变成永久成本。
-//   ③ **联网是增强层，不是前置条件**：这一层任何失败都必须降级成「普通对话」，
+//   ③ **联网是增强层，不是前置条件**：这一层任何失败都必须降级（文本协议 → 纯对话），
 //      绝不能让「说话」这件事跟着失败。这是本节存在的根本理由。
 var TOOL_CAP_TTL_MS = 7 * 24 * 3600 * 1000;        // 4xx 证据：请求形状不对，是模型/路由的稳定属性，记久一点
 var TOOL_CAP_TTL_SOFT_MS = 24 * 3600 * 1000;       // 5xx 证据：也可能是上游抖动，一天后自动复验（最多一天撞一次）
@@ -438,68 +440,292 @@ async function agentRun(o) {
   };
 }
 
-// ===== 带「工具能力自适应」的一轮（v3.0.12）=====
-// 这是 chat.js 唯一该调的入口。它替调用方处理掉「这个模型到底能不能用工具」这件事：
+// ===== 文本工具协议（v3.0.13）=====
+// 为什么要有第二条工具通道：`tools` 字段是**网关**的能力，不是模型的智力。
+//   实测（2026-10-29，api.kkaiapi.com，同一条消息只差 tools 字段）：
+//     gemini-3.8-flash / gemini-3.5-flash  无 tools → 200，有 tools → 503 model_temporarily_unavailable（≈320ms）
+//     deepseek-v4.1-flash / gpt-6-luna / claude-sonnet-5 / glm-5.3  有无 tools 都 200
+//   同一批 gemini 在别的 harness 里照样能发起 tool call —— 说明**模型会调工具，是这条网关不收 tools 字段**。
+//   那就别指望它：客户端自己补一层 —— 把工具说明写进提示词，让模型用一段固定格式的**文本**发起调用，
+//   我们解析这段文本、执行、再把结果喂回去。效果与 function calling 等价，只是协议从 JSON 字段换成文本，
+//   任何会说话的模型都能用（GPT-3.5 级也够）。
 //
-//   已知不能用（cap='no'） → 直接发不带 tools 的普通请求，连试都不试（不再白撞一次 503）
-//   未知 / 已知能用       → 正常带工具跑
-//        失败且**一个字都没产出** → 用同样的上下文、去掉 tools 重发一次：
-//            · 重发成功 → 结论成立，记下 cap='no'，本轮按普通对话收尾（对话不死）
-//            · 重发失败 → 说明是这个模型/上游本身不行，把**重发**的错误抛出去（更真实），不记任何结论
-//        失败但已经产出过内容（含已执行过工具）→ 按真实中断抛出去，保留半截内容，**不重发**
-//          （重发会重复计费、也会把用户已经看到的内容推翻重来）
+// 三条纪律：
+//   ① 工具清单**只有一份真相**：从 WEB_TOOL_DEFS 生成（§4.24：两处实现必然分叉）。
+//   ② 调用块**不能漏到界面上**：流式输出时按标记「拦截 + 尾巴回退」，用户只看到真正的回答。
+//   ③ 它是**降级链中间那一环**，不是终点：文本协议也失败时还有纯对话兜底（§3.2 第 10 条）。
+var TOOL_CALL_OPEN = '<tool_call>';
+var TOOL_CALL_CLOSE = '</tool_call>';
+
+function agentCompactParams(fnDef) {
+  var p = (fnDef && fnDef.parameters) || {};
+  var props = p.properties || {};
+  var req = p.required || [];
+  var parts = [];
+  for (var k in props) {
+    if (!Object.prototype.hasOwnProperty.call(props, k)) continue;
+    var d = props[k] || {};
+    parts.push(k + ':' + (d.type || 'string') + (req.indexOf(k) >= 0 ? '(必填)' : '(可选)'));
+  }
+  return '{' + parts.join(', ') + '}';
+}
+
+// 从 WEB_TOOL_DEFS 生成协议说明；没有 WEB_TOOL_DEFS 时返回空串（调用方据此跳过文本通道）。
+function agentToolProtocolPrompt(round, maxRounds) {
+  var defs = (typeof WEB_TOOL_DEFS !== 'undefined' && Array.isArray(WEB_TOOL_DEFS)) ? WEB_TOOL_DEFS : null;
+  if (!defs || !defs.length) return '';
+  var lines = [];
+  lines.push('【工具调用协议】你可以联网。需要实时或不确定的信息时用下面的工具；常识、推理、写作、代码直接回答，不要调用。');
+  for (var i = 0; i < defs.length; i++) {
+    var f = defs[i] && (defs[i].function || defs[i]);
+    if (!f || !f.name) continue;
+    lines.push('- ' + f.name + ' ' + agentCompactParams(f) + '：' + (f.description || ''));
+  }
+  lines.push('');
+  lines.push('调用方式：**只输出下面这一段，前后不要有任何其它文字**：');
+  lines.push(TOOL_CALL_OPEN);
+  lines.push('{"name":"web_search","arguments":{"query":"要搜的词"}}');
+  lines.push(TOOL_CALL_CLOSE);
+  lines.push('客户端会执行它，并把结果作为下一条消息发给你。拿到结果后可以继续调用（再来一个同样的块），也可以直接作答；作答时不要再输出这个块。');
+  if (round >= maxRounds) lines.push('【这是最后一次机会：不要再调用工具，直接用已有材料作答。】');
+  return lines.join('\n');
+}
+
+// 环境信息（只有日期，**不带时分**）：联网场景里模型必须先知道"今天"是哪天，
+//   否则它会拿训练数据里的某个日期去拼搜索词 —— 实测 gemini 把"今天的科技新闻"搜成了
+//   「今日科技新闻 2024年5月22日」，拿回一堆两年前的旧闻还当成今天的。
+// 为什么只放日期：§4.24 的教训是「逐轮会变的东西绝不能进 system」—— 带上时分等于每分钟
+//   换一次前缀，缓存全废；日期一天变一次，代价可以接受。
+function agentEnvLine() {
+  var d = new Date();
+  function p2(n) { return n < 10 ? '0' + n : String(n); }
+  return '当前日期：' + d.getFullYear() + '-' + p2(d.getMonth() + 1) + '-' + p2(d.getDate()) +
+    '（设备本地时间）。搜索时不要自己编日期：需要「今天 / 最近」就直接写这些词，或用 after: 运算符。';
+}
+
+// 把一行说明并进**第一条 system**（不新开 system 消息，理由同 agentWithProtocol）。
+function agentWithEnv(msgs, line) {
+  var out = (msgs || []).slice();
+  if (!line) return out;
+  if (out[0] && out[0].role === 'system') {
+    out[0] = Object.assign({}, out[0], { content: ((out[0].content || '') + '\n\n' + line).trim() });
+  } else {
+    out.unshift({ role: 'system', content: line });
+  }
+  return out;
+}
+
+// 把协议说明并进**第一条 system**（不新开一条 system 消息：不少网关只认开头那一条，
+// 多一条 system 会被静默丢掉甚至报错 —— 这个坑在语音侧已经踩过）。
+function agentWithProtocol(msgs, proto) {
+  return agentWithEnv(msgs, proto);
+}
+
+// 流式拦截器：标记之前的文字照常往外送，标记之后一律扣住（那是给客户端看的，不是给用户看的）。
+// 尾巴留 OPEN.length-1 个字符不发 —— 否则「<tool_ca」这种半个标记会被当正文漏出去。
+function agentCreateCallSplitter(onText) {
+  var buf = '';
+  var blocked = false;
+  var sent = '';
+  var keep = TOOL_CALL_OPEN.length - 1;
+  function emit(t) { if (!t) return; sent += t; if (onText) onText(t); }
+  return {
+    push: function(chunk) {
+      if (blocked || !chunk) return;
+      buf += chunk;
+      var idx = buf.toLowerCase().indexOf(TOOL_CALL_OPEN);
+      if (idx >= 0) {
+        emit(buf.slice(0, idx));
+        buf = buf.slice(idx);
+        blocked = true;
+        return;
+      }
+      if (buf.length > keep) {
+        var cut = buf.length - keep;
+        emit(buf.slice(0, cut));
+        buf = buf.slice(cut);
+      }
+    },
+    finish: function() {
+      if (!blocked) { var t = buf; buf = ''; emit(t); }
+      return blocked;
+    },
+    text: function() { return sent; }
+  };
+}
+
+// 解析模型吐出来的调用块。宽松一点：name/arguments 是标准形状，但也接受 args/parameters/input
+// 与 OpenAI 那种 {function:{name,arguments}} 嵌套 —— 模型不是编译器，格式差一点不该整轮作废。
+function agentParseToolCalls(text) {
+  var s = String(text || '');
+  var out = [];
+  function absorb(raw) {
+    raw = String(raw || '').trim().replace(/^```(?:json)?\s*/i, '').replace(/```\s*$/, '').trim();
+    var j = null;
+    try { j = JSON.parse(raw); } catch (e) { return; }
+    var arr = Array.isArray(j) ? j : [j];
+    for (var i = 0; i < arr.length; i++) {
+      var one = arr[i] || {};
+      var fn = one.function || one;
+      var name = fn.name || fn.tool || fn.tool_name || '';
+      if (!name) continue;
+      var args = fn.arguments;
+      if (args === undefined) args = fn.args;
+      if (args === undefined) args = fn.parameters;
+      if (args === undefined) args = fn.input;
+      if (typeof args === 'string') { try { args = JSON.parse(args); } catch (e2) { args = {}; } }
+      out.push({ id: 'txt_' + out.length, name: String(name), args: args || {} });
+    }
+  }
+  var re = /<tool_call>([\s\S]*?)<\/tool_call>/gi;
+  var m;
+  while ((m = re.exec(s)) !== null) absorb(m[1]);
+  if (!out.length) {
+    // 没闭合（被 max_tokens 截断）：把标记之后的尾巴拿来试一次
+    var oi = s.toLowerCase().lastIndexOf(TOOL_CALL_OPEN);
+    if (oi >= 0) absorb(s.slice(oi + TOOL_CALL_OPEN.length).replace(/<\/tool_call>[\s\S]*$/i, ''));
+  }
+  return out;
+}
+
+// 文本协议通道：一轮「模型 → 解析文本调用 → 工具 → 回填 → 再问模型」。
+// 返回结构与 agentRun 一致（content 是**跨轮累计的可见正文**，不含被扣住的调用块）。
+async function agentTextRun(o) {
+  o = o || {};
+  var msgs = (o.messages || []).slice();
+  var maxRounds = Math.max(1, o.maxRounds || AGENT_MAX_ROUNDS);
+  var totalContent = '';
+  var totalReasoning = '';
+  var usedTools = [];
+  var finishReason = null;
+  var rounds = 0;
+
+  for (var round = 1; round <= maxRounds; round++) {
+    rounds = round;
+    var proto = agentToolProtocolPrompt(round, maxRounds);
+    var splitter = agentCreateCallSplitter(function(t) { if (o.onDelta) o.onDelta('content', t); });
+    var turn = await agentStreamOnce({
+      req: o.buildRequest(agentWithProtocol(msgs, proto), null),   // 关键：**不带 tools 字段**
+      signal: o.signal,
+      onDelta: function(kind, text) {
+        if (kind === 'content') splitter.push(text);
+        else { totalReasoning += text; if (o.onDelta) o.onDelta('reasoning', text); }
+      }
+    });
+    finishReason = turn.finishReason || finishReason;
+    splitter.finish();
+    totalContent += splitter.text();
+
+    var calls = agentParseToolCalls(turn.content);
+    if (!calls.length) {
+      return {
+        content: totalContent, reasoning: totalReasoning, toolCalls: [],
+        finishReason: finishReason, rounds: round, usedTools: usedTools, engine: 'text'
+      };
+    }
+
+    // 回填「模型自己说过的话」（含那个块）：它下一轮要能看见自己刚才发了什么
+    msgs.push({ role: 'assistant', content: turn.content || '' });
+    var results = [];
+    var use = calls.slice(0, AGENT_MAX_TOOL_CALLS);
+    for (var i = 0; i < use.length; i++) {
+      var call = use[i];
+      call.parsedArgs = call.args || {};
+      if (o.onToolStart) o.onToolStart(call);
+      var result;
+      try {
+        result = await o.execTool(call.name, call.parsedArgs);
+      } catch (e) {
+        result = { text: '工具执行失败：' + ((e && e.message) || e), meta: { ok: false } };
+      }
+      if (!result || typeof result.text !== 'string') result = { text: '（工具没有返回内容）', meta: {} };
+      usedTools.push({ name: call.name, args: call.parsedArgs, ok: !(result.meta && result.meta.ok === false), meta: result.meta || {} });
+      if (o.onToolEnd) o.onToolEnd(call, result);
+      results.push('工具「' + call.name + '」的结果：\n' + result.text);
+    }
+    // 结果用 role:'user' 回填（不用 role:'tool'）：走文本协议的多半是不认 tools 字段的网关，
+    //   role:'tool' 它们同样可能不认；用 user 是最兼容的写法。
+    msgs.push({
+      role: 'user',
+      content: results.join('\n\n') + '\n\n（要继续调用工具就再输出一个 ' + TOOL_CALL_OPEN + ' 块；否则直接用上面的材料作答。）'
+    });
+  }
+
+  return {
+    content: totalContent, reasoning: totalReasoning, toolCalls: [],
+    finishReason: finishReason, rounds: rounds, usedTools: usedTools, engine: 'text'
+  };
+}
+
+// ===== 带「工具通道自适应」的一轮（v3.0.12 / v3.0.13）=====
+// chat.js 唯一该调的入口。它替调用方处理掉「这个模型/这条网关到底怎么用工具」这件事。
 //
-// 返回 agentRun 的结果，另加两个字段：
-//   toolsDropped  本轮是否降级成了「无工具」请求
-//   droppedReason 'known'（事先就知道）| 'probe'（这一轮试出来的）
-// 参数：与 agentRun 相同，另加 provider / model（用于能力登记）与 onToolsDropped(err)。
+// 通道链（从强到弱，失败只降一级，**绝不把整轮打死**）：
+//   ① native —— 标准 function calling（`tools` 字段），效果最好
+//   ② text   —— 文本工具协议（本文件上半部分），给「不收 tools 字段」的网关用
+//   ③ plain  —— 纯对话，一条工具都不给（最后的安全网）
+//
+// 已知 native 不行（cap='no'）→ 直接从 ② 开始，不再白撞一次 503。
+// 每一级失败时：
+//   · **已经产出过内容/跑过工具** → 立刻抛（重来会重复计费、也会推翻用户已看到的东西）
+//   · **一个字都没产出** → 记下错误，降一级继续
+// 降级成功后记一条能力结论（证据 = 上一级的错误），下次直接从合适的通道开始。
+//
+// 返回 agentRun 的结果，另加：
+//   engine            'native' | 'text' | 'plain'
+//   nativeUnsupported 本轮才试出来「原生工具不可用」（用来弹一次提示 / 留一条说明）
+// 参数：与 agentRun 相同，另加 provider / model（能力登记）与 onToolsDropped(err, engine)。
 async function agentRunAdaptive(o) {
   o = o || {};
   var hasKey = !!(o.provider && o.model);
   var cap = hasKey ? toolCapState(o.provider, o.model) : 'unknown';
-  var produced = false;
+  var hasTools = !!(o.tools && o.tools.length);
+  var hasProto = !!agentToolProtocolPrompt(1, 99);
 
-  function markProduced() { produced = true; }
-  function onDelta(kind, text) { markProduced(); if (o.onDelta) o.onDelta(kind, text); }
+  var chain;
+  if (!hasTools) chain = ['plain'];
+  else if (cap === 'no') chain = hasProto ? ['text', 'plain'] : ['plain'];
+  else chain = hasProto ? ['native', 'text', 'plain'] : ['native', 'plain'];
 
-  var base = Object.assign({}, o, {
-    onDelta: onDelta,
-    // 工具一开跑就算「已经产生副作用」：再重发一次等于再搜一次、再计一次费
-    onToolStart: function(call) { markProduced(); if (o.onToolStart) o.onToolStart(call); }
-  });
+  var lastErr = null;
+  var nativeTried = false;
+  // 三条通道共用同一份「环境信息」（日期）。放在 buildRequest 外面统一加，
+  //   避免原生/文本两条路各写一遍（§4.24：两处实现必然分叉）。
+  var envLine = agentEnvLine();
+  var rawBuild = o.buildRequest;
 
-  function plain() {
-    // 无工具 = 只有一轮、不传 tools（buildRequest 收到 null 自然不带）
-    return agentRun(Object.assign({}, base, { tools: null, maxRounds: 1 }));
-  }
+  for (var i = 0; i < chain.length; i++) {
+    var eng = chain[i];
+    var produced = false;
+    var opts = Object.assign({}, o, {
+      buildRequest: function(msgs, tools) { return rawBuild(agentWithEnv(msgs, envLine), tools); },
+      onDelta: function(kind, text) { produced = true; if (o.onDelta) o.onDelta(kind, text); },
+      // 工具一开跑就算「已经产生副作用」：再重来一次等于再搜一次、再计一次费
+      onToolStart: function(call) { produced = true; if (o.onToolStart) o.onToolStart(call); }
+    });
 
-  if (cap === 'no') {
-    var r0 = await plain();
-    r0.toolsDropped = true;
-    r0.droppedReason = 'known';
-    return r0;
-  }
+    var res;
+    try {
+      if (eng === 'native') { nativeTried = true; res = await agentRun(opts); }
+      else if (eng === 'text') res = await agentTextRun(opts);
+      else res = await agentRun(Object.assign({}, opts, { tools: null, maxRounds: 1 }));
+    } catch (e) {
+      if (e && e.name === 'AbortError') throw e;   // 用户打断：原样抛，不要降级重来
+      if (produced) throw e;                       // 已经出过东西：真实中断，保留半截
+      lastErr = e;
+      continue;
+    }
 
-  var res;
-  try {
-    res = await agentRun(base);
-    res.toolsDropped = false;
+    res.engine = eng;
+    // 原生通道试过且失败、后面某条通道成功了 → 结论成立（有证据，不是猜）
+    if (nativeTried && eng !== 'native') {
+      if (hasKey) toolCapLearn(o.provider, o.model, false, (lastErr && lastErr.message) || 'native tools failed', lastErr && lastErr.status);
+      res.nativeUnsupported = true;
+      res.nativeError = lastErr;
+      if (o.onToolsDropped) { try { o.onToolsDropped(lastErr, eng); } catch (e3) {} }
+    }
     return res;
-  } catch (e) {
-    if (!e || e.name === 'AbortError') throw e;      // 用户打断：原样抛，不要重发
-    if (produced) throw e;                            // 已经出过东西：真实中断，保留半截
-    if (!o.tools || !o.tools.length) throw e;         // 本来就没给工具，没什么可降级的
-
-    var ok = null;
-    var probeErr = null;
-    try { ok = await plain(); } catch (e2) { probeErr = e2; }
-    if (!ok) throw (probeErr || e);                   // 去掉工具也不行 → 是这个模型/上游的问题
-
-    if (hasKey) toolCapLearn(o.provider, o.model, false, (e && e.message) || 'tools request failed', e && e.status);
-    ok.toolsDropped = true;
-    ok.droppedReason = 'probe';
-    ok.droppedError = e;
-    if (o.onToolsDropped) { try { o.onToolsDropped(e); } catch (e3) {} }
-    return ok;
   }
+
+  throw lastErr || new Error('请求失败');
 }

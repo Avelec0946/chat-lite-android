@@ -1236,17 +1236,20 @@ async function executeNativeRequest(req, assistantMsg, opts) {
 
 // 工具轨迹的 HTML。默认展开 —— 用户最想知道的就是「它到底搜了什么词」，
 // 折起来等于把这件事藏了（和来源卡片不一样：那是结果，这是决策过程）。
-// v3.0.12：多一种条目 status='skipped' —— 「本轮没联网，因为模型不支持工具调用」。
-//   它必须留在气泡里（而不是只弹一个会消失的 toast）：用户看到一条没有来源卡片的回答时，
+// v3.0.12：多两种条目 ——
+//   status='skipped' 本轮**一条工具都没走通**（纯对话兜底），标题变「联网搜索未生效」
+//   status='note'    说明性文字（例如「本接口不收原生 tools，已改用文本协议」），不影响标题
+//   它们必须留在气泡里（而不是只弹一个会消失的 toast）：用户看到一条没有来源卡片的回答时，
 //   唯一能解释「为什么没搜」的地方就是这里。
 function agentTraceHtml(trace) {
   if (!trace || !trace.length) return '';
-  var skipped = 0;
+  var skipped = 0, called = 0;
   var items = trace.map(function(t) {
-    if (t.status === 'skipped') {
-      skipped++;
+    if (t.status === 'skipped' || t.status === 'note') {
+      if (t.status === 'skipped') skipped++;
       return '<div class="agent-trace-note">' + escapeHtml(t.summary || '本轮未联网') + '</div>';
     }
+    called++;
     var name = t.name === 'fetch_url' ? '抓取网页' : (t.name === 'web_search' ? '搜索' : String(t.name));
     var arg = '';
     var a = t.args || {};
@@ -1262,8 +1265,7 @@ function agentTraceHtml(trace) {
       '<span class="agent-trace-st">' + status + '</span>' +
     '</div>';
   }).join('');
-  var called = trace.length - skipped;
-  var head = called > 0 ? ('已调用 ' + called + ' 个工具') : '联网搜索未生效';
+  var head = called > 0 ? ('已调用 ' + called + ' 个工具') : (skipped > 0 ? '联网搜索未生效' : '联网搜索');
   return '<details class="agent-trace" open>' +
     '<summary class="agent-trace-summary">' + head + '</summary>' +
     '<div class="agent-trace-list">' + items + '</div>' +
@@ -1375,9 +1377,14 @@ async function runAgentChat(provider, conv, context, assistantMsg) {
         }
         renderTrace();
       },
-      onToolsDropped: function(err) {
-        // 这一轮才试出来的（事先不知道）：说一次，别每次发消息都念
-        showToast('「' + (conv.model || '当前模型') + '」不支持工具调用，联网搜索本轮已跳过（对话照常进行）', 'warn');
+      onToolsDropped: function(err, engine) {
+        // 这一轮才试出来的（事先不知道）：说一次，别每次发消息都念。
+        //   engine='text' → 联网照常，只是换了通道；engine='plain' → 这轮真没搜。
+        if (engine === 'text') {
+          showToast('「' + (conv.model || '当前模型') + '」这条接口不收原生工具调用，已自动改用文本协议（联网照常）', 'success');
+        } else {
+          showToast('「' + (conv.model || '当前模型') + '」这条通道这次没走通，本轮按普通对话回答（联网未生效）', 'warn');
+        }
       },
       signal: state.abortController ? state.abortController.signal : null
     });
@@ -1397,13 +1404,21 @@ async function runAgentChat(provider, conv, context, assistantMsg) {
     throw e;   // 真错误交给 sendFromMessage 的 catch（保持原来的错误气泡行为）
   }
 
-  // 降级过：把「本轮没联网」这件事写进气泡（toast 会消失，气泡不会）
-  if (res.toolsDropped) {
+  // 降级过：把「这一轮用的是哪条工具通道」写进气泡（toast 会消失，气泡不会）
+  if (res.engine === 'plain') {
     trace.push({
       name: 'web_search',
       args: {},
       status: 'skipped',
-      summary: '本轮未联网：该模型不支持工具调用（换一个支持工具调用的模型即可联网）'
+      summary: '本轮未联网：工具通道这次没走通（可稍后重试）'
+    });
+    renderTrace();
+  } else if (res.nativeUnsupported) {
+    trace.push({
+      name: 'web_search',
+      args: {},
+      status: 'note',
+      summary: '本接口不收原生工具调用，已自动改用文本协议（联网照常，工具调用记录见下方）'
     });
     renderTrace();
   }
