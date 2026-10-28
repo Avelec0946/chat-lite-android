@@ -222,7 +222,8 @@ html,body{height:100%;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Ro
 .btn-send:disabled{opacity:.4;cursor:not-allowed}
 
 /* ===== File preview ===== */
-.file-preview{display:flex;gap:8px;flex-wrap:wrap;padding:4px 8px;margin-bottom:4px}
+/* v3.0.6: 上/左内边距留出缩略图右上角那枚移除按钮的位置（否则会被上面一行压住） */
+.file-preview{display:flex;gap:8px;flex-wrap:wrap;padding:10px 12px 4px;margin-bottom:4px}
 .file-tag{background:var(--bg3);padding:4px 10px;border-radius:12px;font-size:13px;display:flex;align-items:center;gap:4px;max-width:200px;word-break:break-all}
 .file-tag .remove-file{background:none;border:none;cursor:pointer;font-size:14px;color:var(--text2);padding:0 2px}
 .file-tag .remove-file:hover{color:var(--text)}
@@ -400,18 +401,18 @@ body.dark .chat-bg::after{background:rgba(0,0,0,var(--bg-overlay,0.35))}
 .provider-test-result.warn{color:var(--warning)}
 
 /* ===== Image thumbnail in file preview ===== */
-.file-tag-image{display:inline-flex;align-items:center;gap:6px}
-.file-thumb{width:48px;height:48px;object-fit:cover;border-radius:4px;border:1px solid var(--border)}
-
-/* ===== v3.0.6: 消息里的图片附件（缩略图 + 文件名） =====
-   只管消息气泡这一处，输入区那排 file-tag 不受影响（那边宽度够，不需要放宽）。
-   缩略图尺寸直接沿用上面的 .file-thumb（48×48），和生图「参考图」那一排一致：
-   文本对话里只要认得出是哪张图就够了，不把整张图铺进气泡。
-   下面两条是排版细节：文件名可以折，但「(471.7KB)」不能折 —— .file-tag 的 word-break:break-all
-   会把括号里的大小拆成两行，看着像坏掉了。 */
-.message .file-tag-image{max-width:min(78vw,260px)}
-.message .file-tag-image .file-tag-name{min-width:0}
-.message .file-tag-image .file-tag-size{white-space:nowrap;flex-shrink:0;opacity:.75}
+/* v3.0.6: 图片附件在 UI 里只显示画面 —— 不显示文件名。
+   56px 方块 + 圆角 10，输入区与消息气泡共用这一个类（两处必须一样大，否则同一条消息
+   在"待发送"和"已发送"两种状态下会一大一小）。 */
+.file-thumb{width:56px;height:56px;object-fit:cover;border-radius:10px;border:1px solid var(--border);display:block;box-shadow:0 1px 2px rgba(0,0,0,.22)}
+/* 输入区的待发送缩略图：角上一个移除按钮（不占一行文字位置） */
+.file-thumb-chip{position:relative;display:inline-block;line-height:0}
+.file-thumb-chip .thumb-x{position:absolute;top:-6px;right:-6px;width:20px;height:20px;border-radius:50%;border:none;background:var(--danger);color:#fff;font-size:11px;line-height:1;display:flex;align-items:center;justify-content:center;padding:0;cursor:pointer;box-shadow:0 1px 3px rgba(0,0,0,.35)}
+/* 消息气泡里的缩略图：横向排开，多了自动换行 */
+.msg-thumbs{display:flex;flex-wrap:wrap;gap:6px;margin-bottom:4px}
+/* 占位中的灰块（正在压缩/读取）—— 尺寸与成图一致，不跳版；也不给发送 */
+.file-thumb-wait{background:var(--bg3);border:1px solid var(--border);animation:thumbPulse 1s ease-in-out infinite}
+@keyframes thumbPulse{0%,100%{opacity:.5}50%{opacity:.9}}
 
 /* ===== Capacitor (APK) mode adjustments ===== */
 /* APK 模式下隐藏仅 Web 需要的设置项（如直连模式开关） */

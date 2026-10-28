@@ -147,24 +147,26 @@ function renderContent(msg) {
   }
 
   // File attachments
-  // v3.0.6: 图片附件在小标签里带一个 48px 缩略图（原来只有「文件名 (大小)」一行字，
-  //   发图时看不出自己发的是哪张）。复用输入区那套 .file-tag-image / .file-thumb，
-  //   尺寸与生图「参考图」那一排一致 —— 文本对话里只要认得出是哪张图就够了，
-  //   不把整张图铺进气泡（那会把一条消息撑到半屏）。
-  //   取图直接切 f.base64（主图，最长边 1024），48px 的方块够用；
-  //   mimeType 优先用记录里的，缺了就按 JPEG —— 压缩管线输出的就是 JPEG。
+  // v3.0.6: 图片附件只显示画面，**不带文件名**。看图的人看的是画面，`bili_poster-1793….gif`
+  //   这种名字既看不懂、又会让每条附件占两行（4 张图就堆掉大半屏）。
+  //   图片并成一行 56px 方块（横向排开，多了自动换行），文本附件仍是「文件名 (大小)」的标签
+  //   —— 文本附件的名字是它唯一的身份，不能省。
+  //   取图直接用 msg.files[].base64：那本来就是压缩到最长边 1024 的 JPEG，56px 方块够用，
+  //   且不新增任何字段（data.json 体积不变）。
   if (msg.files && msg.files.length > 0) {
-    html += msg.files.map(f => {
-      if (f && f.isImage) {
+    const imgs = msg.files.filter(f => f && f.isImage);
+    const docs = msg.files.filter(f => f && !f.isImage);
+    if (imgs.length > 0) {
+      html += '<div class="msg-thumbs">' + imgs.map(f => {
         const src = 'data:' + (f.mimeType || 'image/jpeg') + ';base64,' + (f.base64 || f.content || '');
-        // 名字与大小分成两个 span：样式里让大小不折行，否则 "(471.7KB)" 会被拆成两行
-        return `<div class="file-tag file-tag-image" style="margin-bottom:4px">` +
-          `<img class="file-thumb" src="${src}" alt="" />` +
-          `<span class="file-tag-name">${escapeHtml(f.name)}</span>` +
-          `<span class="file-tag-size">(${formatSize(f.size)})</span></div>`;
-      }
-      return `<div class="file-tag" style="margin-bottom:4px">${escapeHtml(f.name)} (${formatSize(f.size)})</div>`;
-    }).join('');
+        return `<img class="file-thumb" src="${src}" alt="" />`;
+      }).join('') + '</div>';
+    }
+    if (docs.length > 0) {
+      html += docs.map(f =>
+        `<div class="file-tag" style="margin-bottom:4px">${escapeHtml(f.name)} (${formatSize(f.size)})</div>`
+      ).join('');
+    }
   }
 
   if (msg.isFileOnly) return html;
@@ -324,6 +326,8 @@ function cancelEdit(msgId) {
 async function sendMessage() {
   const text = chatInput.innerText.trim();
   if (!text && state.pendingFiles?.length === 0) return;
+  // v3.0.6: 有附件还在压缩/读取就别发 —— 否则会把空内容的占位当成附件发出去
+  if (state.pendingFiles?.some(f => f && f.loading)) return;
 
   const conv = currentConv();
   if (!conv || state.loading) return;
@@ -1642,7 +1646,8 @@ function toggleSendStop() {
 }
 function updateSendButton() {
   const hasText = chatInput.innerText.trim().length > 0;
-  const hasFiles = state.pendingFiles?.length > 0;
+  // v3.0.6: 附件先占位、再异步填内容 —— loading 中的那条还不算"可以发"
+  const hasFiles = state.pendingFiles?.some(f => f && !f.loading);
   btnSend.disabled = (!hasText && !hasFiles) || state.loading;
 }
 function setStatus(type) {

@@ -1317,41 +1317,67 @@ window.svgNodeColor = function(nodeId) {
 state.pendingFiles = [];
 
 function handleFileUpload(e) {
-  const files = e.target.files;
+  const files = Array.from(e.target.files || []);
   if (!files.length) return;
 
-  for (const file of files) {
-    if (file.type.startsWith('image/')) {
-      // Image: compress + base64
-      compressImageForUpload(file).then(function(dataUrl) {
+  // v3.0.6: 先按**用户选择的顺序**把位置占住，再逐个把内容填进去。
+  //   原来是「谁先处理完谁 push 进来」，而图片压缩（canvas 重编码）与文本读取都是异步的、
+  //   完成顺序不保证 —— 实测选 A/B/C/D 四张，缩略图排成 B/A/C/D。
+  //   以前每个格子都印文件名，顺序错了用户自己能看出来；现在只显示画面，顺序错了**完全隐形**，
+  //   而「第几张图」对模型是有意义的，所以必须按选择顺序落位。
+  const base = state.pendingFiles.length;
+  files.forEach(function (f) {
+    state.pendingFiles.push({
+      name: f.name,
+      type: f.type,
+      isImage: f.type.startsWith('image/'),
+      size: f.size,
+      loading: true,      // 占位中：界面显示灰块，且不允许发送
+      content: '',
+      base64: '',
+      mimeType: ''
+    });
+  });
+  renderFilePreview();
+
+  files.forEach(function (file, k) {
+    const slot = state.pendingFiles[base + k];
+    if (!slot) return;    // 加载途中被用户删掉了
+    const stillThere = function () { return state.pendingFiles.indexOf(slot) >= 0; };
+
+    if (slot.isImage) {
+      compressImageForUpload(file).then(function (dataUrl) {
+        if (!stillThere()) return;
+        if (!dataUrl) { state.pendingFiles.splice(state.pendingFiles.indexOf(slot), 1); renderFilePreview(); return; }
         var base64 = dataUrl.split(',')[1];
-        state.pendingFiles.push({
-          name: file.name,
-          type: file.type,
-          isImage: true,
-          base64: base64,
-          mimeType: file.type,
-          content: base64,
-          size: file.size
-        });
+        slot.base64 = base64;
+        slot.content = base64;
+        // v3.0.6 修：压缩管线（canvas.toDataURL('image/jpeg')）输出的**永远是 JPEG**，
+        //   这里原来照抄 file.type，于是发一张 PNG 截图会拼出 `data:image/png;base64,<JPEG 字节>`
+        //   —— 声明与内容不一致。Chromium 按魔数嗅探所以界面显示正常，但发给模型的
+        //   `image_url` 是同一个拼法（app.js buildFileContent / voice.js buildFileContent），
+        //   严格校验 mime 的接口可能直接拒图。声明成实际编码即可。
+        slot.mimeType = 'image/jpeg';
+        slot.loading = false;
         renderFilePreview();
       });
     } else {
-      // Text: read as text
       var reader = new FileReader();
-      reader.onload = function(ev) {
-        state.pendingFiles.push({
-          name: file.name,
-          type: file.type || 'text/plain',
-          isImage: false,
-          content: ev.target.result,
-          size: file.size
-        });
+      reader.onload = function (ev) {
+        if (!stillThere()) return;
+        slot.content = ev.target.result;
+        slot.type = slot.type || 'text/plain';
+        slot.loading = false;
+        renderFilePreview();
+      };
+      reader.onerror = function () {
+        if (!stillThere()) return;
+        state.pendingFiles.splice(state.pendingFiles.indexOf(slot), 1);
         renderFilePreview();
       };
       reader.readAsText(file);
     }
-  }
+  });
   fileInput.value = '';
 }
 
@@ -1362,11 +1388,20 @@ function renderFilePreview() {
   }
   filePreview.style.display = 'flex';
   filePreview.innerHTML = state.pendingFiles.map((f, i) => {
+    if (f.loading) {
+      // 占位中（正在压缩/读取）：灰块 + 移除按钮，尺寸与成图一致，避免"先小后大"地跳
+      return '<span class="file-thumb-chip">' +
+        '<span class="file-thumb file-thumb-wait"></span>' +
+        '<button class="remove-file thumb-x" data-idx="' + i + '" title="移除">✕</button></span>';
+    }
     if (f.isImage) {
-      return '<span class="file-tag file-tag-image">' +
-        '<img src="data:' + f.mimeType + ';base64,' + f.base64 + '" class="file-thumb" />' +
-        escapeHtml(f.name) +
-        '<button class="remove-file" data-idx="' + i + '">✕</button></span>';
+      // v3.0.6: 图片只显示画面本身。文件名对"我要发哪张图"这件事毫无帮助
+      //   （`bili_poster-1793013888251.png` 这种谁看得懂），写出来只会把每个格子撑成两行、
+      //   让 4 张图竖着堆一屏。改成 56px 方块 + 右上角移除按钮，与生图「参考图」那排同一形态，
+      //   多张时横向排开一行放得下。
+      return '<span class="file-thumb-chip">' +
+        '<img src="data:' + (f.mimeType || 'image/jpeg') + ';base64,' + (f.base64 || f.content || '') + '" class="file-thumb" alt="" />' +
+        '<button class="remove-file thumb-x" data-idx="' + i + '" title="移除">✕</button></span>';
     }
     return '<span class="file-tag">' + escapeHtml(f.name) + ' (' + formatSize(f.size) + ')' +
       '<button class="remove-file" data-idx="' + i + '">✕</button></span>';
