@@ -4781,13 +4781,12 @@
         addUserMsg(conv, text, signals);
         assistantMsg = addAssistantPlaceholder(conv);
         saveConvSafe();
-        // v3.0.7：会话标题自动命名。
-        //   ★ 通话不是"另一个应用"，它就是同一套会话 + 一层语音翻译（看板铁律）。
-        //     用户 2026-10-28 点名批评过"每次改动总把语音排除在外" —— 所以凡是文本侧
-        //     挂在「首条消息落库」上的事，这里必须同步接一次，不是例外。
-        //   位置：addUserMsg 之后（此时本轮 user 已进 activePath，auto-title 才能判定是不是首轮）。
-        //   同步返回、内部 fire-and-forget，不拖慢本轮；非首轮/已命名/用户改过名它自己会跳过。
-        if (typeof maybeAutoTitle === 'function') maybeAutoTitle(conv);
+        // v3.0.7 / v3.0.10：会话标题自动命名 —— **分两段、两个入口**。
+        //   ★ 通话不是"另一个应用"，它就是同一套会话 + 一层语音翻译（看板 §3.2 第 8 条硬约束）。
+        //   ① 这里（user 落库后）：只做**截断占位**，不发任何请求；
+        //   ② 大脑返回后（下面 callBrain 的 then 里）：才问模型要标题。
+        //   位置必须在 addUserMsg 之后 —— 本轮 user 先进 activePath，auto-title 才判得出"是不是首轮"。
+        if (typeof autoTitlePlaceholder === 'function') autoTitlePlaceholder(conv);
       }
       return callBrain(conv, text, signals, gate, function (sentence) {
         if (token !== _vc.turnId) return;
@@ -4796,6 +4795,12 @@
       }).then(function (res) {
         if (token !== _vc.turnId) throw abortErr();
         _vc.metrics.brainFirstTokenMs = res.firstTokenMs || 0;
+        // v3.0.10：大脑返回完 → 才问模型要会话标题（语音侧的「回复完成」就取这个信号）。
+        //   不用"最后一句 TTS 播完"：那只会在长回复时晚十几秒，还要再挂一层 TTS 队列的结束回调。
+        //   用 res.speech 兜底 —— 此刻 assistantMsg.content 可能还在 pipeline 里异步写入。
+        if (typeof autoTitleAfterReply === 'function') {
+          autoTitleAfterReply(conv, { content: (res && res.speech) || (assistantMsg && assistantMsg.content) || '' });
+        }
         if (!pipeline) {
           // 完全没有句子（模型两次都返回空）→ 说一句**明确是"没接上"的话**。
           //   v128 的兜底是「嗯，我在。」—— 它和模型爱说的空应答长得一模一样，

@@ -590,7 +590,10 @@ function buildContext(conv, opts) {
   const o = opts || {};
   const msgs = [];
   const sysParts = [];
-  const sb = (o.statusBar === false) ? null : effectiveStatusBar(conv);
+  // v3.0.10 {forTitle:true}：标题命名专用档位。**只降载，不改结构** ——
+  //   人设 / 强调 / 模型修饰 / 用户身份全部保留（"沉浸"的核心），
+  //   剥掉的只有"输出格式类"指令：状态栏那几条会让标题模型也吐一个 <status> 块，然后被当成标题。
+  const sb = (o.statusBar === false || o.forTitle) ? null : effectiveStatusBar(conv);
   const mp = effectiveModelPrompt(conv);
 
   // 会话级 systemPrompt
@@ -628,8 +631,15 @@ function buildContext(conv, opts) {
   for (const m of chain) {
     if (!m || m.role === 'system') continue;
     histIdx++;
-    let content = m.content;
-    content = buildFileContent(m);
+    // v3.0.10: 标题请求只读"存在与数量"（图片 → ［图片 N 张］、附件 → ［附件：名字 (大小)］、
+    //   正文各截 800 字）。理由不是省钱，是**会不会失败** —— 首条带 10 张图时原样复用
+    //   上下文会再走一次多模态甚至超限。降载逻辑只有 atDigestForTitle 一处。
+    let content;
+    if (o.forTitle && typeof atDigestForTitle === 'function') {
+      content = atDigestForTitle(m);
+    } else {
+      content = buildFileContent(m);
+    }
     msgs.push({ role: m.role, content });
 
     // Mid-context injection: every 4 history messages, capped at 5 reminders
@@ -1378,12 +1388,13 @@ async function sendFromMessage(context) {
   const conv = currentConv();
   if (!conv) return;
 
-  // v3.0.7: 会话标题自动命名。
-  //   放在这里而不是 newChat()：新建时还没有任何消息，没东西可概括。
-  //   放在这里而不是 sendMessage()：编辑重发 / 重试 / 以后接的语音都从这条路径进来，
-  //   放一处就全覆盖（auto-title.js 内部自己判定"是不是首轮"，不是首轮直接返回）。
-  //   同步调用、内部 fire-and-forget —— 标题请求再慢也不许拖住本轮聊天。
-  if (typeof maybeAutoTitle === 'function') maybeAutoTitle(conv);
+  // v3.0.7 / v3.0.10: 会话标题自动命名 —— **分两段，两个入口**。
+  //   ① 这里（发送时）：只做**截断占位**（首条消息前 16 字），不发任何请求。
+  //      作用是不让用户在等待期间盯着「对话 13」，也不需要它知道标题什么时候会变。
+  //   ② 收尾（finally，见本函数末尾）：autoTitleAfterReply —— 回复完成后才问模型要标题，
+  //      这样概括的是"这一轮聊成了什么"而不是"你问了什么"。
+  //   放这两处而不是 newChat()：新建时还没有任何消息，没东西可概括。
+  if (typeof autoTitlePlaceholder === 'function') autoTitlePlaceholder(conv);
 
   state.loading = true;
   // Create AbortController for this request
@@ -1591,6 +1602,11 @@ async function sendFromMessage(context) {
     state.abortController = null;
     updateSendButton();
     toggleSendStop();
+    // v3.0.10: 回复完成 → 才问模型要会话标题。
+    //   为什么这个 finally 就是**文本侧唯一的收尾点**：web 流式 / APK 真流式 / APK 非流式 /
+    //   v3.0.8 的 agent 路径 / 报错 / 用户中断 —— 它们的 return 全都写在 try 里，必然经过这里。
+    //   有内容才命名（打断了但有半截也算）；空回复或出错时保留发送时那个截断占位。
+    if (typeof autoTitleAfterReply === 'function') autoTitleAfterReply(conv, assistantMsg);
     renderMessages();
     scrollToBottom();
   }
