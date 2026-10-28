@@ -211,6 +211,12 @@ function maybeAutoTitle(conv) {
     if (!conv) return;
     if (!atCfg().enabled) return;                 // 用户关掉了这个功能
     if (conv.titleSetByUser) return;              // 用户自己起过名，永不再动
+    // ★ 只对**新建**会话生效（newConversation 落的标记）。
+    //   为什么必须卡这一条：导入的老会话、升级前就存在的会话，标题是「对话 7」，
+    //   而老版本没有 titleSetByUser 这个字段 —— 用户当年手改的名字早就无从分辨了。
+    //   一旦让它们也进入自动命名，就会出现「编辑一条老消息重发，会话被悄悄改名」。
+    //   老会话想要新名字，走长按重命名（那才是他明确表达的意思）。
+    if (conv.titleAutoEligible !== true) return;
     var meta = conv.titleAuto || {};
     if (meta.done) return;                        // 只做一次
 

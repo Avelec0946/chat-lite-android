@@ -119,7 +119,8 @@ function makeConv(msgs, opts) {
     var id = uid();
     map[id] = {
       id: id, role: m.role, content: m.content || '', parentId: parentId,
-      children: [], title: '', files: m.files || [], versions: [], activeVersion: 0
+      children: [], title: '', files: m.files || [], versions: [{ content: m.content || '', timestamp: Date.now(), reason: m.reason || 'original' }], activeVersion: 0,
+      source: m.source || ''
     };
     if (parentId) map[parentId].children.push(id);
     path_.push(id);
@@ -130,6 +131,8 @@ function makeConv(msgs, opts) {
     model: 'deepseek-v4-flash', providerId: 'p1',
     rootId: null, activePath: path_, messageMap: map
   };
+  // v3.0.7: 新建会话带 titleAutoEligible；eligible:false 用来模拟"导入的老会话"
+  if (opts.eligible !== false) conv.titleAutoEligible = true;
   if (opts.titleSetByUser) conv.titleSetByUser = true;
   if (opts.titleAuto) conv.titleAuto = opts.titleAuto;
   return conv;
@@ -312,6 +315,27 @@ console.log('\n[主流程]');
   sandbox.maybeAutoTitle(c13);
   await wait(30);
   ok('会话已删除 → 标题不动', c13.title === '对话 3', c13.title);
+
+  // 15) 语音通话首条（source:'voice'，versions.reason='voice'）→ 同样命名
+  //     ★ 通话不是另一个应用：同一套会话 + 一层语音翻译，文本侧挂"首条消息落库"的事必须同步接进来。
+  //       这条用例就是钉住它 —— 谁要是给 atTextOf 加个 role/source 过滤，这里会红。
+  reset();
+  var c15 = makeConv([{ role: 'user', content: '今天外面下雨了吗我看窗外有点阴', source: 'voice', reason: 'voice' }]);
+  sandbox.state.conversations = [c15];
+  responses.push({ body: { choices: [{ message: { content: '问天气' } }] } });
+  sandbox.maybeAutoTitle(c15);
+  ok('语音首条 → 同步截断占位', c15.title === '今天外面下雨了吗我看窗外有点阴', c15.title);
+  await wait(40);
+  ok('语音首条 → 模型标题覆盖', c15.title === '问天气', c15.title);
+
+  // 16) 导入的老会话（没有 titleAutoEligible）→ 一律不碰
+  reset();
+  var c16 = makeConv([{ role: 'user', content: '老会话里的一条消息' }], { eligible: false, title: '对话 7' });
+  sandbox.state.conversations = [c16];
+  sandbox.maybeAutoTitle(c16);
+  await wait(40);
+  ok('老会话（无 titleAutoEligible）→ 不改名、不发请求',
+    c16.title === '对话 7' && calls.length === 0, c16.title + '/' + calls.length);
 
   // 14) 没 provider / 没 key → 留在截断式，不抛异常
   reset();

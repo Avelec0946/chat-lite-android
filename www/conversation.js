@@ -82,6 +82,11 @@ function newConversation() {
     // v3.0.5: 联网搜索的初值跟随全局「新会话默认开启」。老会话没有这个字段 = 关，
     //   所以这里必须显式落一个布尔值，否则新会话会永远停在「未设置」。
     webSearch: (typeof settings !== 'undefined' && settings && settings.webSearch && settings.webSearch.defaultOn === true),
+    // v3.0.7: 只有**新建**会话才参与自动命名（见 auto-title.js）。
+    //   老会话（导入的、升级前就有的）没有这个标记 → 永远不会被自动改名。
+    //   这不只是防御：老版本没有 titleSetByUser 字段，用户当年手改过的名字已经无从分辨，
+    //   让它们进自动命名就会在「编辑老消息重发」时被悄悄覆盖。
+    titleAutoEligible: true,
     rootId: msgId,
     activePath: [msgId],
     messageMap: { [msgId]: rootMsg },

@@ -4781,6 +4781,13 @@
         addUserMsg(conv, text, signals);
         assistantMsg = addAssistantPlaceholder(conv);
         saveConvSafe();
+        // v3.0.7：会话标题自动命名。
+        //   ★ 通话不是"另一个应用"，它就是同一套会话 + 一层语音翻译（看板铁律）。
+        //     用户 2026-10-28 点名批评过"每次改动总把语音排除在外" —— 所以凡是文本侧
+        //     挂在「首条消息落库」上的事，这里必须同步接一次，不是例外。
+        //   位置：addUserMsg 之后（此时本轮 user 已进 activePath，auto-title 才能判定是不是首轮）。
+        //   同步返回、内部 fire-and-forget，不拖慢本轮；非首轮/已命名/用户改过名它自己会跳过。
+        if (typeof maybeAutoTitle === 'function') maybeAutoTitle(conv);
       }
       return callBrain(conv, text, signals, gate, function (sentence) {
         if (token !== _vc.turnId) return;
