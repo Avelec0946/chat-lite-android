@@ -529,7 +529,15 @@ function saveWebSearchSettingsFromForm() {
   // 会话级开关顺带落盘（面板里那个 checkbox 现在是**唯一**的开关入口）
   var chk = wsEl('websearch-toggle');
   var conv = (typeof currentConv === 'function') ? currentConv() : null;
-  if (chk && conv) conv.webSearch = chk.checked === true;
+  if (chk && conv) {
+    var wasOn = conv.webSearch === true;
+    conv.webSearch = chk.checked === true;
+    // v3.0.12: 从关到开 = 用户要再试一次 → 清掉这个模型的工具能力结论（与 app.js 的开关同一套语义）
+    if (conv.webSearch && !wasOn && typeof toolCapForget === 'function') {
+      var pv = (typeof getProvider === 'function') ? getProvider(conv.providerId) : null;
+      toolCapForget(pv, conv.model);
+    }
+  }
   if (typeof save === 'function' && conv) save();
   updateWsTargetHint();
 }

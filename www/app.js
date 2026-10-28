@@ -662,6 +662,12 @@ async function init() {
       }
     }
     conv.webSearch = wsChk.checked === true;
+    // v3.0.12: 「重新打开联网」= 再试一次 —— 清掉这个模型上次记下的「不支持工具调用」结论。
+    //   为什么挂在这个手势上：它是用户唯一自然会做的「我想再试试」，不需要为它再加一个设置项。
+    if (conv.webSearch && typeof toolCapForget === 'function') {
+      var wsPv = (typeof getProvider === 'function') ? getProvider(conv.providerId) : null;
+      toolCapForget(wsPv, conv.model);
+    }
     save();
   });
   // 来源卡片里的链接：APK 交给系统浏览器（不拦截），Web 新开标签页

@@ -7,7 +7,7 @@
 <title>chat-lite</title>
 <link rel="stylesheet" href="vendor/highlight/github-dark.min.css?v=116">
 <link rel="stylesheet" href="vendor/katex/katex.min.css?v=116">
-<link rel="stylesheet" href="style.css?v=137">
+<link rel="stylesheet" href="style.css?v=138">
   <meta name="theme-color" content="#7c3aed">
   <link rel="manifest" href="manifest.json">
 </head>
@@ -951,21 +951,21 @@
 <script src="vendor/katex/katex.min.js?v=116"></script>
 <!-- LaTeX 渲染层：须在 katex.min.js 之后、chat.js 之前加载 -->
 <script src="latex.js?v=119"></script>
-<script src="db.js?v=134"></script>
+<script src="db.js?v=135"></script>
 <script src="haptics.js?v=116"></script>
 <script src="providers.js?v=102"></script>
 <!-- v3.0.5: 联网搜索（DeepSeek Search / Fetch）。必须在 providers.js 之后（用 normalizeBaseUrl/getProvider）、chat.js 之前 -->
-<script src="web-search.js?v=6"></script>
+<script src="web-search.js?v=7"></script>
 <!-- v3.0.8: 带工具的对话回合引擎（模型→工具→模型）。依赖 web-search.js 的工具定义，须在 chat.js 之前 -->
-<script src="agent-loop.js?v=1"></script>
+<script src="agent-loop.js?v=2"></script>
 <!-- v3.0.7: 会话标题自动命名。必须在 providers.js 之后（用 getProvider/buildUpstreamPayload）、chat.js 之前（sendFromMessage 调它） -->
 <script src="auto-title.js?v=3"></script>
 <script src="image-gen.js?v=126"></script>
 <script src="conversation.js?v=117"></script>
-<script src="chat.js?v=139"></script>
+<script src="chat.js?v=140"></script>
 <script src="io.js?v=128"></script>
 <script src="gesture-helpers.js?v=102"></script>
-<script src="app.js?v=131"></script>
+<script src="app.js?v=132"></script>
 <!-- v125: 语音通话 —— voice-director 是纯函数层（无 DOM/无网络），voice.js 是运行时 -->
 <!-- v127: voice-provider 管独立的语音接口（地址+密钥+模型），与「接口管理」的聊天渠道无关 -->
 <script src="voice-director.js?v=129"></script>

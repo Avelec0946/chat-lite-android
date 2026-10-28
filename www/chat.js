@@ -1236,9 +1236,17 @@ async function executeNativeRequest(req, assistantMsg, opts) {
 
 // 工具轨迹的 HTML。默认展开 —— 用户最想知道的就是「它到底搜了什么词」，
 // 折起来等于把这件事藏了（和来源卡片不一样：那是结果，这是决策过程）。
+// v3.0.12：多一种条目 status='skipped' —— 「本轮没联网，因为模型不支持工具调用」。
+//   它必须留在气泡里（而不是只弹一个会消失的 toast）：用户看到一条没有来源卡片的回答时，
+//   唯一能解释「为什么没搜」的地方就是这里。
 function agentTraceHtml(trace) {
   if (!trace || !trace.length) return '';
+  var skipped = 0;
   var items = trace.map(function(t) {
+    if (t.status === 'skipped') {
+      skipped++;
+      return '<div class="agent-trace-note">' + escapeHtml(t.summary || '本轮未联网') + '</div>';
+    }
     var name = t.name === 'fetch_url' ? '抓取网页' : (t.name === 'web_search' ? '搜索' : String(t.name));
     var arg = '';
     var a = t.args || {};
@@ -1254,8 +1262,10 @@ function agentTraceHtml(trace) {
       '<span class="agent-trace-st">' + status + '</span>' +
     '</div>';
   }).join('');
+  var called = trace.length - skipped;
+  var head = called > 0 ? ('已调用 ' + called + ' 个工具') : '联网搜索未生效';
   return '<details class="agent-trace" open>' +
-    '<summary class="agent-trace-summary">已调用 ' + trace.length + ' 个工具</summary>' +
+    '<summary class="agent-trace-summary">' + head + '</summary>' +
     '<div class="agent-trace-list">' + items + '</div>' +
   '</details>';
 }
@@ -1295,14 +1305,14 @@ function agentDedupeSources(list) {
   return out;
 }
 
-// 接口不支持 tools 时（部分中转站会把未知字段当错误）就是这句 —— 用它决定要不要静默降级。
-function agentIsToolsUnsupported(err) {
-  var m = String((err && err.message) || '');
-  return /tool[s_ ]|tool_choice|function.{0,4}call|不支持|unknown.{0,10}field/i.test(m) &&
-    /400|422|invalid|unsupported|unrecognized|不支持/i.test(m);
-}
-
-// 跑一轮「带工具的对话」。返回 true = 已处理完（含按中断/错误收尾）；false = 请调用方落回普通请求。
+// 跑一轮「带工具的对话」。返回 true = 已处理完（含按中断/错误收尾）。
+//
+// v3.0.12：这里**不再判断**「这个接口支不支持工具」，也不再靠错误文案猜（旧的
+//   agentIsToolsUnsupported 正则已删）。判断与降级全部在 agent-loop.js 的 agentRunAdaptive 里，
+//   依据是「去掉 tools 重发一次成不成功」这条证据 —— 上游用什么错误码表达「不支持」是它的事，
+//   客户端不押这个宝。本函数只负责把结果画出来：
+//     · toolsDropped = true → 在气泡里留一条「本轮未联网：该模型不支持工具调用」
+//     · 真错误 → 抛给 sendFromMessage 的 catch（保持原来的错误气泡行为）
 async function runAgentChat(provider, conv, context, assistantMsg) {
   var sources = [];
   var trace = [];
@@ -1314,10 +1324,12 @@ async function runAgentChat(provider, conv, context, assistantMsg) {
 
   var res;
   try {
-    res = await agentRun({
+    res = await agentRunAdaptive({
       messages: context,
       tools: (typeof WEB_TOOL_DEFS !== 'undefined') ? WEB_TOOL_DEFS : null,
       maxRounds: 4,
+      provider: provider,
+      model: conv.model,
       // 工具模式一律直连：浏览器模式下的 /api/chat/completions 是本地代理，
       //   它不认识 tools / tool_choice，转发过去只会被丢掉（然后模型"凭空"不调工具）。
       buildRequest: function(msgs, tools) {
@@ -1363,6 +1375,10 @@ async function runAgentChat(provider, conv, context, assistantMsg) {
         }
         renderTrace();
       },
+      onToolsDropped: function(err) {
+        // 这一轮才试出来的（事先不知道）：说一次，别每次发消息都念
+        showToast('「' + (conv.model || '当前模型') + '」不支持工具调用，联网搜索本轮已跳过（对话照常进行）', 'warn');
+      },
       signal: state.abortController ? state.abortController.signal : null
     });
   } catch (e) {
@@ -1373,11 +1389,23 @@ async function runAgentChat(provider, conv, context, assistantMsg) {
       renderMessages();
       return true;
     }
-    if (agentIsToolsUnsupported(e)) {
-      showToast('当前接口不支持工具调用，联网搜索在这条接口上用不了（本轮已按普通对话重发）', 'warn');
-      return false;
+    // 失败时别把「正在跑」的轨迹留在气泡里一直转圈 —— 它其实已经结束了
+    for (var ti = 0; ti < trace.length; ti++) {
+      if (trace[ti].status === 'running') trace[ti].status = 'error';
     }
+    renderTrace();
     throw e;   // 真错误交给 sendFromMessage 的 catch（保持原来的错误气泡行为）
+  }
+
+  // 降级过：把「本轮没联网」这件事写进气泡（toast 会消失，气泡不会）
+  if (res.toolsDropped) {
+    trace.push({
+      name: 'web_search',
+      args: {},
+      status: 'skipped',
+      summary: '本轮未联网：该模型不支持工具调用（换一个支持工具调用的模型即可联网）'
+    });
+    renderTrace();
   }
 
   // ---- 收尾 ----
@@ -1460,19 +1488,16 @@ async function sendFromMessage(context) {
   // ===== v3.0.8: 联网搜索 = 交给模型的工具 =====
   //   开关打开时，把 web_search / fetch_url 作为 tools 交给模型，**由它自己决定**要不要调、用什么词、调几次。
   //   （v3.0.5 是"拿到用户那句话直接去搜、结果硬塞进上下文"，那不是工具，是检索管道 —— 模型没有选择权。）
-  if (typeof agentRun === 'function' && typeof webSearchEnabled === 'function' && webSearchEnabled(conv)) {
+  //   v3.0.12：这里**不再**假设「接口支持 tools」。模型不支持时（如 kkaiapi 上的 gemini）由
+  //   agentRunAdaptive 自己降级成普通对话，本函数只等结果 —— 联网失败绝不能让对话失败。
+  if (typeof agentRunAdaptive === 'function' && typeof webSearchEnabled === 'function' && webSearchEnabled(conv)) {
     var wsReady = (typeof wsResolveTarget === 'function') ? wsResolveTarget() : { ok: false, reason: '联网搜索未就绪' };
     if (!wsReady.ok) {
       // 没配密钥/地址：不阻断这轮对话，只是没有工具可用
       showToast(wsReady.reason + '（本轮仍会正常回答，只是不能联网）', 'warn');
     } else {
-      var agentHandled = await runAgentChat(provider, conv, context, assistantMsg);
-      if (agentHandled) return;
-      // 接口不支持 tools：清掉可能的半截输出，落回普通请求
-      assistantMsg.content = '';
-      assistantMsg.reasoningContent = '';
-      assistantMsg.toolTrace = null;
-      renderMessages();
+      await runAgentChat(provider, conv, context, assistantMsg);
+      return;
     }
   }
 
@@ -1593,10 +1618,14 @@ async function sendFromMessage(context) {
     // 保留已生成内容，标记为中断
     assistantMsg.interrupted = true;
     // v122: 空闲超时触发的 abort 要如实说明是「等待超时」，不能混成「用户打断」
-    assistantMsg.errorMsg = webTimeoutReason || (err.name === 'AbortError' ? '用户打断' : err.message);
+    // v3.0.12: 错误文案统一在这里过一遍 prettyStreamError —— 之前只有原生流式那条路做了，
+    //   agent 路径把原生带回来的 `HTTP 503: {…}` 整段 JSON 直接甩进气泡（同一个问题两种待遇，
+    //   正是 §4.26 说的「同一件事写了 N 遍」）。现在四条路径一个出口。
+    var errText = (typeof prettyStreamError === 'function') ? prettyStreamError(err && err.message) : (err && err.message);
+    assistantMsg.errorMsg = webTimeoutReason || (err.name === 'AbortError' ? '用户打断' : errText);
     if (!assistantMsg.content) {
       // 如果完全没有内容，才显示错误
-      assistantMsg.content = `**错误：** ${escapeHtml(err.message)}`;
+      assistantMsg.content = `**错误：** ${escapeHtml(errText)}`;
       assistantMsg.isError = true;
     }
     save();
@@ -1762,7 +1791,8 @@ async function sendFromMessageContinue(context, assistantMsg) {
   } catch (err) {
     console.error('Continue error:', err);
     assistantMsg.interrupted = true;
-    assistantMsg.errorMsg = webTimeoutReason || (err.name === 'AbortError' ? '用户打断' : err.message);
+    var contErrText = (typeof prettyStreamError === 'function') ? prettyStreamError(err && err.message) : (err && err.message);
+    assistantMsg.errorMsg = webTimeoutReason || (err.name === 'AbortError' ? '用户打断' : contErrText);
     save();
     renderMessages();
     setStatus('err');

@@ -146,7 +146,11 @@ function defaultSettings() {
     // v3.0.5: 联网搜索（DeepSeek Search / Fetch）
     webSearch: defaultWebSearchSettings(),
     // v3.0.7: 会话标题自动命名
-    autoTitle: defaultAutoTitleSettings()
+    autoTitle: defaultAutoTitleSettings(),
+    // v3.0.12: 工具能力登记 {"<providerId>|<upstreamModel>": {tools:bool, at:ts, evidence:str}}
+    //   记的是「这个模型带 tools 的请求到底行不行」—— 由 agent-loop.js 用「去掉 tools 重发一次」
+    //   的证据写进来。为什么放 settings 而不是每次现试：现试就是每发一条消息先挨一次 503。
+    toolCapability: {}
   };
 }
 
@@ -351,6 +355,11 @@ function migrateSettings(s) {
   s.webSearch = migrateWebSearchSettings(s.webSearch);
   // v3.0.7: 自动命名会话（默认开；老库没有这个字段时补默认值，用户关过则尊重）
   s.autoTitle = migrateAutoTitleSettings(s.autoTitle);
+  // v3.0.12: 工具能力登记（只增不改；老库没有就补空对象，非法值一律丢弃 —— 这里的数据只影响
+  //   「要不要先试一次工具」，读坏了顶多多试一次，绝不能让它把 settings 整体带崩）
+  if (!s.toolCapability || typeof s.toolCapability !== 'object' || Array.isArray(s.toolCapability)) {
+    s.toolCapability = {};
+  }
   return s;
 }
 

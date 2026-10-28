@@ -45,6 +45,7 @@ function makeResponse(chunks, opts) {
 
 var requests = [];       // 记录 buildRequest 被调用时的 tools 参数
 var responses = [];      // 按调用顺序出队
+var saves = 0;           // saveSettings 调用次数（能力登记要落盘，不能只改内存）
 var sandbox = {
   console: console, JSON: JSON, Object: Object, Array: Array, Math: Math, Date: Date,
   String: String, Number: Number, Boolean: Boolean, Promise: Promise,
@@ -54,6 +55,14 @@ var sandbox = {
   Buffer: Buffer,
   isCapacitor: function() { return false; },
   resolveChatWaitMs: function() { return 5000; },
+  // v3.0.12：能力登记要读写 settings / saveSettings；upstreamId 映射也要有，
+  //   否则「key 该用 upstreamId 而不是显示名」这条断言测不到真东西。
+  settings: { toolCapability: {} },
+  saveSettings: function() { saves++; },
+  modelToUpstreamId: function(provider, modelId) {
+    var m = (provider && provider.models || []).filter(function(x) { return x.id === modelId; })[0];
+    return (m && m.upstreamId) || modelId;
+  },
   fetch: function(url, opts) {
     var r = responses.shift();
     if (!r) return Promise.reject(new Error('没有预置响应 #' + url));
@@ -235,6 +244,161 @@ console.log('\n[tool_calls 归并]');
     ok('已取消的 signal 应当抛 AbortError', false);
   }, function(e) {
     ok('已取消的 signal 抛 AbortError（不是静默返回空回答）', e && e.name === 'AbortError', e && e.message);
+  });
+})
+// ---------- 工具能力登记（v3.0.12）----------
+// 这一节钉住的是「开了联网搜索，对话就整个不可用」那个事故的结构性原因：
+//   能力只能靠证据学（去掉 tools 重发一次）、学到的要记住、记住的要能过期/重置。
+.then(function() {
+  console.log('\n[工具能力登记]');
+  var pv = { id: 'pv1', models: [{ id: 'alias', upstreamId: 'real-model' }] };
+  var capState = vm.runInContext('toolCapState', sandbox);
+  var capLearn = vm.runInContext('toolCapLearn', sandbox);
+  var capForget = vm.runInContext('toolCapForget', sandbox);
+
+  sandbox.settings.toolCapability = {};
+  saves = 0;
+  ok('没有记录时是 unknown（该试还是得试）', capState(pv, 'alias') === 'unknown');
+  capLearn(pv, 'alias', false, 'HTTP 503 model_temporarily_unavailable');
+  ok('学到「不支持」', capState(pv, 'alias') === 'no');
+  ok('结论已落盘（saveSettings 被调）', saves === 1, 'saves=' + saves);
+  var keys = Object.keys(sandbox.settings.toolCapability);
+  ok('key 用 upstreamId（改显示名不该让结论失效）', keys.length === 1 && keys[0] === 'pv1|real-model', keys.join(','));
+  ok('证据保留（够定位是哪个错误码）', /503/.test(sandbox.settings.toolCapability['pv1|real-model'].evidence));
+
+  capForget(pv, 'alias');
+  ok('forget 后回到 unknown（用户重新打开开关 = 再试一次）', capState(pv, 'alias') === 'unknown');
+
+  // 证据的「保质期」按错误类别分：4xx 说明请求形状不对（稳定结论），5xx 可能只是上游抖了一下
+  capLearn(pv, 'alias', false, 'HTTP 422', 422);
+  sandbox.settings.toolCapability['pv1|real-model'].at = Date.now() - 25 * 3600 * 1000;
+  ok('4xx 证据 25 小时后仍然算数', capState(pv, 'alias') === 'no');
+  sandbox.settings.toolCapability['pv1|real-model'].at = Date.now() - 8 * 24 * 3600 * 1000;
+  ok('4xx 证据超过 7 天自动复验（不永久封死）', capState(pv, 'alias') === 'unknown');
+
+  capLearn(pv, 'alias', false, 'HTTP 503', 503);
+  sandbox.settings.toolCapability['pv1|real-model'].at = Date.now() - 25 * 3600 * 1000;
+  ok('5xx 证据一天后自动复验（上游可能只是抖了）', capState(pv, 'alias') === 'unknown');
+
+  capLearn(pv, 'alias', true, 'ok');
+  ok('也能记「支持」', capState(pv, 'alias') === 'yes');
+
+  // 没有 settings 时不能崩（早期调用/测试环境）
+  var savedSettings = sandbox.settings;
+  delete sandbox.settings;
+  ok('没有 settings 时返回 unknown 而不是抛异常', capState(pv, 'alias') === 'unknown');
+  sandbox.settings = savedSettings;
+})
+// ---------- 降级：这一轮才试出来不支持 ----------
+.then(function() {
+  console.log('\n[降级 · 试出来的]');
+  requests = []; responses = [];
+  var pv = { id: 'pv1', models: [{ id: 'alias', upstreamId: 'real-model' }] };
+  sandbox.settings.toolCapability = {};
+  var dropped = [];
+  // 第 1 次：带 tools → 503（实测 kkaiapi 上的 gemini 就是这个形状：约 320ms 快速失败）
+  responses.push(makeResponse(['{"error":{"message":"The requested model is temporarily unavailable.","code":"model_temporarily_unavailable"}}'], { ok: false, status: 503 }));
+  // 第 2 次：不带 tools → 正常流式
+  responses.push(makeResponse([delta({ content: '直接回答' }), finish('stop'), 'data: [DONE]\n\n']));
+
+  return vm.runInContext('agentRunAdaptive', sandbox)({
+    messages: [{ role: 'user', content: '那你自己联网搜索吧' }],
+    tools: [{ type: 'function', function: { name: 'web_search' } }],
+    provider: pv, model: 'alias',
+    buildRequest: function(msgs, tools) { requests.push({ tools: tools }); return { url: 'u', headers: {}, payload: {} }; },
+    execTool: function() { return Promise.resolve({ text: 'x', meta: { ok: true } }); },
+    onDelta: function() {},
+    onToolsDropped: function(e) { dropped.push(e && e.message); }
+  }).then(function(res) {
+    ok('先带 tools 试了一次', !!requests[0].tools);
+    ok('失败后**自动去掉 tools 重发**', requests.length === 2 && requests[1].tools === null, 'requests=' + requests.length);
+    ok('这一轮照样有回答（对话不死）', res.content === '直接回答', res.content);
+    ok('结果标明降级 + 原因 probe', res.toolsDropped === true && res.droppedReason === 'probe');
+    ok('能力被记为 no', vm.runInContext('toolCapState', sandbox)(pv, 'alias') === 'no');
+    ok('回调一次（用来弹一次 toast，不是每条消息都弹）', dropped.length === 1 && /503/.test(dropped[0]), JSON.stringify(dropped));
+  });
+})
+// ---------- 降级：事先已知不支持 → 连试都不试 ----------
+.then(function() {
+  console.log('\n[降级 · 已知不支持]');
+  requests = []; responses = [];
+  var pv = { id: 'pv1', models: [{ id: 'alias', upstreamId: 'real-model' }] };
+  var dropped = [];
+  responses.push(makeResponse([delta({ content: '照常回答' }), finish('stop'), 'data: [DONE]\n\n']));
+  return vm.runInContext('agentRunAdaptive', sandbox)({
+    messages: [{ role: 'user', content: 'q' }],
+    tools: [{ type: 'function', function: { name: 'web_search' } }],
+    provider: pv, model: 'alias',
+    buildRequest: function(msgs, tools) { requests.push({ tools: tools }); return { url: 'u', headers: {}, payload: {} }; },
+    execTool: function() { return Promise.resolve({ text: '', meta: {} }); },
+    onToolsDropped: function(e) { dropped.push(e); }
+  }).then(function(res) {
+    ok('只发一次请求（不再白撞 503）', requests.length === 1, 'requests=' + requests.length);
+    ok('一次就没带 tools', requests[0].tools === null);
+    ok('标明 known', res.droppedReason === 'known' && res.toolsDropped === true);
+    ok('不重复弹提示', dropped.length === 0);
+    ok('内容正常', res.content === '照常回答');
+  });
+})
+// ---------- 不去工具的错不能算到工具头上 ----------
+.then(function() {
+  console.log('\n[降级 · 两次都失败]');
+  requests = []; responses = [];
+  var pv = { id: 'pv1', models: [{ id: 'alias', upstreamId: 'real-model' }] };
+  sandbox.settings.toolCapability = {};
+  responses.push(makeResponse(['{"error":{"message":"tools rejected"}}'], { ok: false, status: 503 }));
+  responses.push(makeResponse(['{"error":{"message":"upstream down"}}'], { ok: false, status: 500 }));
+  return vm.runInContext('agentRunAdaptive', sandbox)({
+    messages: [], tools: [{}], provider: pv, model: 'alias',
+    buildRequest: function(msgs, tools) { requests.push({ tools: tools }); return { url: 'u', headers: {}, payload: {} }; },
+    execTool: function() { return Promise.resolve({ text: '', meta: {} }); }
+  }).then(function() {
+    ok('两次都失败时不该 resolve', false);
+  }, function(e) {
+    ok('抛出的是**去掉工具后**那个错误（更真实）', /upstream down/.test(e.message), e.message);
+    ok('不把「上游挂了」误记成「不支持工具」', vm.runInContext('toolCapState', sandbox)(pv, 'alias') === 'unknown');
+  });
+})
+// ---------- 已经产生副作用就不重发 ----------
+.then(function() {
+  console.log('\n[降级 · 工具已执行后失败]');
+  requests = []; responses = [];
+  var pv = { id: 'pv1', models: [{ id: 'alias', upstreamId: 'real-model' }] };
+  sandbox.settings.toolCapability = {};
+  var execCount = 0;
+  // 轮 1：调工具 → 轮 2：503
+  responses.push(makeResponse([
+    sse({ choices: [{ delta: { tool_calls: [{ index: 0, id: 'c1', type: 'function', function: { name: 'web_search', arguments: '{"query":"x"}' } }] } }] }),
+    finish('tool_calls'), 'data: [DONE]\n\n'
+  ]));
+  responses.push(makeResponse(['{"error":{"message":"boom"}}'], { ok: false, status: 503 }));
+  return vm.runInContext('agentRunAdaptive', sandbox)({
+    messages: [], tools: [{}], provider: pv, model: 'alias',
+    buildRequest: function(msgs, tools) { requests.push({ tools: tools }); return { url: 'u', headers: {}, payload: {} }; },
+    execTool: function() { execCount++; return Promise.resolve({ text: 'r', meta: { ok: true } }); }
+  }).then(function() {
+    ok('工具跑过之后失败应当抛出（不该悄悄重来）', false);
+  }, function(e) {
+    ok('工具跑过之后失败 → 抛原错误', /boom/.test(e.message), e.message);
+    ok('不重发（否则重复计费）', requests.length === 2 && execCount === 1, 'requests=' + requests.length + ' exec=' + execCount);
+    ok('不记能力结论（失败点不在 tools 上）', vm.runInContext('toolCapState', sandbox)(pv, 'alias') === 'unknown');
+  });
+})
+// ---------- 取消不重发 ----------
+.then(function() {
+  console.log('\n[降级 · 取消]');
+  requests = []; responses = [];
+  var ac = new AbortController();
+  ac.abort();
+  return vm.runInContext('agentRunAdaptive', sandbox)({
+    messages: [], tools: [{}], provider: { id: 'p' }, model: 'm', signal: ac.signal,
+    buildRequest: function(msgs, tools) { requests.push({ tools: tools }); return { url: 'u', headers: {}, payload: {} }; },
+    execTool: function() { return Promise.resolve({ text: '', meta: {} }); }
+  }).then(function() {
+    ok('已取消应当抛 AbortError', false);
+  }, function(e) {
+    ok('取消抛 AbortError 且不重发（只发了一次）', e && e.name === 'AbortError' && requests.length === 1,
+      (e && e.message) + ' requests=' + requests.length);
   });
 })
 .then(function() {

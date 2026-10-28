@@ -1,6 +1,6 @@
 // ===== agent-loop.js : 带工具的对话回合引擎（v3.0.8）=====
 // 模块名：agent-loop.js
-// 版本：v1（cache-bust）
+// 版本：v2（cache-bust；v3.0.12 新增工具能力登记 + agentRunAdaptive 降级入口）
 // 新增日期：2026-10-28
 //
 // 职责：一轮「模型 → 工具调用 → 工具结果回填 → 再问模型」的完整循环。
@@ -20,9 +20,88 @@
 //   - 语音通话不接（理由见看板 §2.4-F）。
 //
 // 依赖（运行时全局）：CapStreamHttp / CapHttp / isCapacitor / resolveChatWaitMs
+//                     settings / saveSettings / modelToUpstreamId（能力登记用，仅运行时访问）
 
 var AGENT_MAX_ROUNDS = 4;        // 总轮次上限（含最后一次纯作答）
 var AGENT_MAX_TOOL_CALLS = 6;    // 单轮并发工具调用上限（模型偶尔一次要搜五六条，但别无限）
+
+// ===== 工具能力登记（v3.0.12）=====
+// 为什么需要它：v3.0.8 起「联网搜索」会把整轮对话切成「带 tools 的 agent 请求」。
+//   但 tools 是**模型**能力，不是接口能力 —— 同一把 key、同一个中转站里，
+//   deepseek / claude / gpt / glm 支持 function calling，gemini 不支持。
+//   实测 api.kkaiapi.com（2026-10-29，同一条消息、只差 tools 字段）：
+//     gemini-3.8-flash  无 tools → 200，有 tools → **503 model_temporarily_unavailable**（约 320ms 快速失败）
+//     gemini-3.5-flash  同上
+//     deepseek-v4.1-flash / gpt-6-luna / claude-sonnet-5 / glm-5.3  有无 tools 都是 200
+//   v3.0.8~v3.0.11 没有任何地方记这件事，只有 chat.js 的 agentIsToolsUnsupported() 在
+//   「看错误文案猜」—— 那套正则要求同时出现 tool 字样与 400/422，503 service_error 一条都不匹配，
+//   于是整轮对话直接死在「HTTP 503: {…}」错误气泡里，看着像「联网搜索和别的提供方冲突」。
+//
+// 三条规则（这才是「从底层理顺」的落点，别再往回退）：
+//   ① 能力**只能靠证据学**：判据是「同一轮去掉 tools 重发，成功了没有」，不是猜错误码/文案。
+//      上游怎么表达「不支持」是它的事（400/422/404/405/501/503 都见过），客户端不押这个宝。
+//   ② 学到的结论**要记住**（settings.toolCapability，按 provider|upstreamModel 存），
+//      否则每发一条消息都先挨一次 503 —— 那是把一次性的学习成本变成永久成本。
+//   ③ **联网是增强层，不是前置条件**：这一层任何失败都必须降级成「普通对话」，
+//      绝不能让「说话」这件事跟着失败。这是本节存在的根本理由。
+var TOOL_CAP_TTL_MS = 7 * 24 * 3600 * 1000;        // 4xx 证据：请求形状不对，是模型/路由的稳定属性，记久一点
+var TOOL_CAP_TTL_SOFT_MS = 24 * 3600 * 1000;       // 5xx 证据：也可能是上游抖动，一天后自动复验（最多一天撞一次）
+
+function toolCapKey(provider, model) {
+  var pid = (provider && provider.id) || '';
+  var mid = model || '';
+  // 用 upstreamId 而不是显示名：同一个模型在接口里改个显示名不该让结论失效
+  try { if (typeof modelToUpstreamId === 'function') mid = modelToUpstreamId(provider, model) || mid; } catch (e) {}
+  return pid + '|' + mid;
+}
+
+function toolCapStore() {
+  if (typeof settings === 'undefined' || !settings) return null;
+  if (!settings.toolCapability || typeof settings.toolCapability !== 'object' || Array.isArray(settings.toolCapability)) {
+    settings.toolCapability = {};
+  }
+  return settings.toolCapability;
+}
+
+// 返回 'yes' | 'no' | 'unknown'。过期按 unknown 处理（宁可多试一次，不要永远封死）。
+function toolCapState(provider, model) {
+  var store = toolCapStore();
+  if (!store) return 'unknown';
+  var rec = store[toolCapKey(provider, model)];
+  if (!rec || typeof rec !== 'object') return 'unknown';
+  var at = typeof rec.at === 'number' ? rec.at : 0;
+  var ttl = (typeof rec.ttl === 'number' && rec.ttl > 0) ? rec.ttl : TOOL_CAP_TTL_MS;
+  if (!at || (Date.now() - at) > ttl) return 'unknown';
+  if (rec.tools === true) return 'yes';
+  if (rec.tools === false) return 'no';
+  return 'unknown';
+}
+
+// 记一条结论。evidence 只存前 160 字（够定位是哪个错误码，又不至于把整段 JSON 塞进 settings）。
+// status 决定这条证据能信多久：4xx（请求形状不对）→ 7 天；5xx / 没状态码（上游可能只是抖了一下）→ 1 天。
+function toolCapLearn(provider, model, supported, evidence, status) {
+  var store = toolCapStore();
+  if (!store) return;
+  var is4xx = (typeof status === 'number' && status >= 400 && status < 500);
+  var ttl = (supported === true || is4xx) ? TOOL_CAP_TTL_MS : TOOL_CAP_TTL_SOFT_MS;
+  store[toolCapKey(provider, model)] = {
+    tools: supported === true,
+    at: Date.now(),
+    ttl: ttl,
+    evidence: String(evidence || '').slice(0, 160)
+  };
+  try { if (typeof saveSettings === 'function') saveSettings(); } catch (e) {}
+}
+
+// 清掉结论 = 「再试一次」。用户在会话里重新打开联网开关时调用（这是最自然的重试手势）。
+function toolCapForget(provider, model) {
+  var store = toolCapStore();
+  if (!store) return;
+  var k = toolCapKey(provider, model);
+  if (!Object.prototype.hasOwnProperty.call(store, k)) return;
+  delete store[k];
+  try { if (typeof saveSettings === 'function') saveSettings(); } catch (e) {}
+}
 
 // ===== SSE 解析 =====
 // 只认 `data:` 行；跨分块的行用缓冲拼回来。
@@ -161,7 +240,12 @@ async function agentStreamOnce(o) {
             settled = true;
             cleanup();
             var msg = (d && d.error) ? String(d.error) : '流式请求错误';
-            reject(new Error(msg));
+            var ne = new Error(msg);
+            // 原生插件把非 2xx 的响应体一起带回来（形如 `HTTP 503: {…}`）。
+            // 把状态码单独摘出来 —— 上层判断「是不是能力问题」时要看它，不要每次都重新解析字符串。
+            var sm = /HTTP\s+(\d{3})/.exec(msg);
+            if (sm) { ne.status = parseInt(sm[1], 10); ne.body = msg.slice(0, 800); }
+            reject(ne);
           });
           ;
 
@@ -215,7 +299,10 @@ async function agentStreamOnce(o) {
     try { text = await resp.text(); } catch (e) {}
     var inner = '';
     try { var j = JSON.parse(text); inner = (j.error && (j.error.message || j.error)) || j.detail || ''; } catch (e) { inner = text.slice(0, 200); }
-    throw new Error('HTTP ' + resp.status + (inner ? '：' + inner : ''));
+    var httpErr = new Error('HTTP ' + resp.status + (inner ? '：' + inner : ''));
+    httpErr.status = resp.status;
+    httpErr.body = String(text).slice(0, 800);
+    throw httpErr;
   }
   if (!resp.body || !resp.body.getReader) {
     // 极端环境（无 ReadableStream）：整段读回来当普通 JSON 处理
@@ -349,4 +436,70 @@ async function agentRun(o) {
     content: totalContent, reasoning: totalReasoning,
     toolCalls: [], finishReason: finishReason, rounds: round - 1, usedTools: usedTools
   };
+}
+
+// ===== 带「工具能力自适应」的一轮（v3.0.12）=====
+// 这是 chat.js 唯一该调的入口。它替调用方处理掉「这个模型到底能不能用工具」这件事：
+//
+//   已知不能用（cap='no'） → 直接发不带 tools 的普通请求，连试都不试（不再白撞一次 503）
+//   未知 / 已知能用       → 正常带工具跑
+//        失败且**一个字都没产出** → 用同样的上下文、去掉 tools 重发一次：
+//            · 重发成功 → 结论成立，记下 cap='no'，本轮按普通对话收尾（对话不死）
+//            · 重发失败 → 说明是这个模型/上游本身不行，把**重发**的错误抛出去（更真实），不记任何结论
+//        失败但已经产出过内容（含已执行过工具）→ 按真实中断抛出去，保留半截内容，**不重发**
+//          （重发会重复计费、也会把用户已经看到的内容推翻重来）
+//
+// 返回 agentRun 的结果，另加两个字段：
+//   toolsDropped  本轮是否降级成了「无工具」请求
+//   droppedReason 'known'（事先就知道）| 'probe'（这一轮试出来的）
+// 参数：与 agentRun 相同，另加 provider / model（用于能力登记）与 onToolsDropped(err)。
+async function agentRunAdaptive(o) {
+  o = o || {};
+  var hasKey = !!(o.provider && o.model);
+  var cap = hasKey ? toolCapState(o.provider, o.model) : 'unknown';
+  var produced = false;
+
+  function markProduced() { produced = true; }
+  function onDelta(kind, text) { markProduced(); if (o.onDelta) o.onDelta(kind, text); }
+
+  var base = Object.assign({}, o, {
+    onDelta: onDelta,
+    // 工具一开跑就算「已经产生副作用」：再重发一次等于再搜一次、再计一次费
+    onToolStart: function(call) { markProduced(); if (o.onToolStart) o.onToolStart(call); }
+  });
+
+  function plain() {
+    // 无工具 = 只有一轮、不传 tools（buildRequest 收到 null 自然不带）
+    return agentRun(Object.assign({}, base, { tools: null, maxRounds: 1 }));
+  }
+
+  if (cap === 'no') {
+    var r0 = await plain();
+    r0.toolsDropped = true;
+    r0.droppedReason = 'known';
+    return r0;
+  }
+
+  var res;
+  try {
+    res = await agentRun(base);
+    res.toolsDropped = false;
+    return res;
+  } catch (e) {
+    if (!e || e.name === 'AbortError') throw e;      // 用户打断：原样抛，不要重发
+    if (produced) throw e;                            // 已经出过东西：真实中断，保留半截
+    if (!o.tools || !o.tools.length) throw e;         // 本来就没给工具，没什么可降级的
+
+    var ok = null;
+    var probeErr = null;
+    try { ok = await plain(); } catch (e2) { probeErr = e2; }
+    if (!ok) throw (probeErr || e);                   // 去掉工具也不行 → 是这个模型/上游的问题
+
+    if (hasKey) toolCapLearn(o.provider, o.model, false, (e && e.message) || 'tools request failed', e && e.status);
+    ok.toolsDropped = true;
+    ok.droppedReason = 'probe';
+    ok.droppedError = e;
+    if (o.onToolsDropped) { try { o.onToolsDropped(e); } catch (e3) {} }
+    return ok;
+  }
 }
