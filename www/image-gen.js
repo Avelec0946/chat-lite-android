@@ -1,6 +1,12 @@
 // ===== image-gen.js : 生图功能模块（v2.0 拆分）=====
 // 模块名：image-gen.js
 // 版本：v102（cache-bust，2026-08-22：新增 zhipu 格式族——智谱 CogView paas v4 官方端点 /api/paas/v4/images/generations（原 flat 走 /v1 致 405 实锤修复），请求体不含 n、size 枚举/自定义、quality 条件传，响应 url 临时链接 30 天下载转存）
+// v127（cache-bust，2026-11-16）：新增 minimax_h3 格式族 —— MiniMax H3-Image / H3-Image-Highspeed 的
+//   4K 文生图（/v1/images/generations）与 JSON 多图编辑（/v1/images/edits，images[].image_url，1~16 张），
+//   替换 v103 的 image-01 预设（那套是 /v1/image_generation 单数 + subject_reference 单主体，H3 不认）。
+//   同时修四处旧账：① 错误统一走 extractImageApiError（base_resp / type:error / 逐张 data[].error）；
+//   ② 402 余额不足给明确文案；③ 批量上限跟随 features.maxBatch（原硬顶 4，H3 支持 10）；
+//   ④ /v1/models 探测跳过 MiniMax 图像渠道（那里只列文本模型，拉下来会污染模型目录）。
 // 迁移日期：2026-07-26
 // 来源：从 app.js 拆分
 // 职责：生图接口管理、生图界面、图库、图片预览、图片存储、核心生图、完成通知
@@ -235,6 +241,64 @@ const IMAGE_FORMATS = {
         return null;
       }).filter(Boolean);
     }
+  },
+  // v127: MiniMax H3-Image（2026-11-10 发布，开源权重）—— 与 v103 的 image-01 **不是一套接口**：
+  //   文生图 POST /v1/images/generations（复数，OpenAI 形制）；
+  //   图片编辑 POST /v1/images/edits（JSON images[].image_url，1~16 张，data URI / 公网 URL / mm_file://）；
+  //   尺寸 size:"WxH"（655,360~20,000,000 px、长宽比 1:3~3:1）**或** size:auto + aspect_ratio + area(1K/2K/4K)，互斥；
+  //   n 1~10；response_format url（链接 24h，本模块下载转存）/b64_json；output_format jpeg/png/webp；
+  //   错误两套形态：顶层 {type:'error',error:{...}}，以及 HTTP 200 里逐张 data[].error（部分失败仍 200）。
+  //   高速版只换模型名：MiniMax-H3-Image-Highspeed（参数与限制完全相同）。
+  //   旧 minimax（image-01）**保留**在注册表里，只为已保存的渠道还能继续用；新界面不再提供它。
+  minimax_h3: {
+    label: 'MiniMax H3-Image（4K）',
+    endpointPath: '/v1/images/generations',
+    editsPath: '/v1/images/edits',
+    authType: 'bearer',
+    authHeader: 'Authorization',
+    authPrefix: 'Bearer ',
+    requestFormat: 'minimax_h3',
+    responseFormat: 'url_or_b64',
+    defaultModel: 'MiniMax-H3-Image',
+    // v127: 参考图走 JSON（官方 multipart 也收，但 JSON 能直传 data URI、且不依赖 multipart 字段名约定）
+    refMode: 'json',
+    features: { supportsReferenceImage: true, supportsNegativePrompt: false, supportsCustomSize: true, supportsBatch: true, maxBatch: 10, supportsResolution: true, supportsAspectRatio: true, supportsPromptExtend: true, supportsBatchWithRef: true },
+    buildBody: function(provider, ctx) {
+      var sc = ctx.sizeConfig || {};
+      var size = sc.size || 'auto';
+      var body = { model: ctx.model, prompt: ctx.prompt, n: Math.max(1, Math.min(10, ctx.n || 1)) };
+      if (ctx.refDataUrls && ctx.refDataUrls.length > 0) {
+        body._useEdits = true;   // 仅用于切到 edits 端点；JSON 分支会剥掉下划线字段
+        body.images = ctx.refDataUrls.map(function(d) { return { image_url: d }; });
+      }
+      if (size !== 'auto') {
+        body.size = size;
+      } else {
+        // 尺寸全「自由」时官方默认 area=4K（贵）。这里显式给档位：分辨率下拉没选就给 2K，让成本可预期。
+        body.area = (ctx.resolution && ctx.resolution !== 'auto') ? ctx.resolution : '2K';
+      }
+      // 关闭「提示词扩展」= disable_prompt_enhanced。官方要求此时必须给确定的 WxH 或 X:Y，否则 400。
+      if (ctx.promptExtend === false) {
+        if (size !== 'auto') {
+          body.disable_prompt_enhanced = true;
+        } else {
+          var ratio = (sc.imageConfig && sc.imageConfig.aspectRatio) || '1:1';
+          if (/^\d+:\d+$/.test(ratio)) {
+            body.aspect_ratio = ratio;
+            body.disable_prompt_enhanced = true;
+          }
+        }
+      }
+      body.response_format = 'url';
+      return body;
+    },
+    // 响应 data: [{url,size,revised_prompt} | {error:{code,message}}]；失败项在这里滤掉，
+    //   原因由 extractImageApiError 汇总（全部失败 → fatal，部分失败 → partial 提示）
+    parseResponse: function(data) {
+      var arr = (data && data.data) || [];
+      if (!Array.isArray(arr)) return [];
+      return arr.filter(function(v) { return v && !v.error; });
+    }
   }
 };
 
@@ -245,7 +309,7 @@ const IMAGE_PROVIDER_PRESETS = {
   gemini: { label: 'Google Gemini', format: 'gemini_image', baseUrl: 'https://generativelanguage.googleapis.com', defaultModel: 'gemini-3-pro-image-preview' },
   wanxiang: { label: '阿里通义万相', format: 'wanxiang', baseUrl: 'https://dashscope.aliyuncs.com', defaultModel: 'wan2.6-t2i' },
   zhipu_cogview: { label: '智谱 CogView', format: 'zhipu', baseUrl: 'https://open.bigmodel.cn', defaultModel: 'cogview-4' },  // v102: 修正官方端点 /api/paas/v4（原 flat /v1 导致 405）
-  minimax: { label: 'MiniMax 海螺', format: 'minimax', baseUrl: 'https://api.minimaxi.com', defaultModel: 'image-01' },  // v103: 新增 MiniMax（/v1/image_generation + aspect_ratio）
+  minimax_h3: { label: 'MiniMax H3-Image（4K）', format: 'minimax_h3', baseUrl: 'https://api.minimax.cn', defaultModel: 'MiniMax-H3-Image' },  // v127: 替换 v103 的 image-01 预设（H3 是另一套端点与参数；mainimaxi.com 域名同样可用）
   openrouter: { label: 'OpenRouter 新版图片 API', format: 'openrouter_image', baseUrl: 'https://openrouter.ai', defaultModel: 'openai/gpt-image-2' },  // v100: 对齐官方 /api/v1/images + input_references（参考图走 JSON 不走 edits）
   doubao_seedream: { label: '豆包 Seedream', format: 'flat', baseUrl: 'https://ark.cn-beijing.volces.com', defaultModel: 'doubao-seedream-3-0-t2i-250415' },
   siliconflow: { label: '硅基流动', format: 'flat', baseUrl: 'https://api.siliconflow.cn', defaultModel: 'black-forest-labs/FLUX.1-schnell' },
@@ -329,6 +393,7 @@ function normalizeImageProvider(p) {
     defaultModel: normalizeProviderModels(p.models, p.defaultModel, format.defaultModel)[0] || 'gpt-image-2',
     requestFormat: format.requestFormat,
     responseFormat: format.responseFormat,
+    refMode: p.refMode || format.refMode || 'multipart',   // v127: 参考图通道（multipart / json）
     // v106: features 一律以格式族定义为准（持久化 p.features 是旧版本派生的过期快照，
     // 会覆盖格式族最新能力演进，如 minimax supportsReferenceImage=false 旧快照挡图生图）；
     // features 为纯派生元数据且无用户编辑入口，故只读 format.features。
@@ -2186,8 +2251,18 @@ function buildImageRequestPayload(provider, body) {
   } else if (p.authType === 'query') {
     url += (url.indexOf('?') >= 0 ? '&' : '?') + (p.authHeader || 'api_key') + '=' + encodeURIComponent(p.apiKey);
   }
-  // gpt_image 图生图：构建 multipart/form-data
-  if (useEdits) {
+  // v127: 参考图走 JSON（MiniMax H3 的 images[].image_url）—— 只换端点，不转 multipart。
+  //   下划线开头的字段（_useEdits / _refDataUrls）是客户端内部用的，发给严格校验的网关会被拒，这里剥掉。
+  if (useEdits && (p.refMode || 'multipart') === 'json') {
+    var cleanBody = {};
+    for (var bkey in body) {
+      if (bkey.charAt(0) === '_') continue;
+      cleanBody[bkey] = body[bkey];
+    }
+    payload = cleanBody;
+    headers['Content-Type'] = 'application/json';
+  } else if (useEdits) {
+    // gpt_image 图生图：构建 multipart/form-data
     var formData = new FormData();
     formData.append('model', body.model || '');
     formData.append('prompt', body.prompt || '');
@@ -2227,7 +2302,8 @@ function base64ToBytes(b64) {
 //   minimax 走 subject_reference，官方只支持单个主体参考 → 实际只用第 1 张。
 //   此前这种情况是静默丢弃（选 5 张只发 1 张、界面毫无提示），这里补上判定与告知。
 function imageRefLimitForFormat(fmt) {
-  if (fmt === 'minimax') return 1;
+  if (fmt === 'minimax') return 1;       // image-01：subject_reference 单主体
+  if (fmt === 'minimax_h3') return 16;   // v127: H3 官方 1~16 张（data URI / 公网 URL）
   return 16;
 }
 
@@ -2452,10 +2528,12 @@ async function generateImage() {
   }
 
   // v123: 生成数量的钳制不再静默 —— 带上参考图时多数格式只收单张，明确告诉用户
-  var nWanted = Math.max(1, Math.min(4, parseInt(batchNEl ? batchNEl.value : '1') || 1));
-  var n = nWanted;
+  // v127: 上限改由 features.maxBatch 决定（此前硬顶 4，H3 实际支持 1~10）；
+  //   带参考图时是否还能批量同样交给格式声明（supportsBatchWithRef），不再一律压成 1 张。
   var maxBatch = (provider.features && provider.features.maxBatch) ? provider.features.maxBatch : 4;
-  if (refDataUrls.length > 0 && maxBatch > 1) maxBatch = 1;
+  var nWanted = Math.max(1, Math.min(maxBatch, parseInt(batchNEl ? batchNEl.value : '1', 10) || 1));
+  var n = nWanted;
+  if (refDataUrls.length > 0 && maxBatch > 1 && !(provider.features && provider.features.supportsBatchWithRef)) maxBatch = 1;
   if (nWanted > maxBatch) {
     n = maxBatch;
     showToast(
@@ -2475,6 +2553,7 @@ async function generateImage() {
     prompt: prompt,
     refDataUrls: refDataUrls,
     sizeConfig: sizeConfig,
+    resolution: resolution,   // v127: minimax_h3 在尺寸「全自由」时用它决定 area 档位
     n: n,
     negativePrompt: negativePrompt,
     promptExtend: promptExtend,
@@ -2579,6 +2658,11 @@ async function generateImage() {
     });
     state._imageProgress.phase = 'parsing';
     var data = await resp.json();
+    // v127: 200 里带错误是常态（image-01 的 base_resp、H3 的 type:'error' 与逐张 data[].error）。
+    //   此前只有 flat 判定 [] 这一道，用户看到「响应中无图片数据」——模型名写错也报这句，等于没提示。
+    var apiErr = extractImageApiError(data);
+    if (apiErr.fatal) throw new Error(apiErr.fatal);
+    if (apiErr.partial) showToast(apiErr.partial, 'warn');
     // 移除加载占位
     var loadingEl = document.getElementById('image-loading-msg');
     if (loadingEl) loadingEl.remove();
@@ -2756,6 +2840,51 @@ async function generateImage() {
 // 错误分类：将任何失败归一化为 {type, retryable, hint}
 // type: network | timeout | url-invalid | auth | quota | content-policy
 //       | rate-limit | server | client | non-json | unknown
+// v127: 从响应体里挖出真实错误。
+//   MiniMax image-01 从不用 HTTP 状态码表达错误（永远 200 + base_resp.status_code），
+//   H3 则在顶层 {type:'error',error:{type,message,http_code}} 或逐张 data[].error 里表达，且部分失败仍 200。
+//   返回 { fatal, partial }：fatal 抛错进错误卡；partial 只提示（图已经出来了，别当失败）。
+var _IMAGE_API_ERR_HINTS = {
+  '1002': '触发限流，请稍后重试',
+  '1004': '鉴权失败，请检查 API 密钥',
+  '1008': '账户余额不足',
+  '1013': '内部错误，请稍后重试',
+  '1027': '内容安全检查未通过，请调整提示词',
+  '2013': '当前接口不支持该模型名（检查模型是否填写正确）'
+};
+function extractImageApiError(data) {
+  var out = { fatal: null, partial: null };
+  if (!data || typeof data !== 'object') return out;
+  var br = data.base_resp;
+  if (br && br.status_code && br.status_code !== 0) {
+    var sc = String(br.status_code);
+    var hint = _IMAGE_API_ERR_HINTS[sc];
+    out.fatal = (hint || '接口返回错误') + '（' + sc + '：' + (br.status_msg || '无描述') + '）';
+    return out;
+  }
+  var top = data.error;
+  if (typeof top === 'string' && top) { out.fatal = top; return out; }
+  if (top && typeof top === 'object' && (top.message || top.type)) {
+    out.fatal = (top.message || top.type) + (top.http_code ? '（HTTP ' + top.http_code + '）' : '');
+    return out;
+  }
+  var arr = data.data;
+  if (Array.isArray(arr) && arr.length > 0) {
+    var fails = [];
+    var okCount = 0;
+    for (var i = 0; i < arr.length; i++) {
+      var it = arr[i];
+      if (it && it.error) fails.push(it.error.message || it.error.code || '失败');
+      else okCount++;
+    }
+    if (fails.length > 0) {
+      if (okCount === 0) out.fatal = '生成失败：' + fails[0];
+      else out.partial = okCount + ' 张成功、' + fails.length + ' 张失败：' + fails[0];
+    }
+  }
+  return out;
+}
+
 function classifyImageError(status, bodyText, err) {
   var text = String(bodyText || '') + ' ' + String((err && err.message) || '');
   var low = text.toLowerCase();
@@ -2773,6 +2902,10 @@ function classifyImageError(status, bodyText, err) {
   }
   if (status === 401) {
     return { type: 'auth', retryable: false, hint: 'API 密钥无效（401），请检查该生图接口的密钥是否正确' };
+  }
+  if (status === 402) {
+    // v127: 402 之前落到兜底分支，气泡里直接贴 120 字符原始 JSON（{"type":"error",...}）
+    return { type: 'quota', retryable: false, hint: '账户余额不足（402）——到对应平台充值后再试' };
   }
   if (status === 403) {
     if (/quota|insufficient|billing|credit|balance/i.test(low)) {
@@ -3118,6 +3251,8 @@ async function probeImageProviderModels() {
   var baseUrl = normalizeBaseUrl(urlInput.value);
   var fmtName = (formatSel && formatSel.value) || 'flat';
   var fmtName2 = migrateImageTemplate(fmtName);
+  // v127: MiniMax 的 /v1/models 只列**文本**模型（MiniMax-M3.x 等），拉到生图模型目录里纯属误导 → 跳过
+  if (fmtName2 === 'minimax_h3' || fmtName2 === 'minimax') throw new Error('skip-models-probe');
   var modelsPath = '/v1/models';
   if (fmtName2 === 'gemini_image') modelsPath = '/v1beta/models';
   else if (fmtName2 === 'wanxiang') modelsPath = '/api/v1/models';
@@ -3198,9 +3333,13 @@ async function testImageProviderConnection() {
     };
     var norm = normalizeImageProvider(tmpProvider);
     var fmt = getImageFormat(norm.requestFormat || norm.template);
+    // v127: H3 的「auto」在服务端默认按 area=4K 出图（贵，且测试没必要）→ 测试固定 1K 方图
+    var testSize = (norm.requestFormat === 'minimax_h3')
+      ? { size: '1024x1024', imageConfig: null }
+      : { size: 'auto', imageConfig: null };
     var reqBody = fmt.buildBody(norm, {
       model: norm.defaultModel, prompt: 'test', refDataUrls: [],
-      sizeConfig: { size: 'auto', imageConfig: null },
+      sizeConfig: testSize,
       n: 1, negativePrompt: '', promptExtend: false, watermark: false, quality: 'auto'
     });
     var req = buildImageRequestPayload(norm, reqBody);
@@ -3210,6 +3349,8 @@ async function testImageProviderConnection() {
       timeoutMs: 10000, signal: controller.signal, maxRetries: 0
     });
     var data = await resp.json();
+    var apiErrT = extractImageApiError(data);
+    if (apiErrT.fatal) throw new Error(apiErrT.fatal);
     var results = fmt.parseResponse(data) || [];
     resultEl.className = 'image-provider-test-result ok';
     resultEl.textContent = '连接成功 ✓（端点响应正常，' + (results.length > 0 ? '返回 ' + results.length + ' 张图片数据' : '请求已受理') + '）——本次测试发出 1 次真实生图请求';
