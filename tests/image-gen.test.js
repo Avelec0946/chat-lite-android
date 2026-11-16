@@ -67,30 +67,33 @@ const buildImageRequestPayload = get('buildImageRequestPayload');
 const extractImageApiError = get('extractImageApiError');
 const classifyImageError = get('classifyImageError');
 const imageRefLimitForFormat = get('imageRefLimitForFormat');
+const migrateImageTemplate = get('migrateImageTemplate');
 
 const P = () => normalizeImageProvider({
-  name: 'h3', template: 'minimax_h3', baseUrl: 'https://api.minimax.cn',
+  name: 'h3', template: 'minimax', baseUrl: 'https://api.minimax.cn',
   apiKey: 'k', defaultModel: 'MiniMax-H3-Image'
 });
 
 // ===== 1. 格式族注册 =====
 section('1. 格式族注册');
-const h3 = IMAGE_FORMATS.minimax_h3;
-ok('minimax_h3 已注册', !!h3);
+const h3 = IMAGE_FORMATS.minimax;
+ok('minimax 族已注册（协议命名，不是模型名）', !!h3);
 eq('文生图端点', h3.endpointPath, '/v1/images/generations');
 eq('图生图端点', h3.editsPath, '/v1/images/edits');
 eq('参考图通道', h3.refMode, 'json');
 eq('默认模型', h3.defaultModel, 'MiniMax-H3-Image');
 eq('批量上限', h3.features.maxBatch, 10);
 eq('参考图上限', imageRefLimitForFormat('minimax_h3'), 16);
-eq('旧 image-01 参考图上限仍为 1', imageRefLimitForFormat('minimax'), 1);
-ok('旧 minimax 格式仍留在注册表（已保存渠道不炸）', !!IMAGE_FORMATS.minimax);
-eq('旧 minimax 端点未被改动', IMAGE_FORMATS.minimax.endpointPath, '/v1/image_generation');
+ok('image-01 的老接口彻底不在了（/v1/image_generation 单数）',
+   !Object.keys(IMAGE_FORMATS).some(k => IMAGE_FORMATS[k].endpointPath === '/v1/image_generation'));
+eq('v127 的临时族名回指 minimax', migrateImageTemplate('minimax_h3'), 'minimax');
+eq('未知族名仍回退 flat', migrateImageTemplate('不存在的族'), 'flat');
+ok('minimax 族只对应一套协议（端点复数）', IMAGE_FORMATS.minimax.endpointPath === '/v1/images/generations');
 
 // ===== 2. 归一化 =====
 section('2. normalizeImageProvider');
 const p = P();
-eq('requestFormat', p.requestFormat, 'minimax_h3');
+eq('requestFormat', p.requestFormat, 'minimax');
 eq('refMode 透传', p.refMode, 'json');
 eq('editsPath 保留', p.editsPath, '/v1/images/edits');
 const flatP = normalizeImageProvider({ name: 'f', template: 'flat', baseUrl: 'https://x.y', apiKey: 'k' });

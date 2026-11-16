@@ -1,7 +1,14 @@
 // ===== image-gen.js : 生图功能模块（v2.0 拆分）=====
 // 模块名：image-gen.js
 // 版本：v102（cache-bust，2026-08-22：新增 zhipu 格式族——智谱 CogView paas v4 官方端点 /api/paas/v4/images/generations（原 flat 走 /v1 致 405 实锤修复），请求体不含 n、size 枚举/自定义、quality 条件传，响应 url 临时链接 30 天下载转存）
-// v127（cache-bust，2026-11-16）：新增 minimax_h3 格式族 —— MiniMax H3-Image / H3-Image-Highspeed 的
+// v128（cache-bust，2026-11-16）：旧渠道兜底 —— 格式族从下拉撤回时，打开编辑器不再静默落成 flat；
+//   （根因：openImageProviderEditor 直接 formatSel.value = fmtName，无匹配项时 value 变空串，
+//    保存时 template='' → migrateImageTemplate 回退 flat。image-01 那条老渠道就踩在这上面。）
+// v129（cache-bust，2026-11-16）：格式族按**协议**命名 —— image-01 的 minimax 族整体删除（用户：不再用了），
+//   H3 那套（/v1/images/generations + JSON 编辑）接管 minimax 这个名字；预设就叫「MiniMax」，
+//   默认模型 MiniMax-H3-Image，换模型/速度档只改 model，不再新开一个族。
+//   老渠道：`_IMAGE_TEMPLATE_MIGRATE['minimax_h3']` 回指 minimax，编辑器对未知格式另有兜底选项。
+// v127（cache-bust，2026-11-16）：新增 H3 格式族（当时叫 minimax_h3）—— MiniMax H3-Image / H3-Image-Highspeed 的
 //   4K 文生图（/v1/images/generations）与 JSON 多图编辑（/v1/images/edits，images[].image_url，1~16 张），
 //   替换 v103 的 image-01 预设（那套是 /v1/image_generation 单数 + subject_reference 单主体，H3 不认）。
 //   同时修四处旧账：① 错误统一走 extractImageApiError（base_resp / type:error / 逐张 data[].error）；
@@ -197,67 +204,25 @@ const IMAGE_FORMATS = {
     },
     parseResponse: function(data) { return (data && data.data) || []; }
   },
+  // v129: MiniMax 图像族 —— **按协议命名，不按模型版本命名**。
+  //   族 = 一套「怎么发请求」的约定；具体用哪个模型是 `model` 参数的事。
+  //   现状（2026-11 的 H3 协议）：文生图 POST /v1/images/generations（OpenAI 形制）；
+  //     图片编辑 POST /v1/images/edits（JSON images[].image_url，1~16 张，支持 data URI / 公网 URL / mm_file://）；
+  //     尺寸 size:"WxH"（655,360~20,000,000 px、长宽比 1:3~3:1）**或** size:auto + aspect_ratio + area(1K/2K/4K)，互斥；
+  //     n 1~10；response_format url（链接 24h，本模块下载转存）/b64_json；output_format jpeg/png/webp；
+  //     错误两套形态：顶层 {type:'error',error:{...}}，以及 HTTP 200 里逐张 data[].error（部分失败仍 200）。
+  //   MiniMax 再出新图模型（或换个速度档）只要改 `model`，**不用新开族**：
+  //     `MiniMax-H3-Image` / `MiniMax-H3-Image-Highspeed` 参数与限制完全相同。
+  //   已退役：v103 的 image-01 族（/v1/image_generation 单数 + subject_reference）v129 整体删除，
+  //     老渠道由 `_IMAGE_TEMPLATE_MIGRATE` 与编辑器兜底接住，不会静默变成 flat。
   minimax: {
-    label: 'MiniMax 海螺（image-01）',
-    endpointPath: '/v1/image_generation',
-    authType: 'bearer',
-    authHeader: 'Authorization',
-    authPrefix: 'Bearer ',
-    requestFormat: 'minimax',
-    responseFormat: 'url_or_b64',
-    defaultModel: 'image-01',
-    // v103: 新增格式族。MiniMax 走 /v1/image_generation，尺寸是 aspect_ratio（非 size），响应为
-    // data.data.image_urls[]（URL 串）或 data.data[]（base64/dataURL 串）。  // v105: 图生图——同一端点加 subject_reference 数组（不入 edits/multipart），有参考图即同链路静默切换。
-    features: { supportsReferenceImage: true, supportsNegativePrompt: false, supportsCustomSize: true, supportsBatch: true, maxBatch: 4, supportsResolution: false, supportsAspectRatio: true },
-    // 请求体：{model, prompt, n, aspect_ratio, response_format}；不用 size
-    buildBody: function(provider, ctx) {
-      var body = { model: ctx.model, prompt: ctx.prompt, n: Math.max(1, Math.min(4, ctx.n || 1)) };
-      var ratio = ctx.sizeConfig && ctx.sizeConfig.imageConfig && ctx.sizeConfig.imageConfig.aspectRatio || (ctx.sizeConfig && ctx.sizeConfig.aspectRatio);
-      if (ratio && ratio !== 'auto') body.aspect_ratio = ratio;
-      body.response_format = 'url';
-      // v105: 参考图 → subject_reference（官方仅支持单个 character 主体参考）
-      // v123: 上游限制 1 张已由 imageRefLimitForFormat / generateImage 前置截断并告知用户，
-      //         走到这里时 refDataUrls.length 必然 ≤ 1，取 [0] 不再构成静默丢弃。
-      if (ctx.refDataUrls && ctx.refDataUrls.length > 0) {
-        body.subject_reference = [{ type: 'character', image_file: ctx.refDataUrls[0] }];
-      }
-      return body;
-    },
-    // 响应 data.data: {image_urls:[str]} | [ {url} ] | [b64 str | dataURL str]
-    parseResponse: function(data) {
-      var arr = (data && data.data) ? data.data : null;
-      if (!arr) return [];
-      if (Array.isArray(arr.image_urls)) arr = arr.image_urls;
-      if (!Array.isArray(arr)) {
-        var alt = arr && (arr.image_urls || arr.images);
-        if (Array.isArray(alt)) arr = alt; else return [];
-      }
-      return arr.map(function(v) {
-        if (v && typeof v === 'object') return v;           // 已是 {url}/{b64_json}
-        v = String(v || '');
-        if (/^https?:\/\//.test(v)) return { url: v };      // URL 串
-        if (v.indexOf('data:') === 0) v = v.replace(/^data:image\/[^;]+;base64,/, ''); // dataURL 串
-        if (v) return { b64_json: v };                      // 裸 base64 串
-        return null;
-      }).filter(Boolean);
-    }
-  },
-  // v127: MiniMax H3-Image（2026-11-10 发布，开源权重）—— 与 v103 的 image-01 **不是一套接口**：
-  //   文生图 POST /v1/images/generations（复数，OpenAI 形制）；
-  //   图片编辑 POST /v1/images/edits（JSON images[].image_url，1~16 张，data URI / 公网 URL / mm_file://）；
-  //   尺寸 size:"WxH"（655,360~20,000,000 px、长宽比 1:3~3:1）**或** size:auto + aspect_ratio + area(1K/2K/4K)，互斥；
-  //   n 1~10；response_format url（链接 24h，本模块下载转存）/b64_json；output_format jpeg/png/webp；
-  //   错误两套形态：顶层 {type:'error',error:{...}}，以及 HTTP 200 里逐张 data[].error（部分失败仍 200）。
-  //   高速版只换模型名：MiniMax-H3-Image-Highspeed（参数与限制完全相同）。
-  //   旧 minimax（image-01）**保留**在注册表里，只为已保存的渠道还能继续用；新界面不再提供它。
-  minimax_h3: {
-    label: 'MiniMax H3-Image（4K）',
+    label: 'MiniMax 图像（/v1/images/generations）',
     endpointPath: '/v1/images/generations',
     editsPath: '/v1/images/edits',
     authType: 'bearer',
     authHeader: 'Authorization',
     authPrefix: 'Bearer ',
-    requestFormat: 'minimax_h3',
+    requestFormat: 'minimax',
     responseFormat: 'url_or_b64',
     defaultModel: 'MiniMax-H3-Image',
     // v127: 参考图走 JSON（官方 multipart 也收，但 JSON 能直传 data URI、且不依赖 multipart 字段名约定）
@@ -309,7 +274,7 @@ const IMAGE_PROVIDER_PRESETS = {
   gemini: { label: 'Google Gemini', format: 'gemini_image', baseUrl: 'https://generativelanguage.googleapis.com', defaultModel: 'gemini-3-pro-image-preview' },
   wanxiang: { label: '阿里通义万相', format: 'wanxiang', baseUrl: 'https://dashscope.aliyuncs.com', defaultModel: 'wan2.6-t2i' },
   zhipu_cogview: { label: '智谱 CogView', format: 'zhipu', baseUrl: 'https://open.bigmodel.cn', defaultModel: 'cogview-4' },  // v102: 修正官方端点 /api/paas/v4（原 flat /v1 导致 405）
-  minimax_h3: { label: 'MiniMax H3-Image（4K）', format: 'minimax_h3', baseUrl: 'https://api.minimax.cn', defaultModel: 'MiniMax-H3-Image' },  // v127: 替换 v103 的 image-01 预设（H3 是另一套端点与参数；mainimaxi.com 域名同样可用）
+  minimax: { label: 'MiniMax', format: 'minimax', baseUrl: 'https://api.minimax.cn', defaultModel: 'MiniMax-H3-Image' },  // v129: 预设按厂商命名，默认模型选当前在售的 H3（换模型只改下拉，不动预设）
   openrouter: { label: 'OpenRouter 新版图片 API', format: 'openrouter_image', baseUrl: 'https://openrouter.ai', defaultModel: 'openai/gpt-image-2' },  // v100: 对齐官方 /api/v1/images + input_references（参考图走 JSON 不走 edits）
   doubao_seedream: { label: '豆包 Seedream', format: 'flat', baseUrl: 'https://ark.cn-beijing.volces.com', defaultModel: 'doubao-seedream-3-0-t2i-250415' },
   siliconflow: { label: '硅基流动', format: 'flat', baseUrl: 'https://api.siliconflow.cn', defaultModel: 'black-forest-labs/FLUX.1-schnell' },
@@ -322,7 +287,8 @@ var _IMAGE_TEMPLATE_MIGRATE = {
   'nano_banana': 'gemini_image',
   'openai_compat': 'wanxiang',
   'openai_standard': 'flat',
-  'custom': 'flat'
+  'custom': 'flat',
+  'minimax_h3': 'minimax'   // v129: 临时名回指（v127~128 建过的渠道）
 };
 
 function migrateImageTemplate(tpl) {
@@ -360,7 +326,7 @@ function normalizeImageProvider(p) {
   var format = getImageFormat(formatName);
   var baseUrl = normalizeBaseUrl(p.baseUrl);
   var endpointPath = p.endpointPath;
-  // v104: 显式端点残留通用默认（flat 的 /v1/images/generations）且当前格式族端点不同 → 跟随格式族（防 minimax 等走错端点）
+  // v104: 显式端点残留通用默认（flat 的 /v1/images/generations）且当前格式族端点不同 → 跟随格式族（防走错端点）
   var flatDefault = IMAGE_FORMATS.flat ? IMAGE_FORMATS.flat.endpointPath : null;
   if (flatDefault && format.endpointPath && endpointPath === flatDefault && format.endpointPath !== flatDefault) endpointPath = null;
   // v100: 版本段剥离重写——baseUrl 以 /api、/api/vN、/vN 结尾都剥离（v96 正则漏 /api 结尾），
@@ -389,13 +355,13 @@ function normalizeImageProvider(p) {
     authType: p.authType || format.authType,
     authHeader: p.authHeader || format.authHeader,
     authPrefix: p.authPrefix !== undefined ? p.authPrefix : format.authPrefix,
-    // v103: 格式族 defaultModel 兜底（minimax→image-01 等）；v123: 与 models[] 同源，保证下拉第一个就是它
+    // v103: 格式族 defaultModel 兜底（minimax→MiniMax-H3-Image 等）；v123: 与 models[] 同源，保证下拉第一个就是它
     defaultModel: normalizeProviderModels(p.models, p.defaultModel, format.defaultModel)[0] || 'gpt-image-2',
     requestFormat: format.requestFormat,
     responseFormat: format.responseFormat,
     refMode: p.refMode || format.refMode || 'multipart',   // v127: 参考图通道（multipart / json）
     // v106: features 一律以格式族定义为准（持久化 p.features 是旧版本派生的过期快照，
-    // 会覆盖格式族最新能力演进，如 minimax supportsReferenceImage=false 旧快照挡图生图）；
+    // 会覆盖格式族最新能力演进，如旧快照里的 supportsReferenceImage=false 挡图生图）；
     // features 为纯派生元数据且无用户编辑入口，故只读 format.features。
     features: Object.assign({}, format.features),
     createdAt: p.createdAt || Date.now()
@@ -487,7 +453,19 @@ function openImageProviderEditor(idx) {
     presetSel.value = presetId;
   }
   var formatSel = document.getElementById('img-provider-format-select');
-  if (formatSel) formatSel.value = fmtName;
+  if (formatSel) {
+    formatSel.value = fmtName;
+    // v128: 老渠道用的格式族可能已从下拉里撤掉（v129 就把 image-01 的 minimax 删了）——
+    //   直接赋值会静默落到第一个选项，用户一保存这个渠道就被改成 flat（端点/参数全变），而且看不出来。
+    //   这里补一条临时选项兜住：改不了它、但至少不会把它改坏。
+    if (formatSel.value !== fmtName) {
+      var legacyOpt = document.createElement('option');
+      legacyOpt.value = fmtName;
+      legacyOpt.textContent = fmtName + '（旧格式，已从列表移除）';
+      formatSel.appendChild(legacyOpt);
+      formatSel.value = fmtName;
+    }
+  }
   document.getElementById('img-provider-name-input').value = p ? p.name : '';
   document.getElementById('img-provider-url-input').value = p ? p.baseUrl : '';
   document.getElementById('img-provider-endpoint-input').value = p ? (p.endpointPath || '') : '';
@@ -805,7 +783,7 @@ function updateImageAdvancedVisibility() {
   // v103: quality 行由 features.supportsQuality 驱动（gpt_image/zhipu 显示，其余隐藏）
   var qualityRow = document.getElementById('image-quality-row');
   if (qualityRow) qualityRow.style.display = (features && features.supportsQuality) ? '' : 'none';
-  // v103: 分辨率选择由 features.supportsResolution 驱动（gpt_image 尺寸集固定/minimax 无分辨率 → 隐藏）
+  // v103: 分辨率选择由 features.supportsResolution 驱动（gpt_image 尺寸集固定 → 隐藏）
   var resSelect = document.getElementById('image-resolution-select');
   if (resSelect) resSelect.style.display = (features && features.supportsResolution) ? '' : 'none';
   // 负面提示词：格式不支持时隐藏
@@ -2187,16 +2165,6 @@ function buildImageSizeConfig(provider, resolution, aspect, customSize) {
     }
     return result;
   }
-  // v103: minimax 尺寸走 aspect_ratio（无像素 WxH）
-  if (fmt === 'minimax') {
-    if (aspect === 'custom' && customSize) {
-      if (/^\d+:\d+$/.test(customSize)) { result.imageConfig = { aspectRatio: customSize }; return result; }
-      if (/^\d+x\d+$/i.test(customSize)) { var mm = customSize.match(/^(\d+)x(\d+)$/i); result.imageConfig = { aspectRatio: mm[1] + ':' + mm[2] }; return result; }
-      return result; // 无法表达 → 按 auto
-    }
-    if (aspect !== 'auto') result.imageConfig = { aspectRatio: aspect };
-    return result;
-  }
   // auto 分辨率或 auto 宽高比 → 让模型自由
   if (resolution === 'auto' && aspect === 'auto') {
     return result;  // size='auto', imageConfig=null
@@ -2299,11 +2267,9 @@ function base64ToBytes(b64) {
 // ===== v123: 参考图上限的「渠道差异」 =====
 // 界面允许 16 张（上游 images/edits 实测上限：4/8/12/16 张的 input_tokens 严格线性，
 // 20 张反而下降 —— 说明超过 16 后上游会静默截断）。但**不是每个格式族都收多图**：
-//   minimax 走 subject_reference，官方只支持单个主体参考 → 实际只用第 1 张。
 //   此前这种情况是静默丢弃（选 5 张只发 1 张、界面毫无提示），这里补上判定与告知。
 function imageRefLimitForFormat(fmt) {
-  if (fmt === 'minimax') return 1;       // image-01：subject_reference 单主体
-  if (fmt === 'minimax_h3') return 16;   // v127: H3 官方 1~16 张（data URI / 公网 URL）
+  // v129: image-01 已删除，miniMax 族现在只对应 H3 协议 —— 官方 1~16 张（data URI / 公网 URL / mm_file://）
   return 16;
 }
 
@@ -2517,7 +2483,7 @@ async function generateImage() {
     showToast('当前接口格式不支持参考图，已忽略', 'warn');
     refDataUrls = [];
   }
-  // v123: 兜底 —— 用户可能先选了多张、再切到只收单图的渠道（如 minimax）。
+  // v123: 兜底 —— 用户可能先选了多张、再切到只收单图的渠道。
   //   这种情况必须在这里截断并如实告知，否则就是「选了 5 张、只发了 1 张」的静默丢弃。
   if (refDataUrls.length > 0) {
     var refLimit = imageRefLimitForFormat(provider.requestFormat || provider.template);
@@ -2553,7 +2519,7 @@ async function generateImage() {
     prompt: prompt,
     refDataUrls: refDataUrls,
     sizeConfig: sizeConfig,
-    resolution: resolution,   // v127: minimax_h3 在尺寸「全自由」时用它决定 area 档位
+    resolution: resolution,   // v127: minimax 在尺寸「全自由」时用它决定 area 档位
     n: n,
     negativePrompt: negativePrompt,
     promptExtend: promptExtend,
@@ -3252,7 +3218,7 @@ async function probeImageProviderModels() {
   var fmtName = (formatSel && formatSel.value) || 'flat';
   var fmtName2 = migrateImageTemplate(fmtName);
   // v127: MiniMax 的 /v1/models 只列**文本**模型（MiniMax-M3.x 等），拉到生图模型目录里纯属误导 → 跳过
-  if (fmtName2 === 'minimax_h3' || fmtName2 === 'minimax') throw new Error('skip-models-probe');
+  if (fmtName2 === 'minimax') throw new Error('skip-models-probe');
   var modelsPath = '/v1/models';
   if (fmtName2 === 'gemini_image') modelsPath = '/v1beta/models';
   else if (fmtName2 === 'wanxiang') modelsPath = '/api/v1/models';
@@ -3334,7 +3300,7 @@ async function testImageProviderConnection() {
     var norm = normalizeImageProvider(tmpProvider);
     var fmt = getImageFormat(norm.requestFormat || norm.template);
     // v127: H3 的「auto」在服务端默认按 area=4K 出图（贵，且测试没必要）→ 测试固定 1K 方图
-    var testSize = (norm.requestFormat === 'minimax_h3')
+    var testSize = (norm.requestFormat === 'minimax')
       ? { size: '1024x1024', imageConfig: null }
       : { size: 'auto', imageConfig: null };
     var reqBody = fmt.buildBody(norm, {
@@ -3610,7 +3576,7 @@ function initImageView() {
       var files = e.target.files;
       if (!files || files.length === 0) return;
       if (!state._imageRefDataUrls) state._imageRefDataUrls = [];
-      // v123: 上限随渠道走 —— 多数格式 16 张，minimax 只能 1 张（subject_reference 单主体）。
+      // v123: 上限随渠道走 —— 多数格式 16 张（MiniMax H3 也是 16）。
       //   此前一律按 16 收，选多张后只发第 1 张且不提示，属于静默丢弃。
       var limit = currentImageRefLimit();
       var maxAdd = limit - state._imageRefDataUrls.length;
@@ -3662,7 +3628,7 @@ function initImageView() {
         '<button class="ref-item-clear" data-idx="' + idx + '" title="移除此图">×</button>' +
       '</div>';
     });
-    // v123: 显示「已选 / 上限」—— 上限随渠道变（大多数 16，minimax 只有 1），
+    // v123: 显示「已选 / 上限」—— 上限随渠道变（当前各渠道都是 16），
     //   让用户在选图之前就知道能放几张，而不是选完才被截断。
     var refLimit = currentImageRefLimit();
     html += '<span class="ref-info">' + refs.length + ' / ' + refLimit + ' 张参考图</span>';

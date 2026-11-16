@@ -596,7 +596,7 @@
                 <option value="gemini">Google Gemini（gemini-3-pro-image-preview）</option>
                 <option value="wanxiang">阿里通义万相（wan2.6-t2i）</option>
                 <option value="zhipu_cogview">智谱 CogView（cogview-4）</option>
-                <option value="minimax_h3">MiniMax H3-Image（4K 生图 / 多图编辑）</option>
+                <option value="minimax">MiniMax（默认 MiniMax-H3-Image）</option>
                 <option value="openrouter">OpenRouter 新版图片 API（openai/gpt-image-2）</option>
                 <option value="doubao_seedream">豆包 Seedream（火山方舟）</option>
                 <option value="siliconflow">硅基流动（FLUX 等）</option>
@@ -611,7 +611,7 @@
                 <option value="wanxiang">通义万相（nested，DashScope）</option>
                 <option value="openrouter_image">OpenRouter 新版（input_references）</option>
                 <option value="zhipu">智谱 CogView（paas v4）</option>
-                <option value="minimax_h3">MiniMax H3-Image（/v1/images/generations，JSON 多图）</option>
+                <option value="minimax">MiniMax 图像（/v1/images/generations，JSON 多图）</option>
               </select>
             </label>
             <label class="card-field"><span>接口名称</span><input id="img-provider-name-input" class="card-input" placeholder="如：我的生图接口"></label>
@@ -960,7 +960,7 @@
 <script src="agent-loop.js?v=6"></script>
 <!-- v3.0.7: 会话标题自动命名。必须在 providers.js 之后（用 getProvider/buildUpstreamPayload）、chat.js 之前（sendFromMessage 调它） -->
 <script src="auto-title.js?v=3"></script>
-<script src="image-gen.js?v=127"></script>
+<script src="image-gen.js?v=129"></script>
 <script src="conversation.js?v=117"></script>
 <script src="chat.js?v=142"></script>
 <script src="io.js?v=128"></script>
