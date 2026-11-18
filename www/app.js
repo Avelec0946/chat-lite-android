@@ -1361,7 +1361,18 @@ function fileExtOf(name) {
   return m ? m[1].toLowerCase() : '';
 }
 
-// 当前会话的接口能不能用 Files API（不能就退回老行为：图片内联、文本读取、二进制拒收）
+// 有没有可用的**官方**接口（文档解析要用它的 OCR）。与会话当前用哪家模型无关：
+//   中转站没有 OCR 端点（实测 404），但用户本来就有官方 key。
+function dsOcrProvider() {
+  try {
+    if (typeof wsPickProvider !== 'function') return null;
+    var p = wsPickProvider('');
+    if (!p || !p.baseUrl || !p.apiKey) return null;
+    return p;
+  } catch (e) { return null; }
+}
+
+// 当前会话的接口能不能用 Files API（不能就退回老行为：图片内联、文本读取、二进制走 OCR 或拒收）
 function dsAttachProvider() {
   try {
     var conv = (typeof currentConv === 'function') ? currentConv() : null;
@@ -1404,6 +1415,37 @@ function uploadAttachmentSlot(slot, provider) {
   });
 }
 
+// 非官方渠道的文档路径：用官方 OCR 解析成文本，写进 slot.content ——
+//   之后它就跟一个普通文本附件完全一样了（buildFileContent 的文本分支直接吃）。
+function parseAttachmentSlot(slot, provider) {
+  if (typeof dsOcrFile !== 'function') {
+    var i0 = state.pendingFiles.indexOf(slot);
+    if (i0 >= 0) state.pendingFiles.splice(i0, 1);
+    renderFilePreview();
+    return Promise.resolve();
+  }
+  return dsOcrFile(provider, {
+    name: slot.name, base64: slot.base64, mimeType: slot.mimeType, size: slot.size
+  }).then(function (r) {
+    if (state.pendingFiles.indexOf(slot) < 0) return;      // 解析途中被删掉了
+    var text = String((r && r.text) || '').trim();
+    if (!text) throw new Error('没有识别出文字（可能是纯图片扫描件，试试「图文混排」解析方式）');
+    slot.loading = false;
+    slot.binary = false;                                   // 已经是文本了
+    slot.content = text;
+    slot.pageCount = (r && r.pageCount) || 0;
+    slot.parsedBy = 'ocr';
+    slot.parsedTruncated = !!(r && r.truncated);
+    renderFilePreview();
+    if (slot.parsedTruncated) showToast('「' + slot.name + '」较长，已截断到约 12 万字符', 'warn');
+  }, function (e) {
+    var i = state.pendingFiles.indexOf(slot);
+    if (i >= 0) state.pendingFiles.splice(i, 1);
+    renderFilePreview();
+    showToast('「' + slot.name + '」解析失败：' + ((e && e.message) || e), 'warn');
+  });
+}
+
 function handleFileUpload(e) {
   const files = Array.from(e.target.files || []);
   if (!files.length) return;
@@ -1414,7 +1456,8 @@ function handleFileUpload(e) {
   //   以前每个格子都印文件名，顺序错了用户自己能看出来；现在只显示画面，顺序错了**完全隐形**，
   //   而「第几张图」对模型是有意义的，所以必须按选择顺序落位。
   const base = state.pendingFiles.length;
-  const dsP = dsAttachProvider();
+  const dsP = dsAttachProvider();          // 当前会话的接口是官方 → Files API（原生）
+  const ocrP = dsOcrProvider();            // 不是官方 → 用官方 OCR 转文本（本地补齐方案）
   files.forEach(function (f) {
     state.pendingFiles.push({
       name: f.name,
@@ -1439,14 +1482,14 @@ function handleFileUpload(e) {
     const ext = fileExtOf(file.name);
     const isBinaryDoc = !slot.isImage && BINARY_DOC_RE.test(ext);
 
-    if (isBinaryDoc && !dsP) {
-      // PDF / Office 这类必须由上游解析。以前是 readAsText 读出来一堆乱码发过去，
-      // 模型只能瞎猜 —— 与其假装支持，不如说清"这条接口做不到"。
+    if (isBinaryDoc && !dsP && !ocrP) {
+      // 既没有官方 Files API、也没有官方 OCR：这类文件读不出文字。
+      // 以前是 readAsText 读出一堆乱码发过去，模型只能瞎猜 —— 与其假装支持，不如说清楚。
       if (stillThere()) {
         state.pendingFiles.splice(state.pendingFiles.indexOf(slot), 1);
         renderFilePreview();
       }
-      showToast('「' + file.name + '」需要 DeepSeek 官方接口才能解析（当前接口只收文本与图片）', 'warn');
+      showToast('「' + file.name + '」需要 DeepSeek 官方接口来解析（在「接口管理」里加一个官方接口即可）', 'warn');
       return;
     }
 
@@ -1486,7 +1529,10 @@ function handleFileUpload(e) {
         slot.mimeType = dsMimeOf({ name: file.name, type: file.type });
         slot.base64 = dsBytesToB64(new Uint8Array(ev.target.result));
         slot.content = '';
-        uploadAttachmentSlot(slot, dsP);
+        // 官方接口 → 上传拿 file_id（服务端解析，最好）；
+        // 其他接口 → 官方 OCR 转文本（同一套解析引擎，只是交付形态是文本）。
+        if (dsP) { uploadAttachmentSlot(slot, dsP); return; }
+        parseAttachmentSlot(slot, ocrP);
       };
       abReader.onerror = function () {
         if (!stillThere()) return;
@@ -1538,7 +1584,8 @@ function renderFilePreview() {
         '<img src="data:' + (f.mimeType || 'image/jpeg') + ';base64,' + (f.base64 || f.content || '') + '" class="file-thumb" alt="" />' +
         '<button class="remove-file thumb-x" data-idx="' + i + '" title="移除">✕</button></span>';
     }
-    return '<span class="file-tag">' + escapeHtml(f.name) + ' (' + formatSize(f.size) + ')' +
+    var pg = f.pageCount ? (' · ' + f.pageCount + ' 页') : '';
+    return '<span class="file-tag">' + escapeHtml(f.name) + ' (' + formatSize(f.size) + pg + ')' +
       '<button class="remove-file" data-idx="' + i + '">✕</button></span>';
   }).join('');
 

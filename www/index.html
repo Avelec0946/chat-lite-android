@@ -935,7 +935,7 @@
         <details class="setting-group setting-group-collapsible" data-group-key="ds-suite">
           <summary class="setting-group-summary">DeepSeek 全家桶 <span class="setting-scope">官方接口专属</span></summary>
           <div class="setting-group-body">
-          <span class="setting-hint">2026-11-13 起 DeepSeek 把 App 里的对话能力开放到了 API：<b>服务端联网搜索 / 深度思考搜索</b>、<b>阅读链接</b>、<b>文件输入</b>（PDF / Word / PPT / Excel / 图片）、<b>模型内容安全</b>、<b>会话标题</b>、<b>用户元信息</b>。<br>开着的时候联网<b>不再由本机跑工具循环</b> —— 搜索、打开网页、页内查找全在服务端完成，一次请求出结果，回答还带可点的<b>引用角标</b>；标题也在回答时顺带生成，省掉一次额外请求。<br><b>只对「接口管理」里的 DeepSeek 官方接口（api.deepseek.com）生效</b>；别的提供方继续走本机工具循环，功能不受影响。</span>
+          <span class="setting-hint">2026-11-13 起 DeepSeek 把 App 里的对话能力开放到了 API：<b>服务端联网搜索 / 深度思考搜索</b>、<b>阅读链接</b>、<b>文件输入</b>（PDF / Word / PPT / Excel / 图片）、<b>会话标题</b>、<b>用户元信息</b>。<br>开着的时候联网<b>不再由本机跑工具循环</b> —— 搜索、打开网页、页内查找全在服务端完成，一次请求出结果，回答还带可点的<b>引用角标</b>；标题也在回答时顺带生成，省掉一次额外请求。<br><b>只对「接口管理」里的 DeepSeek 官方接口（api.deepseek.com）生效</b>；别的提供方继续走本机工具循环，功能不受影响。</span>
           <span class="setting-hint" id="ds-suite-state"></span>
           <label class="setting-row">
             <span>启用全家桶</span>
@@ -984,14 +984,6 @@
             </select>
           </label>
           <span class="setting-hint">「仅文字」只取文档里的文字，图表照片丢弃；「图文混排」会把图裁出来按原位置一起交给模型 —— 看带图的财报、幻灯片、说明书时选它，但会多占输入 token。</span>
-          <label class="setting-row">
-            <span>内容安全审核</span>
-            <label class="toggle-switch">
-              <input type="checkbox" id="ds-safety">
-              <span class="toggle-slider"></span>
-            </label>
-          </label>
-          <span class="setting-hint">对外提供服务时必须开（官方要求）。自己一个人用建议关着 —— 开了之后正常提问也可能被判风险然后拒答。<b>默认关</b>。</span>
           </div>
         </details>
 
@@ -1030,24 +1022,24 @@
 <script src="vendor/katex/katex.min.js?v=116"></script>
 <!-- LaTeX 渲染层：须在 katex.min.js 之后、chat.js 之前加载 -->
 <script src="latex.js?v=119"></script>
-<script src="db.js?v=136"></script>
+<script src="db.js?v=137"></script>
 <script src="haptics.js?v=116"></script>
 <script src="providers.js?v=102"></script>
 <!-- v3.0.5: 联网搜索（DeepSeek Search / Fetch）。必须在 providers.js 之后（用 normalizeBaseUrl/getProvider）、chat.js 之前 -->
 <script src="web-search.js?v=8"></script>
 <!-- v3.0.17: DeepSeek 官方「全家桶」适配层（服务端联网工具 / 标题 / 安全 / 用户元信息 / Files API）。
      必须在 web-search.js 之后（复用它的 wsPickProvider 挑官方接口）、chat.js 之前（发送时要调）。 -->
-<script src="ds-suite.js?v=1"></script>
+<script src="ds-suite.js?v=2"></script>
 <!-- v3.0.8: 带工具的对话回合引擎（模型→工具→模型）。依赖 web-search.js 的工具定义，须在 chat.js 之前 -->
 <script src="agent-loop.js?v=6"></script>
 <!-- v3.0.7: 会话标题自动命名。必须在 providers.js 之后（用 getProvider/buildUpstreamPayload）、chat.js 之前（sendFromMessage 调它） -->
 <script src="auto-title.js?v=3"></script>
 <script src="image-gen.js?v=129"></script>
 <script src="conversation.js?v=117"></script>
-<script src="chat.js?v=143"></script>
+<script src="chat.js?v=144"></script>
 <script src="io.js?v=128"></script>
 <script src="gesture-helpers.js?v=102"></script>
-<script src="app.js?v=133"></script>
+<script src="app.js?v=134"></script>
 <!-- v125: 语音通话 —— voice-director 是纯函数层（无 DOM/无网络），voice.js 是运行时 -->
 <!-- v127: voice-provider 管独立的语音接口（地址+密钥+模型），与「接口管理」的聊天渠道无关 -->
 <script src="voice-director.js?v=129"></script>

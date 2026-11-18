@@ -7,7 +7,7 @@
 //   · 服务端联网搜索 / 深度思考搜索（tools 里声明 deepseek_web_search）
 //   · 阅读链接（deepseek_read_url）
 //   · 文件输入（Files API 上传 → 对话里用 file_id 引用）
-//   · 模型内容安全（safety_check）
+//   （模型内容安全 safety_check：v3.0.18 按用户要求**整体移除**，个人自用不需要）
 //   · 会话标题（title，回答时顺带生成，不额外收费）
 //   · 用户元信息（latest_reminder 消息：日期 / 平台 / 语言）
 //   它们和「语言模型」不是一回事：搜索与抓取由**服务端**执行，客户端只渲染返回的内容块。
@@ -34,20 +34,56 @@
 // https://relay.example.com/deepseek，那种转发器不会实现这些扩展字段，发过去只会 400。
 var DS_OFFICIAL_RE = /^https?:\/\/(?:[a-z0-9-]+\.)*deepseek\.com(?::\d+)?(?:[\/?#]|$)/i;
 
-// 全家桶只对 V4.1-Flash（deepseek-flash）开放。v4-pro 目前没有这些能力，
-// 硬发 tools/title 会被拒 —— 那就让这类会话继续走客户端工具循环（agent-loop），功能不受影响。
-var DS_UNSUPPORTED_MODEL_RE = /(^|[-_/])pro([-_/]|$)|reasoner/i;
+// ★ v3.0.18：**官方渠道按地址全量放行，不再按模型名判断**。
+//   原实现把 v4-pro 排除掉了（依据是文档那句"目前 V4.1-Flash 已支持"），
+//   但 2026-11-18 拿真 key 实测：deepseek-v4-pro 带 tools/title/元信息 完全正常
+//   （200、有 server_tool_event、server_tool_use 计费计数、delta.title 也有）。
+//   官方以后一定会推新模型，逐个适配既跟不上也没必要 —— 只要地址是官方就发。
+//   万一某个模型真不收，`dsNoteNativeReject()` 会记下来，下一条自动改走本机工具循环。
+var DS_NATIVE_BLOCK_TTL_MS = 24 * 3600 * 1000;
 
 function dsIsOfficial(provider) {
   if (!provider) return false;
   return DS_OFFICIAL_RE.test(String(provider.baseUrl || ''));
 }
 
-// 模型支不支持全家桶。空模型名按支持处理（官方默认就是 flash）。
-function dsModelSupportsSuite(model) {
-  var m = String(model || '').trim();
-  if (!m) return true;
-  return !DS_UNSUPPORTED_MODEL_RE.test(m);
+// 「这个官方模型能不能用全家桶」。**地址已经在调用处判过了，这里只查本机记住的拒绝**。
+//   留这层是因为我们不再按模型名适配（官方会一直推新模型），但也不能让某个真不支持的
+//   模型每次发消息都撞一次错 —— 撞过一次就记 24 小时，期间自动走本机工具循环。
+function dsModelSupportsSuite(model, provider) {
+  if (provider && dsNativeBlockRec(provider, model)) return false;
+  return true;
+}
+
+function dsNativeBlockKey(provider, model) {
+  return String((provider && provider.id) || '') + '|' + String(model || '');
+}
+
+function dsNativeBlockRec(provider, model) {
+  try {
+    var store = (typeof settings !== 'undefined' && settings && settings.dsSuite) ? settings.dsSuite : null;
+    if (!store || !store.nativeBlock || typeof store.nativeBlock !== 'object') return null;
+    var rec = store.nativeBlock[dsNativeBlockKey(provider, model)];
+    if (!rec || typeof rec.at !== 'number') return null;
+    if (Date.now() - rec.at > DS_NATIVE_BLOCK_TTL_MS) return null;
+    return rec;
+  } catch (e) { return null; }
+}
+
+// 记一条「这个官方模型不收服务端扩展」的证据。只在「错误带状态码 + 本轮一个字都没产出」时调。
+function dsNoteNativeReject(provider, model, status, evidence) {
+  try {
+    if (typeof settings === 'undefined' || !settings) return;
+    if (!settings.dsSuite || typeof settings.dsSuite !== 'object') settings.dsSuite = dsDefaultCfg();
+    var d = settings.dsSuite;
+    if (!d.nativeBlock || typeof d.nativeBlock !== 'object') d.nativeBlock = {};
+    d.nativeBlock[dsNativeBlockKey(provider, model)] = {
+      at: Date.now(),
+      status: typeof status === 'number' ? status : 0,
+      evidence: String(evidence || '').slice(0, 160)
+    };
+    if (typeof saveSettings === 'function') saveSettings();
+  } catch (e) {}
 }
 
 function dsJoinUrl(baseUrl, path) {
@@ -67,7 +103,6 @@ function dsDefaultCfg() {
     enabled: true,          // 总开关：官方接口下启用全家桶（关掉就当普通 OpenAI 兼容接口用）
     webTools: true,         // 服务端联网搜索 + 阅读链接
     title: true,            // 让服务端顺带生成会话标题（省一次额外请求，且不额外收费）
-    safetyCheck: false,     // 内容安全审核（对外提供服务时才需要；个人用开了会被误拒，默认关）
     userMeta: true,         // latest_reminder：把本机日期 / 平台 / 语言告诉模型
     files: true,            // 附件走 Files API（PDF / Office / 图片）
     fileMode: 'text'        // 文档解析方式：text = 只取文字；rich = 图文混排（图表也交给模型，贵一些）
@@ -93,7 +128,7 @@ function dsServerToolsEligible(provider, model) {
   var c = dsCfg();
   if (!c.enabled || !c.webTools) return false;
   if (!dsIsOfficial(provider)) return false;
-  return dsModelSupportsSuite(model);
+  return dsModelSupportsSuite(model, provider);
 }
 
 // 附件能不能走 Files API
@@ -101,7 +136,7 @@ function dsFilesEligible(provider, model) {
   var c = dsCfg();
   if (!c.enabled || !c.files) return false;
   if (!dsIsOfficial(provider)) return false;
-  return dsModelSupportsSuite(model);
+  return dsModelSupportsSuite(model, provider);
 }
 
 // ===== §3 请求注入 =====
@@ -161,7 +196,7 @@ function dsEnrichPayload(payload, o) {
   if (!c.enabled) return payload;
   var provider = o.provider || null;
   var model = o.model || '';
-  if (!dsIsOfficial(provider) || !dsModelSupportsSuite(model)) return payload;
+  if (!dsIsOfficial(provider) || !dsModelSupportsSuite(model, provider)) return payload;
 
   if (o.webSearch && c.webTools) {
     payload.tools = dsServerToolDefs();
@@ -169,9 +204,6 @@ function dsEnrichPayload(payload, o) {
   }
   if (o.title && c.title) {
     payload.title = { enabled: true };
-  }
-  if (c.safetyCheck) {
-    payload.safety_check = { level: 'high' };
   }
   return payload;
 }
@@ -624,13 +656,15 @@ async function dsPostMultipart(baseUrl, apiKey, path, parts, opts) {
       },
       data: data,
       dataType: 'formData',
-      responseType: 'json',
+      // OCR 的响应在结果之前会持续发换行符保活（官方文档明说），原生按 json 直接解析会失败，
+      // 所以 OCR 那条传 text，回来自己 trim 再 JSON.parse。
+      responseType: opts.responseType === 'text' ? 'text' : 'json',
       connectTimeout: 20000,
       readTimeout: readMs
     });
     var st = res && typeof res.status === 'number' ? res.status : 0;
     var body = res && res.data;
-    if (typeof body === 'string') { try { body = JSON.parse(body); } catch (e) {} }
+    if (typeof body === 'string') { try { body = JSON.parse(body.trim()); } catch (e) {} }
     if (st >= 400) throw dsHttpErr(st, body);
     return body || {};
   }
@@ -693,6 +727,108 @@ async function dsUploadFile(provider, file, opts) {
   return { fileId: String(data.id), purpose: purpose };
 }
 
+// ===== §6b 文档解析（跨渠道：官方 OCR → 文本）=====
+//
+// 为什么需要它：`file_id` 是 DeepSeek 账号范围内的存储凭证，换个模型提供方不认。
+//   但"把 PDF 变成文字"跟最后用哪个模型回答毫无关系 —— 所以对非官方渠道，
+//   我们用官方 OCR 接口把文件解析成文本，再把文本当普通上下文发过去。
+//   质量与官方一致（同一套解析引擎，扫描件也能认），代价是丢掉"图文混排"里的图。
+//
+// 实测（2026-11-18，kkaiapi）：中转站既没有 /files 也没有 /v1/tools/ocr（都是 404），
+//   所以解析必须用**官方 key**，与当前会话用哪家模型无关。
+
+// 逐页识别结果里带 `<ref>标题</ref><box>[[52,40,948,96]]</box>` 这类标记（坐标归一化到 0-1000）。
+// 喂给模型前必须清掉，否则全是噪音。
+function dsStripOcrMarkup(text) {
+  return String(text || '')
+    // 只认官方那种**全角竖线**包裹的标记 `<｜ref｜>…<｜/ref｜>`；不用宽松的 `<...ref...>` ——
+    //   那会把正文里真正出现的 <box> / <reference> 也吃掉（文档里写代码时很常见）。
+    .replace(/<｜[^｜<>]{1,12}｜>/g, '')
+    .replace(/\[\[\s*\d+\s*,\s*\d+\s*,\s*\d+\s*,\s*\d+\s*\]\]/g, '')
+    .replace(/\n{3,}/g, '\n\n')
+    .trim();
+}
+
+// 单份文档喂给模型的字符上限。超了按页截断并如实标注 —— 悄悄截断比报错更坏。
+var DS_OCR_MAX_CHARS = 120000;
+
+// file = { name, base64, mimeType, size }；返回 { text, pageCount, truncated, purpose }
+async function dsOcrFile(provider, file, opts) {
+  opts = opts || {};
+  var b64 = String((file && file.base64) || '');
+  if (!b64) throw new Error('文件内容为空');
+  if (!provider || !provider.baseUrl || !provider.apiKey) {
+    throw new Error('没有可用的 DeepSeek 官方接口（文档解析要用它的 OCR）');
+  }
+  var purpose = (opts.mode === 'rich' || dsCfg().fileMode === 'rich') ? 'rich_layout_recognition' : 'text_recognition';
+  // 官方：100 MiB / 1000 页 / 上传 120s / 总时长 180s → 读超时按总时长 + 余量
+  var data = await dsPostMultipart(
+    provider.baseUrl, provider.apiKey, '/v1/tools/ocr',
+    [
+      { key: 'purpose', value: purpose },
+      { key: 'file', value: b64, fileName: dsFileNameOf(file), contentType: dsMimeOf(file) }
+    ],
+    { readTimeoutMs: opts.readTimeoutMs || 200000, responseType: 'text' }
+  );
+  // 识别开始后状态码就是 200，失败是以 {error} 正文返回的 —— 必须查 body
+  if (data && data.error) {
+    throw new Error('解析失败：' + ((data.error && data.error.message) || '未知错误'));
+  }
+  var pages = Array.isArray(data && data.pages) ? data.pages : [];
+  var out = [];
+  var total = 0;
+  var truncated = false;
+  for (var i = 0; i < pages.length; i++) {
+    var t = dsStripOcrMarkup(pages[i] && pages[i].text);
+    if (!t) continue;
+    if (total + t.length > DS_OCR_MAX_CHARS) {
+      var room = Math.max(0, DS_OCR_MAX_CHARS - total);
+      if (room > 200) out.push(t.slice(0, room) + '…（本页余下内容已截断）');
+      truncated = true;
+      break;
+    }
+    out.push(t);
+    total += t.length;
+  }
+  return {
+    text: out.join('\n\n'),
+    pageCount: pages.length || Number(data && data.page_count) || 0,
+    truncated: truncated,
+    purpose: purpose
+  };
+}
+
+// 把正文里的 [n] 变成上标角标（**非官方渠道的引用方案**）。
+//   只给「本轮有来源卡片」的回答用：用户自己在正文里写 [1]（文献引用、脚注）不该被改写，
+//   而那些消息没有 webSources，天然被排除。
+// 输入是 **markdown 源码**（渲染前），所以只能插 HTML、不能转义正文 —— 转义会把 **粗体** 变成字面星号。
+function dsLinkBracketCitations(content, sources) {
+  var text = String(content || '');
+  if (!text || !sources || !sources.length) return text;
+  var n = sources.length;
+  var out = '';
+  var i = 0;
+  var re = /\[(\d{1,2})\]/g;
+  var m;
+  var hit = 0;
+  while ((m = re.exec(text)) !== null) {
+    var idx = parseInt(m[1], 10);
+    if (!(idx >= 1 && idx <= n)) continue;
+    var pos = m.index;
+    if (dsInCodeBlock(text, pos)) continue;
+    var src = sources[idx - 1] || {};
+    var href = String(src.url || '').replace(/"/g, '%22');
+    if (!href) continue;
+    var title = String(src.title || src.url || '').replace(/"/g, '&quot;').replace(/</g, '&lt;');
+    out += text.slice(i, pos) +
+      '<sup class="cite-ref"><a href="' + href + '" title="' + title + '" rel="noopener noreferrer">' + idx + '</a></sup>';
+    i = pos + m[0].length;
+    hit++;
+  }
+  if (!hit) return text;
+  return out + text.slice(i);
+}
+
 // 附件 → 对话请求里的内容块
 function dsFileBlock(fileId) {
   return { type: 'file', file_id: String(fileId) };
@@ -731,7 +867,6 @@ function renderDsSuiteSettings() {
   set('ds-enabled', c.enabled);
   set('ds-web-tools', c.webTools);
   set('ds-title', c.title);
-  set('ds-safety', c.safetyCheck);
   set('ds-user-meta', c.userMeta);
   set('ds-files', c.files);
   var mode = dsEl('ds-file-mode');
@@ -748,11 +883,17 @@ function renderDsSuiteSettings() {
     return;
   }
   var official = dsIsOfficial(pv);
-  if (official && dsModelSupportsSuite(model)) {
+  if (official) {
+    // 官方渠道**按地址**全量放行：不列模型白名单（官方一直在推新模型）。
+    //   只把「本机记住的拒绝」说出来，否则用户会以为开关坏了。
+    var blocked = (typeof dsNativeBlockRec === 'function') ? dsNativeBlockRec(pv, model) : null;
+    if (blocked) {
+      hint.textContent = '当前会话：' + (pv.name || 'DeepSeek') + ' · ' + model +
+        ' —— 这个模型上次拒了带工具/标题的请求（HTTP ' + (blocked.status || '?') + '），已自动改走本机工具循环；切换模型或 24 小时后会自动再试。';
+      hint.className = 'setting-hint ds-hint-bad';
+      return;
+    }
     hint.textContent = '当前会话：' + (pv.name || 'DeepSeek') + ' · ' + model + ' —— 全家桶可用（服务端联网 / 标题 / 文件输入）。';
-    hint.className = 'setting-hint';
-  } else if (official) {
-    hint.textContent = '当前会话用的是 ' + model + '，这个模型暂时没有全家桶能力（目前只对 deepseek-flash 开放）；联网会继续走本机的工具循环，功能不受影响。';
     hint.className = 'setting-hint';
   } else {
     hint.textContent = '当前会话用的不是 DeepSeek 官方接口（' + (pv.name || pv.id) + '），以下开关不生效；联网会继续走本机的工具循环。';
@@ -768,7 +909,6 @@ function saveDsSuiteSettingsFromForm() {
   if (dsEl('ds-enabled')) d.enabled = get('ds-enabled', true);
   if (dsEl('ds-web-tools')) d.webTools = get('ds-web-tools', true);
   if (dsEl('ds-title')) d.title = get('ds-title', true);
-  if (dsEl('ds-safety')) d.safetyCheck = get('ds-safety', false);
   if (dsEl('ds-user-meta')) d.userMeta = get('ds-user-meta', true);
   if (dsEl('ds-files')) d.files = get('ds-files', true);
   var mode = dsEl('ds-file-mode');

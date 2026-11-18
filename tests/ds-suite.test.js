@@ -91,8 +91,18 @@ console.log('\n[dsIsOfficial / dsModelSupportsSuite]');
 
   ok('deepseek-flash 支持', sandbox.dsModelSupportsSuite('deepseek-flash') === true);
   ok('空模型名按支持处理', sandbox.dsModelSupportsSuite('') === true);
-  ok('v4-pro 不支持', sandbox.dsModelSupportsSuite('deepseek-v4-pro') === false);
-  ok('reasoner 不支持', sandbox.dsModelSupportsSuite('deepseek-reasoner') === false);
+  // v3.0.18：官方渠道**按地址全量放行**，不再按模型名适配。
+  //   依据是 2026-11-18 真 key 实测：deepseek-v4-pro 带 tools/title/元信息 完全正常。
+  ok('v4-pro 也放行（不按模型名逐个适配）', sandbox.dsModelSupportsSuite('deepseek-v4-pro') === true);
+  ok('以后的新模型名也放行', sandbox.dsModelSupportsSuite('deepseek-v5-ultra') === true);
+  // 但「本机记住的拒绝」要能压住它
+  sandbox.settings.dsSuite = sandbox.settings.dsSuite || {};
+  sandbox.settings.dsSuite.nativeBlock = {};
+  sandbox.dsNoteNativeReject({ id: 'pX' }, 'deepseek-v9-test', 400, 'tools not supported');
+  ok('撞过 400 的模型 24h 内不再试', sandbox.dsModelSupportsSuite('deepseek-v9-test', { id: 'pX' }) === false);
+  ok('别的模型不受影响', sandbox.dsModelSupportsSuite('deepseek-flash', { id: 'pX' }) === true);
+  ok('另一个接口的同名模型不受影响', sandbox.dsModelSupportsSuite('deepseek-v9-test', { id: 'pY' }) === true);
+  delete sandbox.settings.dsSuite.nativeBlock;
 })();
 
 // ---------- URL 拼装 ----------
@@ -113,13 +123,15 @@ console.log('\n[migrateDsSuiteSettings]');
   ok('默认启用', def.enabled === true);
   ok('默认服务端联网工具开', def.webTools === true);
   ok('默认会话标题开', def.title === true);
-  ok('默认内容安全关（个人用开了会被误拒）', def.safetyCheck === false);
+  ok('safetyCheck 字段已删除（v3.0.18 按用户要求整体移除）', def.safetyCheck === undefined);
   ok('默认用户元信息开', def.userMeta === true);
   ok('默认文件输入开', def.files === true);
   ok('默认仅文字解析', def.fileMode === 'text');
 
   var m = vm.runInContext('migrateDsSuiteSettings({safetyCheck: true, fileMode: "rich", userMeta: false})', sandbox);
-  ok('用户改过的字段保留', m.safetyCheck === true && m.fileMode === 'rich' && m.userMeta === false, JSON.stringify(m));
+  ok('用户改过的字段保留', m.fileMode === 'rich' && m.userMeta === false, JSON.stringify(m));
+  ok('老库里的 safetyCheck 被清掉', m.safetyCheck === undefined);
+  ok('nativeBlock 默认是空对象', m.nativeBlock && typeof m.nativeBlock === 'object');
   ok('缺的字段补默认', m.enabled === true && m.files === true);
   var bad = vm.runInContext('migrateDsSuiteSettings({fileMode: "???", enabled: "yes"})', sandbox);
   ok('非法 fileMode 归位 text', bad.fileMode === 'text');
@@ -151,15 +163,14 @@ console.log('\n[dsEnrichPayload]');
   sandbox.dsEnrichPayload(p3, { webSearch: true, title: true, provider: RELAY, model: 'deepseek-flash' });
   ok('非官方接口一个字段都不注', p3.tools === undefined && p3.title === undefined && p3.safety_check === undefined);
 
+  // v3.0.18：官方渠道按地址全量放行 —— pro 也注（实测它真的支持）
   var p4 = {};
   sandbox.dsEnrichPayload(p4, { webSearch: true, title: true, provider: OFFICIAL, model: 'deepseek-v4-pro' });
-  ok('官方但模型不支持 → 不注', p4.tools === undefined && p4.title === undefined);
+  ok('官方 pro 同样注入（不再按模型名排除）', Array.isArray(p4.tools) && p4.title && p4.title.enabled === true);
 
-  sandbox.settings.dsSuite.safetyCheck = true;
   var p5 = {};
-  sandbox.dsEnrichPayload(p5, { webSearch: false, provider: OFFICIAL, model: 'deepseek-flash' });
-  ok('安全开关打开后注入 safety_check', p5.safety_check && p5.safety_check.level === 'high');
-  sandbox.settings.dsSuite.safetyCheck = false;
+  sandbox.dsEnrichPayload(p5, { webSearch: true, title: true, provider: OFFICIAL, model: 'deepseek-flash' });
+  ok('请求里永远没有 safety_check', p5.safety_check === undefined);
 
   sandbox.settings.dsSuite.enabled = false;
   var p6 = {};
@@ -517,6 +528,45 @@ console.log('\n[接缝：buildFileContent / agentTraceHtml]');
   ok('正文渲染插入引用角标', /dsInjectCiteMarkers\(text, msg\.citations\)/.test(chatSrc));
   ok('buildContext 把 dsFiles + 密钥指纹交给附件构建',
     /buildFileContent\(m, \{ dsFiles: dsFiles, dsKeyTag: dsFilesTag \}\)/.test(chatSrc));
+})();
+
+
+// ---------- 客户端引用角标（非官方渠道）----------
+console.log('\n[dsLinkBracketCitations]');
+(function () {
+  var srcs = [
+    { title: '来源一', url: 'https://a/1' },
+    { title: '来源二', url: 'https://b/2' }
+  ];
+  var out = sandbox.dsLinkBracketCitations('冰岛人口 39.4 万 [1]，另一说 40.46 万 [2]。', srcs);
+  ok('两个方括号都变成上标', (out.match(/class="cite-ref"/g) || []).length === 2, out);
+  ok('编号指向对应来源', out.indexOf('https://a/1') > 0 && out.indexOf('https://b/2') > 0);
+  ok('正文其余部分保持 markdown 原样（不被转义）',
+    sandbox.dsLinkBracketCitations('**粗体** [1]', srcs).indexOf('**粗体**') >= 0);
+  ok('超出来源数量的编号原样保留',
+    sandbox.dsLinkBracketCitations('无关 [7]', srcs) === '无关 [7]');
+  ok('没有来源时原样返回', sandbox.dsLinkBracketCitations('a [1]', []) === 'a [1]');
+  ok('代码块里的不插',
+    sandbox.dsLinkBracketCitations('```\nx[1]\n```', srcs).indexOf('cite-ref') < 0);
+  ok('链接标题被转义', sandbox.dsLinkBracketCitations('x [1]', [{ url: 'u', title: 'a"b' }]).indexOf('&quot;') > 0);
+})();
+
+// ---------- OCR 标记清理 + 解析结果拼装 ----------
+console.log('\n[dsStripOcrMarkup / dsOcrFile 契约]');
+(function () {
+  // 真实格式用的是**全角竖线**：<｜ref｜>标题<｜/ref｜><｜box｜>[[…]]<｜/box｜>
+  var raw = '<｜ref｜>标题<｜/ref｜><｜box｜>[[52, 40, 948, 96]]<｜/box｜>正文第一段\n\n\n正文第二段';
+  var clean = sandbox.dsStripOcrMarkup(raw);
+  ok('去掉 ref/box 标记', clean.indexOf('ref') < 0 && clean.indexOf('box') < 0, clean);
+  ok('去掉坐标数组', clean.indexOf('948') < 0, clean);
+  ok('保留正文', clean.indexOf('正文第一段') > 0 && clean.indexOf('正文第二段') > 0);
+  ok('折叠多余空行', clean.indexOf('\n\n\n') < 0);
+  ok('空输入不炸', sandbox.dsStripOcrMarkup('') === '' && sandbox.dsStripOcrMarkup(null) === '');
+  // 宽松匹配会误伤正文里的字面标记（文档里写代码时很常见），这里钉住"别删"
+  ok('字面 <box> / <reference> 不被误删',
+    sandbox.dsStripOcrMarkup('写 <box> 和 <reference>').indexOf('<box>') > 0);
+  ok('字符上限变量存在且合理', sandbox.DS_OCR_MAX_CHARS >= 50000);
+  ok('dsOcrFile 是函数', typeof sandbox.dsOcrFile === 'function');
 })();
 
 console.log('\n' + passes + ' passed, ' + failures + ' failed');

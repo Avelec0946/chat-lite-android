@@ -370,7 +370,6 @@ function migrateSettings(s) {
 // v3.0.17: DeepSeek 全家桶。默认值全部取自「官方接口下最省事的形态」：
 //   · webTools 开 —— 官方接口下联网就该走服务端，比客户端工具循环快且能看到引用；
 //   · title 开 —— 回答时顺带生成标题，不额外计费，还省掉 auto-title 那一次请求；
-//   · safetyCheck 关 —— 它是对外提供服务时的合规要求，个人用开着只会被误拒；
 //   · userMeta 开 —— 否则模型不知道"今天几号"，联网时容易拿训练数据的日期去拼搜索词；
 //   · files 开 / fileMode 文字 —— PDF、Office 能读了，且默认不裁图（省 token）。
 function defaultDsSuiteSettings() {
@@ -378,7 +377,8 @@ function defaultDsSuiteSettings() {
     enabled: true,
     webTools: true,
     title: true,
-    safetyCheck: false,
+    // v3.0.18：safetyCheck 字段已整体移除（用户明确：自用不需要内容安全审核）。
+    //   老库里如果还留着，migrateDsSuiteSettings 会把它删掉 —— 见下面。
     userMeta: true,
     files: true,
     fileMode: 'text'
@@ -398,6 +398,10 @@ function migrateDsSuiteSettings(d) {
     }
   }
   if (out.fileMode !== 'rich') out.fileMode = 'text';
+  // v3.0.18：safety_check 已从产品里删掉，顺手把老库里的残留键清掉（否则设置里会一直躺着一个死字段）
+  delete out.safetyCheck;
+  // 本机记住的「这个官方模型不收服务端扩展」证据（ds-suite 写、24 小时过期）
+  out.nativeBlock = (d.nativeBlock && typeof d.nativeBlock === 'object' && !Array.isArray(d.nativeBlock)) ? d.nativeBlock : {};
   return out;
 }
 

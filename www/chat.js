@@ -116,6 +116,13 @@ function renderBody(msg) {
   if (msg && msg.role !== 'user' && Array.isArray(msg.citations) && msg.citations.length &&
       typeof dsInjectCiteMarkers === 'function') {
     try { text = dsInjectCiteMarkers(text, msg.citations); } catch (e) {}
+  } else if (msg && msg.role !== 'user' && Array.isArray(msg.webSources) && msg.webSources.length &&
+      typeof dsLinkBracketCitations === 'function') {
+    // v3.0.18：**客户端引用方案**（给非官方渠道用）。
+    //   官方接口的引用来自服务端 annotations（上面那条），第三方没有 —— 那就让模型在正文里
+    //   写 [n]（工具结果本来就带编号，实测 gpt/claude 这类模型都肯配合），渲染时换成上标。
+    //   编号与来源卡片的序号同一个来源（webSources 的顺序），所以点开就是那一条。
+    try { text = dsLinkBracketCitations(text, msg.webSources); } catch (e) {}
   }
   if (msg && msg.role === 'user' && !renderUserLatexEnabled()) {
     try {
@@ -363,7 +370,7 @@ async function sendMessage() {
       content: f.isImage ? f.content : String(f.content || '').slice(0, 500000),
       isImage: f.isImage, base64: f.base64, mimeType: f.mimeType, size: f.size,
       binary: !!f.binary, dsFileId: f.dsFileId || '', dsPurpose: f.dsPurpose || '',
-      dsKeyTag: f.dsKeyTag || ''
+      dsKeyTag: f.dsKeyTag || '', pageCount: f.pageCount || 0, parsedBy: f.parsedBy || ''
     })),
     createdAt: Date.now()
   };
@@ -1748,6 +1755,16 @@ async function sendFromMessage(context) {
 
   } catch (err) {
     console.error('Send error:', err);
+    // v3.0.18：官方渠道按地址全量放行之后，总会碰上「某个官方模型其实不收扩展字段」的那一天。
+    //   判据必须是**结构化事实**：错误带 HTTP 状态码、且本轮一个字都没产出
+    //   （产出过就不是"字段不认"的问题，多半是网络/超时）。记 24 小时，下一条自动走本机循环。
+    if (dsTurn && !assistantMsg.content && err && typeof err.status === 'number' &&
+        typeof dsNoteNativeReject === 'function' && provider) {
+      try {
+        dsNoteNativeReject(provider, conv.model, err.status, err.message);
+        showToast('这个模型不收服务端工具/标题（HTTP ' + err.status + '），下一条会自动改走本机联网', 'warn');
+      } catch (e2) {}
+    }
     // 保留已生成内容，标记为中断
     assistantMsg.interrupted = true;
     // v122: 空闲超时触发的 abort 要如实说明是「等待超时」，不能混成「用户打断」
