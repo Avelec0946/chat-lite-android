@@ -1589,28 +1589,39 @@ async function sendFromMessage(context) {
     dsServerToolsEligible(provider, conv.model) &&
     typeof webSearchEnabled === 'function' && webSearchEnabled(conv);
 
+  // ===== v3.0.19: 本机日期提示（替代官方的 latest_reminder）=====
+  //   用户的决定：官方的元信息字段不要，用我们自己的；**只在联网时出现**；
+  //   出现方式学官方 —— 不占前缀缓存、不进入本地记录。
+  //   实现：挂到**本轮最后一条 user 消息**末尾（见 dsAttachDateHint 的注释为什么不用独立消息）。
+  //   注意它是请求期的临时数组：buildContext 每次新建，注入不落到会话记录里。
+  var wsOn = (typeof webSearchEnabled === 'function') && webSearchEnabled(conv);
+  var reqMsgs = context;
+  if (wsOn && typeof dsAttachDateHint === 'function') {
+    try { reqMsgs = dsAttachDateHint(context); } catch (e) { reqMsgs = context; }
+  }
+
   if (typeof agentRunAdaptive === 'function' && typeof webSearchEnabled === 'function' && webSearchEnabled(conv) && !dsNative) {
     var wsReady = (typeof wsResolveTarget === 'function') ? wsResolveTarget() : { ok: false, reason: '联网搜索未就绪' };
     if (!wsReady.ok) {
       // 没配密钥/地址：不阻断这轮对话，只是没有工具可用
       showToast(wsReady.reason + '（本轮仍会正常回答，只是不能联网）', 'warn');
     } else {
-      await runAgentChat(provider, conv, context, assistantMsg);
+      await runAgentChat(provider, conv, reqMsgs, assistantMsg);
       return;
     }
   }
 
   var reqBody = {
-    messages: context,
+    messages: reqMsgs,
     model: conv.model,
     stream: !isCapacitor(),
     thinkingEnabled: conv.thinkingEnabled !== false
   };
 
-  // v3.0.17：官方接口的扩展字段（服务端工具 / 会话标题 / 内容安全）+ 用户元信息。
+  // v3.0.17：官方接口的扩展字段（服务端工具 / 会话标题）。
   //   · 标题只在「新建会话第一轮、还没定过名」时要 —— 判定复用 auto-title 的 atShouldTitle，
   //     拿到后由 dsApplyTitle 写回，并置 titleAuto.done，那边的额外命名请求就自动不发了。
-  //   · latest_reminder 挂在最后一条 user 消息前（官方要求紧邻）。
+  //   · 日期提示不在这里（v3.0.19 起统一挂在用户消息上，两条通道共用）。
   var dsTurn = null;
   var wantTitle = false;
   if (dsOn) {
@@ -1623,7 +1634,6 @@ async function sendFromMessage(context) {
         model: conv.model
       });
     }
-    if (typeof dsInjectReminder === 'function') reqBody.messages = dsInjectReminder(reqBody.messages);
     if (wantTitle || reqBody.tools) dsTurn = (typeof dsNewTurn === 'function') ? dsNewTurn() : null;
   }
 

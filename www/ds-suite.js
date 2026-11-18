@@ -103,7 +103,6 @@ function dsDefaultCfg() {
     enabled: true,          // 总开关：官方接口下启用全家桶（关掉就当普通 OpenAI 兼容接口用）
     webTools: true,         // 服务端联网搜索 + 阅读链接
     title: true,            // 让服务端顺带生成会话标题（省一次额外请求，且不额外收费）
-    userMeta: true,         // latest_reminder：把本机日期 / 平台 / 语言告诉模型
     files: true,            // 附件走 Files API（PDF / Office / 图片）
     fileMode: 'text'        // 文档解析方式：text = 只取文字；rich = 图文混排（图表也交给模型，贵一些）
   };
@@ -146,45 +145,51 @@ function dsServerToolDefs() {
   return [{ type: 'deepseek_web_search' }, { type: 'deepseek_read_url' }];
 }
 
-// 今天是星期几（latest_reminder 的 weekday 要用中文写）
-function dsWeekdayCN(d) {
-  return ['星期日', '星期一', '星期二', '星期三', '星期四', '星期五', '星期六'][d.getDay()] || '';
-}
-
 function dsTodayStr(d) {
   d = d || new Date();
   function p2(n) { return n < 10 ? '0' + n : String(n); }
   return d.getFullYear() + '-' + p2(d.getMonth() + 1) + '-' + p2(d.getDate());
 }
 
-// 用户元信息消息。格式是官方规定的 `<date>,<weekday>,<location>,<platform>,<language>` ——
-// **必须是 5 段**，location 可以留空但**逗号不能省**（写成 4 段会被 400：
-//   "latest_reminder must have at least 5 comma-separated fields, got 4"  ← 真机请求实测）。
-// 所以我们固定发 `日期,星期,,App,中文`（两个连续逗号之间就是空 location）。
-// 不填 location 是因为拿不到可靠的地理位置：宁可空着，也不要瞎猜一个城市让模型据此作答。
-function dsReminderMessage() {
-  var d = new Date();
-  var platform = (typeof isCapacitor === 'function' && isCapacitor()) ? 'App' : 'Web';
-  return {
-    role: 'latest_reminder',
-    content: dsTodayStr(d) + ',' + dsWeekdayCN(d) + ',,' + platform + ',中文'
-  };
+// ===== 本机日期提示（v3.0.19：取代官方的 latest_reminder）=====
+//
+// 用户的决定：「官方的用户元信息字段直接不要，用我们自己的；只在打开网络搜索时出现，
+//   出现方式跟官方的元信息字段一样（不占缓存、不进入本地记录）」。
+//
+// 为什么挂在**本轮用户消息末尾**，而不是照抄官方的独立角色/独立 system：
+//   ① `latest_reminder` 那个 role 只有认它的接口才吃，很多网关遇到未知 role 直接 400；
+//   ② 单独插一条 system 也不安全 —— 语音侧踩过「网关只认开头那一条 system」的坑；
+//   ③ 挂在本轮 user 上，**前缀缓存完全不受影响**（变的只有最后一条），
+//      而且它本来就是"这一轮的上下文"，语义比塞进 system 更贴切；
+//   ④ 这是语音模块早就立的规矩：逐轮会变的内容挂在本轮用户话末尾，绝不进 system。
+//
+// 只到天、不带时分 —— 带时分等于每分钟换一次尾巴（本项目 §4.24 的老教训）。
+// 文案沿用 v3.0.15 那一版：写清"这是设备时钟 + 问今天几号直接答 + 拼搜索词别自己编日期"。
+function dsDateHintText() {
+  return '（本机日期 ' + dsTodayStr() + '：这是用户设备的当前日期。'
+    + '问「今天几号」这类问题就按它回答，不必为此搜索；但拼搜索词时不要自己编日期，'
+    + '需要「今天 / 最近」就直接写这些词，或用 after: 运算符。）';
 }
 
-// 把 latest_reminder 插到「最后一条 user 之前」（官方要求紧邻，后面必须跟 user，否则 400）。
-// 只插本轮这一条：历史轮次的都插会让每次请求的前缀随历史长度变化，缓存反而更差；
-// 官方也说「不回传也可以，只是缓存命中低一点」。
-function dsInjectReminder(messages) {
+// 把提示接到**最后一条 user** 上（字符串拼末尾；内容块数组则追加一个 text 块）。
+// 返回新数组，不动调用方的（buildContext 每次新建，但别依赖这一点）。
+function dsAttachDateHint(messages) {
   var out = (messages || []).slice();
-  if (!dsCfg().userMeta) return out;
   var idx = -1;
   for (var i = out.length - 1; i >= 0; i--) {
     if (out[i] && out[i].role === 'user') { idx = i; break; }
   }
   if (idx < 0) return out;
-  // 已经有一条就不要再插（重复插入会被上游判成不合法的序列）
-  if (idx > 0 && out[idx - 1] && out[idx - 1].role === 'latest_reminder') return out;
-  out.splice(idx, 0, dsReminderMessage());
+  var hint = dsDateHintText();
+  var m = out[idx];
+  var next;
+  if (Array.isArray(m.content)) {
+    next = { role: 'user', content: m.content.concat([{ type: 'text', text: hint }]) };
+  } else {
+    var t = String(m.content == null ? '' : m.content);
+    next = { role: 'user', content: t ? (t + '\n\n' + hint) : hint };
+  }
+  out[idx] = Object.assign({}, m, next);
   return out;
 }
 
@@ -867,7 +872,6 @@ function renderDsSuiteSettings() {
   set('ds-enabled', c.enabled);
   set('ds-web-tools', c.webTools);
   set('ds-title', c.title);
-  set('ds-user-meta', c.userMeta);
   set('ds-files', c.files);
   var mode = dsEl('ds-file-mode');
   if (mode) mode.value = c.fileMode === 'rich' ? 'rich' : 'text';
@@ -909,7 +913,6 @@ function saveDsSuiteSettingsFromForm() {
   if (dsEl('ds-enabled')) d.enabled = get('ds-enabled', true);
   if (dsEl('ds-web-tools')) d.webTools = get('ds-web-tools', true);
   if (dsEl('ds-title')) d.title = get('ds-title', true);
-  if (dsEl('ds-user-meta')) d.userMeta = get('ds-user-meta', true);
   if (dsEl('ds-files')) d.files = get('ds-files', true);
   var mode = dsEl('ds-file-mode');
   if (mode) d.fileMode = mode.value === 'rich' ? 'rich' : 'text';

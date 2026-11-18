@@ -124,13 +124,14 @@ console.log('\n[migrateDsSuiteSettings]');
   ok('默认服务端联网工具开', def.webTools === true);
   ok('默认会话标题开', def.title === true);
   ok('safetyCheck 字段已删除（v3.0.18 按用户要求整体移除）', def.safetyCheck === undefined);
-  ok('默认用户元信息开', def.userMeta === true);
+  ok('不再有 userMeta 字段（v3.0.19：日期提示不再是开关）', def.userMeta === undefined);
   ok('默认文件输入开', def.files === true);
   ok('默认仅文字解析', def.fileMode === 'text');
 
   var m = vm.runInContext('migrateDsSuiteSettings({safetyCheck: true, fileMode: "rich", userMeta: false})', sandbox);
-  ok('用户改过的字段保留', m.fileMode === 'rich' && m.userMeta === false, JSON.stringify(m));
+  ok('用户改过的字段保留', m.fileMode === 'rich', JSON.stringify(m));
   ok('老库里的 safetyCheck 被清掉', m.safetyCheck === undefined);
+  ok('老库里的 userMeta 被清掉', m.userMeta === undefined);
   ok('nativeBlock 默认是空对象', m.nativeBlock && typeof m.nativeBlock === 'object');
   ok('缺的字段补默认', m.enabled === true && m.files === true);
   var bad = vm.runInContext('migrateDsSuiteSettings({fileMode: "???", enabled: "yes"})', sandbox);
@@ -179,8 +180,8 @@ console.log('\n[dsEnrichPayload]');
   sandbox.settings.dsSuite.enabled = true;
 })();
 
-// ---------- latest_reminder ----------
-console.log('\n[dsInjectReminder]');
+// ---------- 本机日期提示（v3.0.19，取代 latest_reminder）----------
+console.log('\n[dsAttachDateHint]');
 (function () {
   var msgs = [
     { role: 'system', content: 'sys' },
@@ -188,27 +189,29 @@ console.log('\n[dsInjectReminder]');
     { role: 'assistant', content: '答' },
     { role: 'user', content: '第二问' }
   ];
-  var out = sandbox.dsInjectReminder(msgs);
-  ok('插在最后一条 user 之前', out.length === 5 && out[3].role === 'latest_reminder' && out[4].content === '第二问',
-    JSON.stringify(out.map(function (m) { return m.role; })));
-  var rm = out[3].content;
-  // 官方要求 **5 段**：date,weekday,location,platform,language。location 可以空，但逗号不能省
-  //   （写成 4 段会被真接口 400：latest_reminder must have at least 5 comma-separated fields）
-  ok('格式必须是 5 段（location 留空也要两个连续逗号）',
-    /^\d{4}-\d{2}-\d{2},星期[日一二三四五六],,(App|Web),中文$/.test(rm), rm);
-  ok('刚好 5 段', rm.split(',').length === 5, String(rm.split(',').length));
-  ok('不改原数组', msgs.length === 4);
+  var out = sandbox.dsAttachDateHint(msgs);
+  ok('提示挂在最后一条 user 的末尾', out.length === 4 && /第二问[\s\S]*本机日期/.test(out[3].content), out[3].content);
+  ok('不新增消息（不是独立 system、也不是 latest_reminder 那种角色）',
+    out.length === 4 && out[3].role === 'user');
+  ok('日期只到天、不带时分', /\d{4}-\d{2}-\d{2}/.test(out[3].content) && !/\d{4}-\d{2}-\d{2}\s*\d{2}:/.test(out[3].content));
+  ok('用的是运行时日期', out[3].content.indexOf(sandbox.dsTodayStr()) > 0);
+  // 这条是"不占缓存"的硬指标：前面每一条都必须逐字节不变
+  ok('前几条一个字符都没变（前缀缓存不受影响）',
+    out[0].content === 'sys' && out[1].content === '第一问' && out[2].content === '答');
+  ok('不改原数组（不落进会话记录）', msgs[3].content === '第二问', msgs[3].content);
 
-  var twice = sandbox.dsInjectReminder(out);
-  ok('已经有一条就不再插', twice.filter(function (m) { return m.role === 'latest_reminder'; }).length === 1);
+  var withFiles = [{ role: 'user', content: [{ type: 'text', text: '看图' }, { type: 'image_url', image_url: { url: 'x' } }] }];
+  var out2 = sandbox.dsAttachDateHint(withFiles);
+  ok('内容块消息追加一个 text 块（带附件也能挂）',
+    Array.isArray(out2[0].content) && out2[0].content.length === 3 &&
+    out2[0].content[2].type === 'text' && /本机日期/.test(out2[0].content[2].text));
 
-  sandbox.settings.dsSuite.userMeta = false;
-  var off = sandbox.dsInjectReminder(msgs);
-  ok('关掉后不插', off.length === 4);
-  sandbox.settings.dsSuite.userMeta = true;
-
-  var noUser = sandbox.dsInjectReminder([{ role: 'system', content: 's' }]);
-  ok('没有 user 消息就不插', noUser.length === 1);
+  var empty = [{ role: 'user', content: '' }];
+  ok('空正文时只放提示', /^（本机日期/.test(sandbox.dsAttachDateHint(empty)[0].content));
+  ok('没有 user 消息就原样返回', sandbox.dsAttachDateHint([{ role: 'system', content: 's' }]).length === 1);
+  ok('空输入不炸', sandbox.dsAttachDateHint(null).length === 0);
+  ok('latest_reminder 那套函数已删除',
+    typeof sandbox.dsInjectReminder === 'undefined' && typeof sandbox.dsReminderMessage === 'undefined');
 })();
 
 // ---------- 标题 ----------

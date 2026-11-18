@@ -373,16 +373,16 @@ console.log('\n[tool_calls 归并]');
     ok('原生通道的 system 提示词没被注入任何东西',
       requests[0].messages[0].role === 'system' && requests[0].messages[0].content === '你是助手',
       JSON.stringify(requests[0].messages[0].content));
-    // 日期必须是**运行时算出来的那个值**，不是写死的字符串
-    var today = vm.runInContext('agentTodayStr()', sandbox);
-    ok('日期挂在 web_search 的 description 上（原生），且用的是运行时值',
-      (requests[0].tools[0].function.description || '').indexOf('本机日期 ' + today) >= 0,
+    // v3.0.19：日期不再由 agent-loop 注入 —— 它挂在「本轮用户消息末尾」（ds-suite dsAttachDateHint），
+    //   由 chat.js 统一注入。这里钉住"agent-loop 自己一个字都不加"，防止两处各写一份。
+    ok('工具定义里不再带日期',
+      (requests[0].tools[0].function.description || '').indexOf('本机日期') < 0,
       requests[0].tools[0].function.description);
-    ok('文本协议的说明块里也带日期（同一个运行时值）',
-      requests[1].messages[0].content.indexOf('本机日期 ' + today) >= 0);
-    ok('日期只到天、不带时分（带时分等于每分钟换一次 system，前缀缓存全废）',
-      !/\d{4}-\d{2}-\d{2}\s*\d{2}:/.test(requests[1].messages[0].content) &&
-      !/\d{4}-\d{2}-\d{2}\s*\d{2}:/.test(requests[0].tools[0].function.description || ''));
+    ok('文本协议块里也不再带日期',
+      requests[1].messages[0].content.indexOf('本机日期') < 0);
+    ok('agent-loop 不再自带日期函数（唯一实现在 ds-suite）',
+      vm.runInContext('typeof agentDateHint', sandbox) === 'undefined' &&
+      vm.runInContext('typeof agentTodayStr', sandbox) === 'undefined');
     ok('除 web_search 外的工具定义原样不动',
       requests[0].tools.length === 1);
     ok('工具真的被执行了', execCalls.length === 1 && execCalls[0].args.query === '今天科技新闻', JSON.stringify(execCalls));

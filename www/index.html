@@ -935,7 +935,7 @@
         <details class="setting-group setting-group-collapsible" data-group-key="ds-suite">
           <summary class="setting-group-summary">DeepSeek 全家桶 <span class="setting-scope">官方接口专属</span></summary>
           <div class="setting-group-body">
-          <span class="setting-hint">2026-11-13 起 DeepSeek 把 App 里的对话能力开放到了 API：<b>服务端联网搜索 / 深度思考搜索</b>、<b>阅读链接</b>、<b>文件输入</b>（PDF / Word / PPT / Excel / 图片）、<b>会话标题</b>、<b>用户元信息</b>。<br>开着的时候联网<b>不再由本机跑工具循环</b> —— 搜索、打开网页、页内查找全在服务端完成，一次请求出结果，回答还带可点的<b>引用角标</b>；标题也在回答时顺带生成，省掉一次额外请求。<br><b>只对「接口管理」里的 DeepSeek 官方接口（api.deepseek.com）生效</b>；别的提供方继续走本机工具循环，功能不受影响。</span>
+          <span class="setting-hint">2026-11-13 起 DeepSeek 把 App 里的对话能力开放到了 API：<b>服务端联网搜索 / 深度思考搜索</b>、<b>阅读链接</b>、<b>文件输入</b>（PDF / Word / PPT / Excel / 图片）、<b>会话标题</b>。<br>开着的时候联网<b>不再由本机跑工具循环</b> —— 搜索、打开网页、页内查找全在服务端完成，一次请求出结果，回答还带可点的<b>引用角标</b>；标题也在回答时顺带生成，省掉一次额外请求。<br><b>只对「接口管理」里的 DeepSeek 官方接口（api.deepseek.com）生效</b>；别的提供方继续走本机工具循环，功能不受影响。</span>
           <span class="setting-hint" id="ds-suite-state"></span>
           <label class="setting-row">
             <span>启用全家桶</span>
@@ -960,14 +960,7 @@
             </label>
           </label>
           <span class="setting-hint">标题由模型在回答时一并给出，不额外收费，也省掉「自动命名」那一次额外请求。仍然只对新会话的第一次回答生效，绝不覆盖你手改的名字。</span>
-          <label class="setting-row">
-            <span>用户元信息（日期 / 平台 / 语言）</span>
-            <label class="toggle-switch">
-              <input type="checkbox" id="ds-user-meta" checked>
-              <span class="toggle-slider"></span>
-            </label>
-          </label>
-          <span class="setting-hint">每轮在用户消息前加一条 <code>latest_reminder</code>（本机日期、平台、语言），模型才知道「今天」是哪天 —— 否则联网时会拿训练数据里的日期去拼搜索词。</span>
+          <span class="setting-hint"><b>本机日期</b>不是开关：打开「联网搜索」时，会在你这条消息的末尾附一句「本机日期 YYYY-MM-DD」，关掉联网就没有。它只挂在本轮消息上 —— 不进对话记录、不影响前缀缓存，也不像官方那样往上下文里塞平台/语言这些噪音。</span>
           <label class="setting-row">
             <span>文件输入（PDF / Office / 图片）</span>
             <label class="toggle-switch">
@@ -1022,21 +1015,21 @@
 <script src="vendor/katex/katex.min.js?v=116"></script>
 <!-- LaTeX 渲染层：须在 katex.min.js 之后、chat.js 之前加载 -->
 <script src="latex.js?v=119"></script>
-<script src="db.js?v=137"></script>
+<script src="db.js?v=138"></script>
 <script src="haptics.js?v=116"></script>
 <script src="providers.js?v=102"></script>
 <!-- v3.0.5: 联网搜索（DeepSeek Search / Fetch）。必须在 providers.js 之后（用 normalizeBaseUrl/getProvider）、chat.js 之前 -->
 <script src="web-search.js?v=8"></script>
 <!-- v3.0.17: DeepSeek 官方「全家桶」适配层（服务端联网工具 / 标题 / 安全 / 用户元信息 / Files API）。
      必须在 web-search.js 之后（复用它的 wsPickProvider 挑官方接口）、chat.js 之前（发送时要调）。 -->
-<script src="ds-suite.js?v=2"></script>
+<script src="ds-suite.js?v=3"></script>
 <!-- v3.0.8: 带工具的对话回合引擎（模型→工具→模型）。依赖 web-search.js 的工具定义，须在 chat.js 之前 -->
-<script src="agent-loop.js?v=6"></script>
+<script src="agent-loop.js?v=7"></script>
 <!-- v3.0.7: 会话标题自动命名。必须在 providers.js 之后（用 getProvider/buildUpstreamPayload）、chat.js 之前（sendFromMessage 调它） -->
 <script src="auto-title.js?v=3"></script>
 <script src="image-gen.js?v=129"></script>
 <script src="conversation.js?v=117"></script>
-<script src="chat.js?v=144"></script>
+<script src="chat.js?v=145"></script>
 <script src="io.js?v=128"></script>
 <script src="gesture-helpers.js?v=102"></script>
 <script src="app.js?v=134"></script>

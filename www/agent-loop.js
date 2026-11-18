@@ -482,14 +482,12 @@ function agentCompactParams(fnDef) {
 function agentToolProtocolPrompt(round, maxRounds) {
   var defs = (typeof WEB_TOOL_DEFS !== 'undefined' && Array.isArray(WEB_TOOL_DEFS)) ? WEB_TOOL_DEFS : null;
   if (!defs || !defs.length) return '';
-  var dateHint = agentDateHint();
   var lines = [];
   lines.push('【工具调用协议】你可以联网。需要实时或不确定的信息时用下面的工具；常识、推理、写作、代码直接回答，不要调用。');
   for (var i = 0; i < defs.length; i++) {
     var f = defs[i] && (defs[i].function || defs[i]);
     if (!f || !f.name) continue;
     var desc = f.description || '';
-    if (f.name === 'web_search') desc += dateHint;      // 日期挂在"决定怎么搜"的位置上
     lines.push('- ' + f.name + ' ' + agentCompactParams(f) + '：' + desc);
   }
   // 链式提示：模型天然倾向"搜一次就答"，不会主动去抓正文 —— 不写这句它就不抓（实测 gemini 就是）。
@@ -502,43 +500,6 @@ function agentToolProtocolPrompt(round, maxRounds) {
   lines.push('客户端会执行它，并把结果作为下一条消息发给你。拿到结果后可以继续调用（再来一个同样的块），也可以直接作答；作答时不要再输出这个块。');
   if (round >= maxRounds) lines.push('【这是最后一次机会：不要再调用工具，直接用已有材料作答。】');
   return lines.join('\n');
-}
-
-// 环境信息（只有日期，**不带时分**）：联网场景里模型必须先知道"今天"是哪天，
-//   否则它会拿训练数据里的某个日期去拼搜索词 —— 实测 gemini 把"今天的科技新闻"搜成了
-//   「今日科技新闻 2024年5月22日」，拿回一堆两年前的旧闻还当成今天的。
-// 为什么只放日期：§4.24 的教训是「逐轮会变的东西绝不能进 system」—— 带上时分等于每分钟
-//   换一次前缀，缓存全废；日期一天变一次，代价可以接受。
-// ★ v3.0.14：日期不再单独占一行 system，而是**挂在 web_search 的工具说明上**。
-//   两个理由：① 原生通道的 system 提示词因此**一个字符都不变**（DeepSeek 完全不受影响）；
-//   ② 它出现在模型"决定怎么搜"的位置上，比在 system 开头更贴题，也不跟系统指令抢注意力。
-// ★ v3.0.15：文案改成「本机日期」，并显式说明它从哪来、能用来干什么。
-//   为什么要写清楚：这行字是**模型每次请求都读得到的事实**，不是搜索来的 ——
-//   用户问「今天几号」它会直接答（这是对的：搜索引擎不知道"你的今天"），
-//   但如果只写「当前日期」，模型会当成宇宙真理去讲，用户无从知道它其实来自设备时钟。
-function agentTodayStr() {
-  var d = new Date();
-  function p2(n) { return n < 10 ? '0' + n : String(n); }
-  return d.getFullYear() + '-' + p2(d.getMonth() + 1) + '-' + p2(d.getDate());
-}
-
-// 只到天、不带时分：带上时分等于每分钟换一次前缀，缓存全废（§4.24）。
-function agentDateHint() {
-  return '（本机日期 ' + agentTodayStr() + '：这是用户设备的当前日期。'
-    + '问「今天几号」这类问题就按它回答，不必为此搜索；但拼搜索词时不要自己编日期，'
-    + '需要「今天 / 最近」就直接写这些词，或用 after: 运算符。）';
-}
-
-// 原生通道：把日期拼进 web_search 的 description（工具定义本来就要发，等于零额外开销）。
-// 只改 web_search，别的一个字段都不动 —— 其它工具的行为保持原样。
-function agentToolsWithDate(tools) {
-  if (!tools || !tools.length) return tools;
-  var hint = agentDateHint();
-  return tools.map(function(t) {
-    var f = t && (t.function || t);
-    if (!f || f.name !== 'web_search') return t;
-    return { type: 'function', function: Object.assign({}, f, { description: (f.description || '') + hint }) };
-  });
 }
 
 // 把协议说明并进**第一条 system**（不新开一条 system 消息：不少网关只认开头那一条，
@@ -732,8 +693,8 @@ async function agentRunAdaptive(o) {
     var eng = chain[i];
     var produced = false;
     var opts = Object.assign({}, o, {
-      // 原生通道：日期只挂在 web_search 的说明上（system 提示词一个字符都不动）
-      tools: eng === 'native' ? agentToolsWithDate(o.tools) : o.tools,
+      // v3.0.19：日期改挂在「本轮用户消息末尾」（chat.js 注入），工具定义与 system 一个字符都不动
+      tools: o.tools,
       echoReasoning: echoReasoning,
       onDelta: function(kind, text) { produced = true; if (o.onDelta) o.onDelta(kind, text); },
       // 工具一开跑就算「已经产生副作用」：再重来一次等于再搜一次、再计一次费
