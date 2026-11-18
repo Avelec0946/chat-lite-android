@@ -147,6 +147,8 @@ function defaultSettings() {
     webSearch: defaultWebSearchSettings(),
     // v3.0.7: 会话标题自动命名
     autoTitle: defaultAutoTitleSettings(),
+    // v3.0.17: DeepSeek 官方全家桶（服务端联网工具 / 标题 / 内容安全 / 用户元信息 / Files API）
+    dsSuite: defaultDsSuiteSettings(),
     // v3.0.12: 工具能力登记 {"<providerId>|<upstreamModel>": {tools:bool, at:ts, evidence:str}}
     //   记的是「这个模型带 tools 的请求到底行不行」—— 由 agent-loop.js 用「去掉 tools 重发一次」
     //   的证据写进来。为什么放 settings 而不是每次现试：现试就是每发一条消息先挨一次 503。
@@ -360,7 +362,43 @@ function migrateSettings(s) {
   if (!s.toolCapability || typeof s.toolCapability !== 'object' || Array.isArray(s.toolCapability)) {
     s.toolCapability = {};
   }
+  // v3.0.17: DeepSeek 官方「全家桶」的能力开关（只增不改；老库补默认值）
+  s.dsSuite = migrateDsSuiteSettings(s.dsSuite);
   return s;
+}
+
+// v3.0.17: DeepSeek 全家桶。默认值全部取自「官方接口下最省事的形态」：
+//   · webTools 开 —— 官方接口下联网就该走服务端，比客户端工具循环快且能看到引用；
+//   · title 开 —— 回答时顺带生成标题，不额外计费，还省掉 auto-title 那一次请求；
+//   · safetyCheck 关 —— 它是对外提供服务时的合规要求，个人用开着只会被误拒；
+//   · userMeta 开 —— 否则模型不知道"今天几号"，联网时容易拿训练数据的日期去拼搜索词；
+//   · files 开 / fileMode 文字 —— PDF、Office 能读了，且默认不裁图（省 token）。
+function defaultDsSuiteSettings() {
+  return {
+    enabled: true,
+    webTools: true,
+    title: true,
+    safetyCheck: false,
+    userMeta: true,
+    files: true,
+    fileMode: 'text'
+  };
+}
+
+function migrateDsSuiteSettings(d) {
+  var def = defaultDsSuiteSettings();
+  if (!d || typeof d !== 'object') return def;
+  var out = {};
+  for (var k in def) {
+    if (!Object.prototype.hasOwnProperty.call(def, k)) continue;
+    if (typeof def[k] === 'boolean') {
+      out[k] = (d[k] === undefined || d[k] === null) ? def[k] : d[k] === true;
+    } else {
+      out[k] = (typeof d[k] === 'string' && d[k]) ? d[k] : def[k];
+    }
+  }
+  if (out.fileMode !== 'rich') out.fileMode = 'text';
+  return out;
 }
 
 function migrateVoiceSettings(v) {
@@ -473,6 +511,10 @@ function normalizeVoiceProviders(list) {
       extraHeaders: (p.extraHeaders && typeof p.extraHeaders === 'object') ? p.extraHeaders : {},
       extraQuery: (p.extraQuery && typeof p.extraQuery === 'object') ? p.extraQuery : {},
       models: models,
+      // v3.0.17：接口形态。mimo = OpenAI 兼容 /v1/chat/completions（识别合成都是聊天体）；
+      //   deepseek = 官方工具接口（/v1/tools/asr multipart、/v1/tools/tts 二进制/WS）。
+      //   两种形态的请求体与返回体完全不同，所以它是**数据**（一个字段），不是散在各处的 if 分支。
+      format: (p.format === 'deepseek') ? 'deepseek' : 'mimo',
       asrModel: (typeof p.asrModel === 'string' && p.asrModel.trim()) ? p.asrModel.trim() : '',
       ttsModel: (typeof p.ttsModel === 'string' && p.ttsModel.trim()) ? p.ttsModel.trim() : '',
       createdAt: typeof p.createdAt === 'number' ? p.createdAt : Date.now()

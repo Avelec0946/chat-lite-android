@@ -41,14 +41,29 @@
   //   MiMo 官方：/v1/chat/completions 同时承载 asr / tts / 声音设计 / 声音克隆。
   //   注意**不要**预设 token-plan-cn.xiaomimimo.com —— 那个网关只认 tp- 密钥，
   //   拿来配语音必然 401，正是用户踩过的坑。
+  //   DeepSeek 官方（v3.0.17）：走独立工具接口 —— 识别 /v1/tools/asr、合成 /v1/tools/tts，
+  //   没有模型名、只有两个音色（stella / tide）；密钥默认**复用接口管理**里那把，
+  //   不用为语音再抄一遍（抄两遍必然有一天只改一处，然后 401）。
   var PRESETS = {
     mimo: {
       name: 'MiMo 官方',
       baseUrl: 'https://api.xiaomimimo.com',
       endpointPath: '/v1/chat/completions',
+      format: 'mimo',
+      keyMode: 'manual',
       asrModel: 'mimo-v2.5-asr',
       ttsModel: 'mimo-v2.5-tts',
       models: ['mimo-v2.5-asr', 'mimo-v2.5-tts', 'mimo-v2.5-tts-voicedesign', 'mimo-v2.5-tts-voiceclone']
+    },
+    deepseek: {
+      name: 'DeepSeek 官方',
+      baseUrl: 'https://api.deepseek.com',
+      endpointPath: '/v1/tools/tts',
+      format: 'deepseek',
+      keyMode: 'inherit',
+      asrModel: '',
+      ttsModel: '',
+      models: []
     }
   };
 
@@ -96,7 +111,7 @@
     var curId = cfg.voiceProviderId || (arr[0] && arr[0].id) || '';
 
     if (!arr.length) {
-      box.innerHTML = '<div class="provider-empty">还没有语音接口。点上面的「+ 添加语音接口」，选「MiMo 官方」预设，填上密钥就能用。</div>';
+      box.innerHTML = '<div class="provider-empty">还没有语音接口。点上面的「+ 添加语音接口」，选「MiMo 官方」（自己填密钥）或「DeepSeek 官方」（默认复用接口管理里的密钥）。</div>';
       renderPick();
       return;
     }
@@ -108,11 +123,22 @@
     //   语音这边却把当前项摊开，两块看起来像两套东西。当前项靠 badge + 边框就够认了。
     arr.forEach(function (p, idx) {
       var on = p.id === curId;
-      var keyOk = !!String(p.apiKey || '').trim();
+      var isDs = p.format === 'deepseek';
+      var keyOk;
+      if (isDs && p.keyMode === 'inherit') {
+        // 复用模式：判断的是「接口管理里那把 key 在不在」，不是这一条自己的字段
+        var off = (typeof wsPickProvider === 'function') ? wsPickProvider('') : null;
+        keyOk = !!(off && String(off.apiKey || '').trim());
+      } else {
+        keyOk = !!String(p.apiKey || '').trim();
+      }
       var urlOk = !!String(p.baseUrl || '').trim();
       var badge = (!keyOk || !urlOk)
         ? '<span class="provider-badge provider-badge-warn">未填完</span>'
         : (on ? '<span class="provider-badge provider-badge-on">使用中</span>' : '');
+      var modelLine = isDs
+        ? ('官方工具接口 · 音色 stella / tide' + (p.keyMode === 'inherit' ? ' · 密钥复用接口管理' : ''))
+        : ('识别 ' + (p.asrModel || '-') + ' · 合成 ' + (p.ttsModel || '-'));
       html += '<details class="provider-group" data-idx="' + idx + '">' +
         '<summary class="provider-summary">' +
         '<span class="provider-name">' + esc(p.name || '语音接口') + badge + '</span>' +
@@ -123,8 +149,8 @@
         '</div></summary>' +
         '<div class="provider-detail">' +
         '<span class="provider-url">' + esc(p.baseUrl || '(未填地址)') + '</span>' +
-        '<span class="provider-endpoint">' + esc(p.endpointPath || '/v1/chat/completions') + '</span>' +
-        '<span class="provider-models">识别 ' + esc(p.asrModel || '-') + ' · 合成 ' + esc(p.ttsModel || '-') + '</span>' +
+        '<span class="provider-endpoint">' + esc(p.endpointPath || (isDs ? '/v1/tools/tts' : '/v1/chat/completions')) + '</span>' +
+        '<span class="provider-models">' + esc(modelLine) + '</span>' +
         '</div></details>';
     });
     box.innerHTML = html;
@@ -156,11 +182,14 @@
     var p = editingIdx >= 0 ? list()[editingIdx] : null;
     if ($('vp-name')) $('vp-name').value = p ? (p.name || '') : '';
     if ($('vp-preset')) $('vp-preset').value = '';
+    if ($('vp-format')) $('vp-format').value = p ? (p.format === 'deepseek' ? 'deepseek' : 'mimo') : 'mimo';
+    if ($('vp-key-mode')) $('vp-key-mode').value = p && p.keyMode === 'inherit' ? 'inherit' : 'manual';
     if ($('vp-base-url')) $('vp-base-url').value = p ? (p.baseUrl || '') : '';
     if ($('vp-endpoint')) $('vp-endpoint').value = p ? (p.endpointPath || '') : '/v1/chat/completions';
     if ($('vp-api-key')) $('vp-api-key').value = p ? (p.apiKey || '') : '';
     if ($('vp-asr-model')) $('vp-asr-model').value = p ? (p.asrModel || '') : '';
     if ($('vp-tts-model')) $('vp-tts-model').value = p ? (p.ttsModel || '') : '';
+    syncFormatRows();
     // 每次打开编辑框都清掉上一次的测试结果，避免"上一次通过"被当成这次的
     var tr = $('voice-provider-test-result');
     if (tr) { tr.textContent = ''; tr.className = 'provider-test-result'; }
@@ -193,8 +222,40 @@
     if ($('vp-name') && !$('vp-name').value.trim()) $('vp-name').value = p.name;
     if ($('vp-base-url')) $('vp-base-url').value = p.baseUrl;
     if ($('vp-endpoint')) $('vp-endpoint').value = p.endpointPath;
+    if ($('vp-format')) $('vp-format').value = p.format || 'mimo';
+    if ($('vp-key-mode')) $('vp-key-mode').value = p.keyMode || 'manual';
     if ($('vp-asr-model')) $('vp-asr-model').value = p.asrModel;
     if ($('vp-tts-model')) $('vp-tts-model').value = p.ttsModel;
+    syncFormatRows();
+  }
+
+  // 形态 / 密钥来源决定哪些字段有意义（不做这层，用户会对着"识别模型"输入框发呆 ——
+  //   DeepSeek 的语音根本没有模型名这个概念）。
+  function syncFormatRows() {
+    var fmt = ($('vp-format') && $('vp-format').value) || 'mimo';
+    var keyMode = ($('vp-key-mode') && $('vp-key-mode').value) || 'manual';
+    var isDs = fmt === 'deepseek';
+    function show(id, on) {
+      var el = $(id);
+      if (el) el.style.display = on ? '' : 'none';
+    }
+    show('vp-asr-model-row', !isDs);
+    show('vp-tts-model-row', !isDs);
+    show('vp-api-key-row', keyMode !== 'inherit');
+    show('vp-base-url-row', true);
+    show('vp-key-mode-row', isDs);
+    var hint = $('vp-format-hint');
+    if (hint) {
+      hint.textContent = isDs
+        ? 'DeepSeek 语音走官方工具接口：识别 /v1/tools/asr、合成 /v1/tools/tts。没有模型名，音色只有 stella（女声）与 tide（男声），在「语音通话 · 音色」里选。'
+        : 'MiMo 走 OpenAI 兼容的 /v1/chat/completions：识别与合成各是一个模型名，音色在「语音通话 · 音色」里选。';
+    }
+    var kmHint = $('vp-key-mode-hint');
+    if (kmHint) {
+      kmHint.textContent = (keyMode === 'inherit')
+        ? '复用「接口管理」里的 DeepSeek 官方接口密钥：那边换 key 这边自动跟上，不用再抄一遍。'
+        : '自己填这个接口的密钥。';
+    }
   }
 
   function saveEditor() {
@@ -204,15 +265,19 @@
     var apiKey = ($('vp-api-key') && $('vp-api-key').value || '').trim();
     var asrModel = ($('vp-asr-model') && $('vp-asr-model').value || '').trim();
     var ttsModel = ($('vp-tts-model') && $('vp-tts-model').value || '').trim();
+    var format = ($('vp-format') && $('vp-format').value === 'deepseek') ? 'deepseek' : 'mimo';
+    var keyMode = ($('vp-key-mode') && $('vp-key-mode').value === 'inherit') ? 'inherit' : 'manual';
 
-    if (!baseUrl) { toast('请填接口地址，例如 https://api.xiaomimimo.com', 'warn'); return; }
+    if (!baseUrl) { toast('请填接口地址，例如 https://api.deepseek.com', 'warn'); return; }
     if (!/^https?:\/\//i.test(baseUrl)) { toast('接口地址要以 http:// 或 https:// 开头', 'warn'); return; }
-    if (!apiKey) { toast('请填 API 密钥', 'warn'); return; }
+    // 复用密钥时不需要在这里填 key（运行时从「接口管理」取）；但至少得有一处能拿到密钥
+    if (keyMode !== 'inherit' && !apiKey) { toast('请填 API 密钥', 'warn'); return; }
 
     var arr = list();
     var raw = {
       name: name, baseUrl: baseUrl, endpointPath: endpoint, apiKey: apiKey,
       asrModel: asrModel, ttsModel: ttsModel,
+      format: format, keyMode: keyMode,
       models: [asrModel, ttsModel].filter(Boolean).map(function (m) { return { id: m }; })
     };
 
@@ -271,10 +336,11 @@
   function testProvider() {
     var res = $('voice-provider-test-result');
     if (!res) return;
+    var keyMode = ($('vp-key-mode') && $('vp-key-mode').value === 'inherit') ? 'inherit' : 'manual';
     var curKey = ($('vp-api-key') && $('vp-api-key').value || '').trim();
     var curUrl = ($('vp-base-url') && $('vp-base-url').value || '').trim();
-    if (!curUrl || !curKey) {
-      res.textContent = '请填写接口地址和密钥';
+    if (!curUrl || (keyMode !== 'inherit' && !curKey)) {
+      res.textContent = keyMode === 'inherit' ? '请填写接口地址' : '请填写接口地址和密钥';
       res.className = 'provider-test-result error';
       return;
     }
@@ -283,7 +349,9 @@
     var p = editingIdx >= 0 ? list()[editingIdx] : null;
     var savedKey = p ? String(p.apiKey || '').trim() : '';
     var savedUrl = p ? String(p.baseUrl || '').trim() : '';
-    if (editingIdx < 0 || savedKey !== curKey || savedUrl !== curUrl) {
+    var savedInherit = !!(p && p.keyMode === 'inherit');
+    var keyChanged = (keyMode === 'inherit') ? !savedInherit : (savedKey !== curKey || savedInherit);
+    if (editingIdx < 0 || keyChanged || savedUrl !== curUrl) {
       res.textContent = '请先保存，再测试（测试用的是已保存的配置）';
       res.className = 'provider-test-result warn';
       return;
@@ -348,6 +416,11 @@
     var presetSel = $('vp-preset');
     if (presetSel) presetSel.addEventListener('change', function () { applyPreset(presetSel.value); });
 
+    var fmtSel = $('vp-format');
+    if (fmtSel) fmtSel.addEventListener('change', syncFormatRows);
+    var kmSel = $('vp-key-mode');
+    if (kmSel) kmSel.addEventListener('change', syncFormatRows);
+
     var saveBtn = $('btn-save-voice-provider');
     if (saveBtn) saveBtn.addEventListener('click', saveEditor);
     var cancelBtn = $('btn-cancel-voice-provider');
@@ -407,12 +480,26 @@
     }
   }
 
+  // DeepSeek 官方只有两个音色（stella 女声 / tide 男声）。音色列表要跟着接口形态走 ——
+  //   在 DeepSeek 接口下看到「Mia / 茉莉」这种 MiMo 音色，用户选了必然 400。
+  var DS_VOICES = [
+    { id: 'stella', label: '海星 · 女声（默认）', desc: 'DeepSeek 官方音色' },
+    { id: 'tide', label: '暗潮 · 男声', desc: 'DeepSeek 官方音色' }
+  ];
+
+  function currentFormat() {
+    var p = current();
+    return (p && p.format === 'deepseek') ? 'deepseek' : 'mimo';
+  }
+
   var API = {
     init: init,
     renderList: renderList,
     openEditor: openEditor,
     closeEditor: closeEditor,
     current: current,
+    currentFormat: currentFormat,
+    DS_VOICES: DS_VOICES,
     PRESETS: PRESETS
   };
   root.VoiceProvider = API;

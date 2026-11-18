@@ -7,7 +7,7 @@
 <title>chat-lite</title>
 <link rel="stylesheet" href="vendor/highlight/github-dark.min.css?v=116">
 <link rel="stylesheet" href="vendor/katex/katex.min.css?v=116">
-<link rel="stylesheet" href="style.css?v=138">
+<link rel="stylesheet" href="style.css?v=139">
   <meta name="theme-color" content="#7c3aed">
   <link rel="manifest" href="manifest.json">
 </head>
@@ -330,7 +330,7 @@
               <span class="toggle-slider"></span>
             </label>
           </label>
-          <span class="setting-hint">开启后模型会拿到 <code>web_search</code> / <code>fetch_url</code> 两个工具，由它自己判断要不要联网、搜什么。工具结果只用于本次回答，不写进对话历史。密钥在「联网搜索」分组里配置。</span>
+          <span class="setting-hint">开启后模型可以联网，但<b>走哪条通道看你用的是什么接口</b>：DeepSeek 官方接口（api.deepseek.com）走<b>服务端工具</b> —— 搜索、打开网页、页内查找都由服务端完成，回答带可点的引用角标，一次请求出结果；其他接口走本机工具循环（模型拿到 <code>web_search</code> / <code>fetch_url</code> 两个工具，由我们执行）。两条通道都由模型自己判断要不要联网、搜什么，工具结果都不写进对话历史。</span>
           <label class="setting-row setting-row-col">
             <span>系统提示词</span>
             <textarea id="system-prompt" class="setting-textarea" rows="3" placeholder="输入系统提示词..."></textarea>
@@ -679,21 +679,36 @@
               <select id="vp-preset" class="card-input">
                 <option value="">手动填写</option>
                 <option value="mimo">MiMo 官方（api.xiaomimimo.com）</option>
+                <option value="deepseek">DeepSeek 官方（复用接口管理密钥）</option>
               </select>
             </label>
-            <label class="card-field"><span>接口地址</span>
-              <input id="vp-base-url" class="card-input" type="text" placeholder="https://api.xiaomimimo.com">
+            <label class="card-field" id="vp-format-row"><span>接口类型</span>
+              <select id="vp-format" class="card-input">
+                <option value="mimo">MiMo（OpenAI 兼容 /v1/chat/completions）</option>
+                <option value="deepseek">DeepSeek 官方工具接口（/v1/tools/asr · /v1/tools/tts）</option>
+              </select>
             </label>
-            <label class="card-field"><span>路径</span>
+            <span class="setting-hint" id="vp-format-hint"></span>
+            <label class="card-field" id="vp-key-mode-row"><span>密钥来源</span>
+              <select id="vp-key-mode" class="card-input">
+                <option value="manual">自己填</option>
+                <option value="inherit">复用接口管理（DeepSeek 官方）</option>
+              </select>
+            </label>
+            <span class="setting-hint" id="vp-key-mode-hint"></span>
+            <label class="card-field" id="vp-base-url-row"><span>接口地址</span>
+              <input id="vp-base-url" class="card-input" type="text" placeholder="https://api.deepseek.com">
+            </label>
+            <label class="card-field" id="vp-endpoint-row"><span>路径</span>
               <input id="vp-endpoint" class="card-input" type="text" placeholder="/v1/chat/completions">
             </label>
-            <label class="card-field"><span>API 密钥</span>
+            <label class="card-field" id="vp-api-key-row"><span>API 密钥</span>
               <input id="vp-api-key" class="card-input" type="password" placeholder="sk-...">
             </label>
-            <label class="card-field"><span>识别模型</span>
+            <label class="card-field" id="vp-asr-model-row"><span>识别模型</span>
               <input id="vp-asr-model" class="card-input" type="text" placeholder="mimo-v2.5-asr">
             </label>
-            <label class="card-field"><span>合成模型</span>
+            <label class="card-field" id="vp-tts-model-row"><span>合成模型</span>
               <input id="vp-tts-model" class="card-input" type="text" placeholder="mimo-v2.5-tts">
             </label>
             <!-- v3.0.2：与「接口管理」同一套按钮顺序：先测试连接（当场验证密钥/模型），
@@ -916,6 +931,70 @@
           </div>
         </details>
 
+        <!-- ===== DeepSeek 全家桶（2026-11-13 开放的应用能力）===== -->
+        <details class="setting-group setting-group-collapsible" data-group-key="ds-suite">
+          <summary class="setting-group-summary">DeepSeek 全家桶 <span class="setting-scope">官方接口专属</span></summary>
+          <div class="setting-group-body">
+          <span class="setting-hint">2026-11-13 起 DeepSeek 把 App 里的对话能力开放到了 API：<b>服务端联网搜索 / 深度思考搜索</b>、<b>阅读链接</b>、<b>文件输入</b>（PDF / Word / PPT / Excel / 图片）、<b>模型内容安全</b>、<b>会话标题</b>、<b>用户元信息</b>。<br>开着的时候联网<b>不再由本机跑工具循环</b> —— 搜索、打开网页、页内查找全在服务端完成，一次请求出结果，回答还带可点的<b>引用角标</b>；标题也在回答时顺带生成，省掉一次额外请求。<br><b>只对「接口管理」里的 DeepSeek 官方接口（api.deepseek.com）生效</b>；别的提供方继续走本机工具循环，功能不受影响。</span>
+          <span class="setting-hint" id="ds-suite-state"></span>
+          <label class="setting-row">
+            <span>启用全家桶</span>
+            <label class="toggle-switch">
+              <input type="checkbox" id="ds-enabled" checked>
+              <span class="toggle-slider"></span>
+            </label>
+          </label>
+          <label class="setting-row">
+            <span>服务端联网工具</span>
+            <label class="toggle-switch">
+              <input type="checkbox" id="ds-web-tools" checked>
+              <span class="toggle-slider"></span>
+            </label>
+          </label>
+          <span class="setting-hint">开关仍然是「本次对话 → 联网搜索」那一颗。这里只决定<b>用哪条通道</b>：官方接口走服务端（快、能多步检索、有引用），其他接口走本机工具循环。</span>
+          <label class="setting-row">
+            <span>回答时顺带生成会话标题</span>
+            <label class="toggle-switch">
+              <input type="checkbox" id="ds-title" checked>
+              <span class="toggle-slider"></span>
+            </label>
+          </label>
+          <span class="setting-hint">标题由模型在回答时一并给出，不额外收费，也省掉「自动命名」那一次额外请求。仍然只对新会话的第一次回答生效，绝不覆盖你手改的名字。</span>
+          <label class="setting-row">
+            <span>用户元信息（日期 / 平台 / 语言）</span>
+            <label class="toggle-switch">
+              <input type="checkbox" id="ds-user-meta" checked>
+              <span class="toggle-slider"></span>
+            </label>
+          </label>
+          <span class="setting-hint">每轮在用户消息前加一条 <code>latest_reminder</code>（本机日期、平台、语言），模型才知道「今天」是哪天 —— 否则联网时会拿训练数据里的日期去拼搜索词。</span>
+          <label class="setting-row">
+            <span>文件输入（PDF / Office / 图片）</span>
+            <label class="toggle-switch">
+              <input type="checkbox" id="ds-files" checked>
+              <span class="toggle-slider"></span>
+            </label>
+          </label>
+          <span class="setting-hint">附件先上传到 Files API，再用 <code>file_id</code> 引用。好处有两层：PDF / Word / PPT / Excel 现在<b>能读了</b>；同一张图也不必每轮重发一遍 base64。上传在你选完附件时就开始，解析由上游完成。</span>
+          <label class="setting-row">
+            <span>文档解析方式</span>
+            <select id="ds-file-mode" class="setting-select">
+              <option value="text">仅文字（便宜）</option>
+              <option value="rich">图文混排（图也交给模型）</option>
+            </select>
+          </label>
+          <span class="setting-hint">「仅文字」只取文档里的文字，图表照片丢弃；「图文混排」会把图裁出来按原位置一起交给模型 —— 看带图的财报、幻灯片、说明书时选它，但会多占输入 token。</span>
+          <label class="setting-row">
+            <span>内容安全审核</span>
+            <label class="toggle-switch">
+              <input type="checkbox" id="ds-safety">
+              <span class="toggle-slider"></span>
+            </label>
+          </label>
+          <span class="setting-hint">对外提供服务时必须开（官方要求）。自己一个人用建议关着 —— 开了之后正常提问也可能被判风险然后拒答。<b>默认关</b>。</span>
+          </div>
+        </details>
+
         <!-- ===== 数据管理 ===== -->
         <details class="setting-group setting-group-collapsible" data-group-key="data" open>
           <summary class="setting-group-summary">数据管理 <span class="setting-scope">全量导出/导入</span></summary>
@@ -951,26 +1030,29 @@
 <script src="vendor/katex/katex.min.js?v=116"></script>
 <!-- LaTeX 渲染层：须在 katex.min.js 之后、chat.js 之前加载 -->
 <script src="latex.js?v=119"></script>
-<script src="db.js?v=135"></script>
+<script src="db.js?v=136"></script>
 <script src="haptics.js?v=116"></script>
 <script src="providers.js?v=102"></script>
 <!-- v3.0.5: 联网搜索（DeepSeek Search / Fetch）。必须在 providers.js 之后（用 normalizeBaseUrl/getProvider）、chat.js 之前 -->
-<script src="web-search.js?v=7"></script>
+<script src="web-search.js?v=8"></script>
+<!-- v3.0.17: DeepSeek 官方「全家桶」适配层（服务端联网工具 / 标题 / 安全 / 用户元信息 / Files API）。
+     必须在 web-search.js 之后（复用它的 wsPickProvider 挑官方接口）、chat.js 之前（发送时要调）。 -->
+<script src="ds-suite.js?v=1"></script>
 <!-- v3.0.8: 带工具的对话回合引擎（模型→工具→模型）。依赖 web-search.js 的工具定义，须在 chat.js 之前 -->
 <script src="agent-loop.js?v=6"></script>
 <!-- v3.0.7: 会话标题自动命名。必须在 providers.js 之后（用 getProvider/buildUpstreamPayload）、chat.js 之前（sendFromMessage 调它） -->
 <script src="auto-title.js?v=3"></script>
 <script src="image-gen.js?v=129"></script>
 <script src="conversation.js?v=117"></script>
-<script src="chat.js?v=142"></script>
+<script src="chat.js?v=143"></script>
 <script src="io.js?v=128"></script>
 <script src="gesture-helpers.js?v=102"></script>
-<script src="app.js?v=132"></script>
+<script src="app.js?v=133"></script>
 <!-- v125: 语音通话 —— voice-director 是纯函数层（无 DOM/无网络），voice.js 是运行时 -->
 <!-- v127: voice-provider 管独立的语音接口（地址+密钥+模型），与「接口管理」的聊天渠道无关 -->
 <script src="voice-director.js?v=129"></script>
-<script src="voice-provider.js?v=128"></script>
-<script src="voice-settings.js?v=130"></script>
-<script src="voice.js?v=139"></script>
+<script src="voice-provider.js?v=129"></script>
+<script src="voice-settings.js?v=131"></script>
+<script src="voice.js?v=140"></script>
 </body>
 </html>

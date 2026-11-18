@@ -40,12 +40,12 @@ var WS_TIMEOUT_SEARCH = 20000;   // 搜索请求超时（含建连）
 var WS_TIMEOUT_FETCH = 15000;    // 单页抓取超时
 var WS_PER_RESULT_CHARS = 1800;  // 单条搜索结果给模型的上限（实测模型常一次搜 2~3 组，每条都给满会撑爆上下文）
 var WS_FETCH_MAX_CHARS = 8000;   // 单页正文给模型的上限（about 3k token）
-// 结果卡片里点击来源链接。
+// 结果卡片里点击来源链接，以及正文里的引用角标（v3.0.17 的 .cite-ref）—— 同一个处理，不另绑一套。
 // APK：**不拦截**，让 Capacitor 的 WebViewClient 接管 → 系统浏览器（项目里没有 @capacitor/browser，
 //      这是唯一可靠路径；自己 window.open 在 WebView 里会被拦掉，等于点了没反应）。
 // Web：拦截后新开标签页，否则当前 SPA 会被导航走。
 function wsOnSourceLinkClick(e) {
-  var a = e.target && e.target.closest ? e.target.closest('a.web-source-link') : null;
+  var a = e.target && e.target.closest ? e.target.closest('a.web-source-link, .cite-ref a') : null;
   if (!a) return;
   if (typeof isCapacitor === 'function' && isCapacitor()) return;
   e.preventDefault();

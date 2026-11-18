@@ -404,13 +404,18 @@ async function agentRun(o) {
     }
 
     // 把这一轮的 tool_calls 原样回填（content 必须一起回填：模型可能边说边调）
-    msgs.push({
+    var assistantEcho = {
       role: 'assistant',
       content: turn.content || '',
       tool_calls: turn.toolCalls.map(function(c) {
         return { id: c.id, type: 'function', function: { name: c.name, arguments: c.args } };
       })
-    });
+    };
+    // v3.0.17：带 tools 的请求，DeepSeek 官方要求把历史轮次的 reasoning_content **原样回传**
+    //   （不回传直接 400）。只对官方接口加这个字段 —— 别的网关对未知字段的容忍度不一，
+    //   没必要为它们改请求形状。判据在 agentRunAdaptive 里算好塞进 o.echoReasoning。
+    if (o.echoReasoning === true && turn.reasoning) assistantEcho.reasoning_content = turn.reasoning;
+    msgs.push(assistantEcho);
 
     var calls = turn.toolCalls.slice(0, AGENT_MAX_TOOL_CALLS);
     for (var i = 0; i < calls.length; i++) {
@@ -719,6 +724,9 @@ async function agentRunAdaptive(o) {
 
   var lastErr = null;
   var nativeTried = false;
+  // v3.0.17：官方接口 + 带 tools 时，历史轮次的 reasoning_content 必须回传（否则 400）。
+  //   这个判据只在这里算一次，两条通道（native / text）共用。
+  var echoReasoning = (typeof dsIsOfficial === 'function') && dsIsOfficial(o.provider);
 
   for (var i = 0; i < chain.length; i++) {
     var eng = chain[i];
@@ -726,6 +734,7 @@ async function agentRunAdaptive(o) {
     var opts = Object.assign({}, o, {
       // 原生通道：日期只挂在 web_search 的说明上（system 提示词一个字符都不动）
       tools: eng === 'native' ? agentToolsWithDate(o.tools) : o.tools,
+      echoReasoning: echoReasoning,
       onDelta: function(kind, text) { produced = true; if (o.onDelta) o.onDelta(kind, text); },
       // 工具一开跑就算「已经产生副作用」：再重来一次等于再搜一次、再计一次费
       onToolStart: function(call) { produced = true; if (o.onToolStart) o.onToolStart(call); }

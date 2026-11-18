@@ -183,15 +183,36 @@
     }).join('');
   }
 
+  // 音色列表跟着「当前语音接口的形态」走（v3.0.17）：
+  //   MiMo 有 9 个自有音色（Mia / 茉莉 / 苏打…），DeepSeek 只有 stella / tide。
+  //   在 DeepSeek 接口下列出 MiMo 的音色，用户选了必然 400 —— 这不是"选项多一点"，
+  //   是"给了一个一定会失败的选项"。
+  function voiceListForCurrentProvider() {
+    var VP = root.VoiceProvider;
+    if (VP && typeof VP.currentFormat === 'function' && VP.currentFormat() === 'deepseek' &&
+        Array.isArray(VP.DS_VOICES) && VP.DS_VOICES.length) {
+      return VP.DS_VOICES;
+    }
+    return VOICE_OPTIONS;
+  }
+
   function renderVoiceSelect() {
     var sel = $('voice-voice-id');
     if (!sel) return;
+    var opts = voiceListForCurrentProvider();
     var cur = v().voiceId || 'Mia';
-    sel.innerHTML = VOICE_OPTIONS.map(function (o) {
+    // 换了接口形态而音色还停在上一家的：直接落到这家第一个（否则界面显示一个不存在的"自定义"，
+    // 运行时又悄悄回落 —— 用户永远不知道真正在用的哪个声音）
+    if (opts !== VOICE_OPTIONS && !opts.some(function (o) { return o.id === cur; })) {
+      cur = opts[0].id;
+      v().voiceId = cur;
+      persistVoice();
+    }
+    sel.innerHTML = opts.map(function (o) {
       return '<option value="' + o.id + '">' + escapeHtml(o.label) + '</option>';
     }).join('');
     // 用户可能手填过不在列表里的音色 id（自定义部署），保留它
-    if (!VOICE_OPTIONS.some(function (o) { return o.id === cur; })) {
+    if (!opts.some(function (o) { return o.id === cur; })) {
       sel.innerHTML += '<option value="' + escapeHtml(cur) + '">' + escapeHtml(cur) + '（自定义）</option>';
     }
     sel.value = cur;
@@ -217,7 +238,9 @@
     if (st.voiceDesign && st.voiceDesign.trim()) return '声音设计';
     if (/voicedesign/.test(st.ttsModel || '')) return '声音设计';
     if (/voiceclone/.test(st.ttsModel || '')) return '克隆音色';
-    var o = VOICE_OPTIONS.filter(function (x) { return x.id === st.voiceId; })[0];
+    var opts = voiceListForCurrentProvider();
+    var o = opts.filter(function (x) { return x.id === st.voiceId; })[0] ||
+            VOICE_OPTIONS.filter(function (x) { return x.id === st.voiceId; })[0];
     return o ? o.label.split(' · ')[0] : (st.voiceId || 'Mia');
   }
 

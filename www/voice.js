@@ -1875,16 +1875,25 @@
     // ① 选定的语音接口
     var vp = pickVoiceProvider();
     if (vp) {
-      if (!vp.apiKey) {
-        throw makeErr('语音接口「' + (vp.name || vp.id) + '」还没填 API 密钥', 'voice_nokey');
+      var fmt = voiceFormatOf(vp);
+      var creds = resolveVoiceCreds(vp);
+      if (!creds.apiKey) {
+        throw makeErr(creds.missing
+          ? ('语音接口「' + (vp.name || vp.id) + '」复用接口管理的密钥，但' + creds.missing +
+             '。请到「设置 → 接口管理」里添加 DeepSeek 官方接口，或把这个语音接口改成自己填密钥')
+          : ('语音接口「' + (vp.name || vp.id) + '」还没填 API 密钥'), 'voice_nokey');
       }
-      if (!vp.baseUrl) {
+      if (!creds.baseUrl) {
         throw makeErr('语音接口「' + (vp.name || vp.id) + '」还没填接口地址', 'voice_provider');
       }
       // 模型优先用接口自己的配置，其次用全局设置里的
       var own = kind === 'asr' ? vp.asrModel : vp.ttsModel;
-      var model = wantModel || strOf(own).trim() || defaultModelFor(kind, vp);
-      return { provider: vp, model: model, label: vp.name || vp.id };
+      // DeepSeek 形态没有「模型名」这个概念（/v1/tools/asr 与 /v1/tools/tts 是固定端点）。
+      // 这里硬塞一个 mimo-v2.5-asr 只会让人以为它起作用了 —— 留空。
+      var model = (fmt === 'deepseek') ? '' : (wantModel || strOf(own).trim() || defaultModelFor(kind, vp));
+      // 地址与密钥用解析后的（inherit 时会指向接口管理里的那把），其余字段沿用用户配置
+      var prov = Object.assign({}, vp, { baseUrl: creds.baseUrl, apiKey: creds.apiKey });
+      return { provider: prov, model: model, label: vp.name || vp.id, format: fmt, creds: creds };
     }
 
     // ② 没有语音接口：明确告诉用户去配，不要偷偷拿聊天渠道顶
@@ -1902,6 +1911,45 @@
     }
     return list[0] || null;
   }
+
+  // ===== v3.0.17：接口形态与密钥来源 =====
+  // 形态是**数据**，不是散在各处的 if 分支（与 image-gen 的格式族同一个思路）：
+  //   mimo     —— OpenAI 兼容聊天体：识别走 messages+input_audio，合成走 SSE 里的 delta.audio
+  //   deepseek —— 官方工具接口：识别 /v1/tools/asr（multipart），合成 /v1/tools/tts（二进制 / WebSocket PCM）
+  // 两者请求体、返回体、音色体系全都不一样，混在一个函数里做 if 只会越来越难读。
+  function voiceFormatOf(vp) {
+    return (vp && vp.format === 'deepseek') ? 'deepseek' : 'mimo';
+  }
+
+  // 密钥来源：
+  //   inherit —— 直接复用「接口管理」里的 DeepSeek 官方接口（用户在那边填过一次，这边不该再抄一遍；
+  //              而且聊天那边换 key 之后这边自动跟上 —— 抄两遍必然有一天只改一处，然后 401）
+  //   manual  —— 自己填（MiMo 只能用这个，它的密钥与聊天渠道是两套）
+  function resolveVoiceCreds(vp) {
+    vp = vp || {};
+    if (vp.keyMode === 'inherit') {
+      var official = (typeof wsPickProvider === 'function') ? wsPickProvider('') : null;
+      if (official && strOf(official.apiKey) && strOf(official.baseUrl)) {
+        return {
+          baseUrl: strOf(official.baseUrl).replace(/\/+$/, ''),
+          apiKey: strOf(official.apiKey),
+          inherited: true,
+          from: strOf(official.name) || '接口管理'
+        };
+      }
+      // 复用不到但自己填了：仍然可用（用户可能暂时清空了聊天接口）
+      if (strOf(vp.apiKey)) {
+        return { baseUrl: strOf(vp.baseUrl).replace(/\/+$/, ''), apiKey: strOf(vp.apiKey), inherited: false };
+      }
+      return { baseUrl: '', apiKey: '', inherited: true, missing: '接口管理里没有可用的 DeepSeek 官方接口' };
+    }
+    return {
+      baseUrl: strOf(vp.baseUrl).replace(/\/+$/, ''),
+      apiKey: strOf(vp.apiKey),
+      inherited: false
+    };
+  }
+
 
   function firstModel(p) {
     try {
@@ -3042,6 +3090,19 @@
   // =====================================================================================
 
   function transcribe(pcm16, gate) {
+    // v3.0.17：先解析接口形态，再决定走哪条请求路径。
+    //   mimo（老路径）= OpenAI 兼容聊天体，input_audio 塞 base64 WAV；
+    //   deepseek      = 官方工具接口 /v1/tools/asr，multipart 发 WAV，返回 {text}。
+    var resolved;
+    try {
+      resolved = resolveVoiceProvider('asr');
+    } catch (e) {
+      // 渠道/密钥没配好：返回 rejected promise，让调用方的 .catch 统一处理，
+      // 绝不能同步抛出去 —— 那样会绕过 promise 链，界面永远卡在 thinking。
+      return Promise.reject(e);
+    }
+    if (resolved.format === 'deepseek') return transcribeDeepSeek(pcm16, gate, resolved);
+
     var built;
     try {
       var wav = encodeWav(int16ToBytes(pcm16), CAPTURE_RATE);
@@ -3053,8 +3114,6 @@
         }]
       });
     } catch (e) {
-      // 渠道/密钥没配好：返回 rejected promise，让调用方的 .catch 统一处理，
-      // 绝不能同步抛出去 —— 那样会绕过 promise 链，界面永远卡在 thinking。
       return Promise.reject(e);
     }
     var t0 = nowMs();
@@ -3069,6 +3128,42 @@
       var text = msg ? strOf(msg.content) : '';
       if (!text && typeof data === 'string') text = data;
       return { text: text.trim(), ms: Math.round(nowMs() - t0) };
+    });
+    if (gate) return gate.race(reqPromise, T_ASR + 3000, '识别');
+    return withTimeout(reqPromise, T_ASR + 3000, '识别');
+  }
+
+  // DeepSeek 官方识别：POST /v1/tools/asr（multipart/form-data，一次一段完整音频）
+  //   官方限制：16 位 PCM WAV 或 Ogg Opus、单声道/双声道（只识别左声道）、
+  //   **最长 120 秒 / 8 MiB**、不支持流式识别。
+  //   我们的形态天然匹配：端点检测已经按静音把语音切成一句一段，本来就是"一段一请求"。
+  //   万一真的连续说满 120 秒（只可能是不停顿地念稿），截到 118 秒并记一条 warn —— 
+  //   上游会直接 413/400，那时用户看到的是"识别失败"，比截断更难理解。
+  function transcribeDeepSeek(pcm16, gate, resolved) {
+    var b64;
+    var t0 = nowMs();
+    try {
+      var samples = pcm16 && pcm16.length ? pcm16 : new Int16Array(0);
+      var maxSamples = CAPTURE_RATE * 118;          // 118 秒，给 WAV 头留余量
+      if (samples.length > maxSamples) {
+        warn('识别音频超过 118 秒，已截断（官方单次上限 120 秒）');
+        samples = samples.subarray(samples.length - maxSamples);   // 保留最近的，前面的是旧话
+      }
+      var wav = encodeWav(int16ToBytes(samples), CAPTURE_RATE);
+      b64 = bytesToBase64(wav);
+    } catch (e) {
+      return Promise.reject(e);
+    }
+    var reqPromise = dsPostMultipart(
+      resolved.provider.baseUrl,
+      resolved.provider.apiKey,
+      '/v1/tools/asr',
+      [{ key: 'file', value: b64, fileName: 'speech.wav', contentType: 'audio/wav' }],
+      { readTimeoutMs: T_ASR }
+    ).then(function (data) {
+      return { text: strOf(data && data.text).trim(), ms: Math.round(nowMs() - t0) };
+    }, function (e) {
+      throw makeErr('识别失败：' + ((e && e.message) || e), 'voice_asr');
     });
     if (gate) return gate.race(reqPromise, T_ASR + 3000, '识别');
     return withTimeout(reqPromise, T_ASR + 3000, '识别');
@@ -3119,6 +3214,16 @@
   function ttsStream(text, opts) {
     opts = opts || {};
     var gate = opts.gate || createGate();
+    // v3.0.17：DeepSeek 官方合成走 /v1/tools/tts（WebSocket 流式 PCM），与 MiMo 的
+    //   「SSE 里塞 base64 音频」完全是两套协议 —— 在这里分叉，别在下面那坨里加 if。
+    var resolved;
+    try {
+      resolved = resolveVoiceProvider('tts');
+    } catch (e) {
+      return Promise.reject(e);
+    }
+    if (resolved.format === 'deepseek') return ttsStreamDeepSeek(text, opts, gate, resolved);
+
     var t0 = nowMs();
     var firstChunkMs = 0;
     var totalBytes = 0;
@@ -3200,6 +3305,182 @@
       return r;
     });
   }
+  // =====================================================================================
+  // 15b. TTS · DeepSeek 官方（v3.0.17）
+  //
+  // 官方两种形态：
+  //   ① WebSocket `wss://api.deepseek.com/v1/tools/tts?voice_id=…&format=pcm`
+  //      文本边发边合成、音频以二进制帧回来 —— 这正是我们要的低延迟形态；
+  //      鉴权可以用子协议 `tts, bearer.<key>`（浏览器/WebView 里唯一能给 WS 带凭据的方式）。
+  //   ② HTTP POST /v1/tools/tts —— 响应体本身就是音频流（pcm = 24k/16bit/单声道）。
+  //
+  // 走①，①不可用（握手被网关拦、代理不支持 upgrade）时退回②：语音里最糟的失败是**静默**，
+  // 宁可多一次请求，也不能让用户等一句永远不来的话。
+  // =====================================================================================
+
+  // 官方只有两个音色：stella（女声，默认）、tide（男声）。配置里是别的就按 stella —— 
+  //   MiMo 的音色名（Mia / 茉莉…）传过去会被 400，那是换了接口却没换音色的典型后果。
+  function dsVoiceId() {
+    var v = strOf(voiceCfg().voiceId).trim().toLowerCase();
+    return (v === 'tide') ? 'tide' : 'stella';
+  }
+
+  function dsTtsUrl(resolved, opts) {
+    var host = strOf(resolved.provider.baseUrl).replace(/\/+$/, '');
+    if (/^https:/i.test(host)) host = 'wss' + host.slice(5);
+    else if (/^http:/i.test(host)) host = 'ws' + host.slice(4);
+    var q = '/v1/tools/tts?voice_id=' + encodeURIComponent(dsVoiceId()) + '&format=pcm&filter_markdown=true';
+    return { ws: host + q, http: strOf(resolved.provider.baseUrl).replace(/\/+$/, '') + '/v1/tools/tts' };
+  }
+
+  function ttsStreamDeepSeek(text, opts, gate, resolved) {
+    var p = wsTtsDeepSeek(text, opts, gate, resolved);
+    return p.then(null, function (e) {
+      if (e && (e.code === 'voice_abort' || e.name === 'AbortError')) throw e;
+      if (e && e.code === 'voice_timeout') throw e;          // 真的超时了，说明服务不健康，别再补一次
+      warn('WebSocket 合成不可用，回退 HTTP 整段合成：' + ((e && e.message) || e));
+      return httpTtsDeepSeek(text, opts, resolved);
+    });
+  }
+
+  function wsTtsDeepSeek(text, opts, gate, resolved) {
+    var t0 = nowMs();
+    var firstChunkMs = 0, totalBytes = 0, car = null, finished = false;
+    var url = dsTtsUrl(resolved).ws;
+    return new Promise(function (resolve, reject) {
+      var WS = root.WebSocket;
+      if (!WS) { reject(makeErr('当前环境不支持 WebSocket', 'voice_tts')); return; }
+      var ws = null, idleTimer = null, waiter = null;
+
+      function cleanup() {
+        clearTimeout(idleTimer);
+        if (gate && Array.isArray(gate.waiters) && waiter) {
+          var i = gate.waiters.indexOf(waiter);
+          if (i >= 0) gate.waiters.splice(i, 1);
+        }
+        try { if (ws && ws.readyState <= 1) ws.close(); } catch (e) {}
+      }
+      function done(err) {
+        if (finished) return;
+        finished = true;
+        cleanup();
+        if (err) reject(err);
+        else resolve({ firstChunkMs: firstChunkMs || Math.round(nowMs() - t0), totalBytes: totalBytes, cancelled: false });
+      }
+      function resetIdle() {
+        clearTimeout(idleTimer);
+        idleTimer = setTimeout(function () {
+          done(makeErr('语音合成 ' + Math.round(T_TTS / 1000) + ' 秒没有新音频', 'voice_timeout'));
+        }, T_TTS);
+      }
+      // 半字节尾巴要留给下一帧 —— PCM 帧边界不保证落在 16bit 上，直接喂会把整句后面的采样错位
+      function feed(bytes) {
+        if (!bytes || !bytes.length) return;
+        var sp = splitPcmTail(car, bytes);
+        car = sp.carry;
+        if (!sp.body.length) return;
+        totalBytes += sp.body.length;
+        if (!firstChunkMs) firstChunkMs = Math.round(nowMs() - t0);
+        if (opts.onPcm) { try { opts.onPcm(sp.body); } catch (e) { warn('onPcm', e); } }
+      }
+
+      // 用户打断：gate 一拉就把 socket 关掉（不然音频会继续灌进已经作废的播放队列）
+      if (gate && Array.isArray(gate.waiters)) {
+        waiter = function () { done(makeErr('已取消', 'voice_abort')); };
+        if (gate.aborted) { waiter(); return; }
+        gate.waiters.push(waiter);
+      }
+
+      try {
+        ws = new WS(url, ['tts', 'bearer.' + strOf(resolved.provider.apiKey)]);
+      } catch (e) {
+        reject(makeErr('语音合成连接失败：' + ((e && e.message) || e), 'voice_tts'));
+        return;
+      }
+      ws.binaryType = 'arraybuffer';
+      resetIdle();
+
+      ws.onopen = function () {
+        resetIdle();
+        try { ws.send(JSON.stringify({ event: 'text', text: String(text || '') })); } catch (e) {}
+        try { ws.send(JSON.stringify({ event: 'finish_text' })); } catch (e) {}
+      };
+      ws.onmessage = function (ev) {
+        resetIdle();
+        var d = ev && ev.data;
+        if (typeof d === 'string') {
+          var j = null;
+          try { j = JSON.parse(d); } catch (e) {}
+          if (j && j.event === 'finish') {
+            if (j.code && j.code !== 'success') done(makeErr('语音合成失败（' + j.code + '）', 'voice_tts'));
+            else done(null);
+          }
+          return;
+        }
+        var bytes = null;
+        if (d instanceof ArrayBuffer) bytes = new Uint8Array(d);
+        else if (d && d.buffer instanceof ArrayBuffer) bytes = new Uint8Array(d.buffer);
+        if (bytes) feed(bytes);
+      };
+      // onerror 之后一定会有 onclose，收尾放在 onclose 里，避免重复 done
+      ws.onerror = function () {};
+      ws.onclose = function () {
+        if (finished) return;
+        // 有音频就算这次合成成立（后面的帧丢了也比整句重来强）；一帧都没有才算失败
+        if (totalBytes > 0) done(null);
+        else done(makeErr('语音合成没有返回音频（WebSocket 被拒绝或提前关闭）', 'voice_ws'));
+      };
+    });
+  }
+
+  function httpTtsDeepSeek(text, opts, resolved) {
+    var t0 = nowMs();
+    var url = dsTtsUrl(resolved).http;
+    var body = { text: String(text || ''), voice_id: dsVoiceId(), format: 'pcm', filter_markdown: true };
+    return httpPostAudio(url, strOf(resolved.provider.apiKey), body, T_TTS).then(function (bytes) {
+      if (!bytes || !bytes.length) throw makeErr('合成返回里没有音频数据', 'voice_tts');
+      if (opts.onPcm) { try { opts.onPcm(bytes); } catch (e) { warn('onPcm', e); } }
+      return { firstChunkMs: Math.round(nowMs() - t0), totalBytes: bytes.length, cancelled: false, fallback: true };
+    });
+  }
+
+  // 二进制响应体的 POST（音频专用）。原生 CapacitorHttp 的 arraybuffer 会回 base64 字符串，
+  // web 的 fetch 直接给 ArrayBuffer —— 两条路的返回类型不同，这里统一成 Uint8Array。
+  function httpPostAudio(url, apiKey, body, timeoutMs) {
+    var headers = { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + apiKey };
+    var payload = JSON.stringify(body);
+    if (isNativeHttp()) {
+      return withTimeout(CapHttp.request({
+        method: 'POST',
+        url: url,
+        headers: headers,
+        data: payload,
+        responseType: 'arraybuffer',
+        connectTimeout: T_CONNECT,
+        readTimeout: Math.max(8000, timeoutMs || T_TTS)
+      }), (timeoutMs || T_TTS) + 3000, '语音合成').then(function (resp) {
+        if (resp && resp.status >= 400) {
+          throw makeErr('合成失败 HTTP ' + resp.status + '：' + errTextFrom(resp.data), 'voice_tts');
+        }
+        var d = resp && resp.data;
+        if (typeof d === 'string') return base64ToBytes(d);
+        if (d && d.byteLength) return new Uint8Array(d);
+        return new Uint8Array(0);
+      });
+    }
+    var ctrl = (typeof AbortController === 'function') ? new AbortController() : null;
+    var p = root.fetch(url, {
+      method: 'POST',
+      headers: headers,
+      body: payload,
+      signal: ctrl ? ctrl.signal : undefined
+    }).then(function (resp) {
+      if (!resp.ok) throw makeErr('合成失败 HTTP ' + resp.status, 'voice_tts');
+      return resp.arrayBuffer();
+    }).then(function (buf) { return new Uint8Array(buf); });
+    return withTimeout(p, timeoutMs || T_TTS, '语音合成');
+  }
+
   // =====================================================================================
   // 16. 界面接线（元素不存在必须容错，绝不抛错）
   // =====================================================================================
@@ -5025,8 +5306,16 @@
   function quickVoiceSanity() {
     var vp = pickVoiceProvider();
     if (!vp) return '还没有配置语音接口：请在「设置 → 语音通话 → 语音接口」里添加（填地址和密钥）';
-    if (!vp.baseUrl) return '语音接口「' + (vp.name || vp.id) + '」缺接口地址';
-    if (!vp.apiKey) return '语音接口「' + (vp.name || vp.id) + '」缺 API 密钥';
+    // v3.0.17：密钥可能来自「接口管理」（keyMode=inherit），所以不能只看 vp.apiKey
+    var creds = resolveVoiceCreds(vp);
+    if (!creds.baseUrl) return '语音接口「' + (vp.name || vp.id) + '」缺接口地址';
+    if (!creds.apiKey) {
+      return creds.missing
+        ? ('语音接口「' + (vp.name || vp.id) + '」复用接口管理的密钥，但' + creds.missing + '（请先在「接口管理」里加 DeepSeek 官方接口）')
+        : ('语音接口「' + (vp.name || vp.id) + '」缺 API 密钥');
+    }
+    // DeepSeek 形态没有模型名（端点固定），下面那两条「模型填反了」的检查对它不适用
+    if (voiceFormatOf(vp) === 'deepseek') return null;
     var cfg = voiceCfg();
     var asr = strOf(cfg.asrModel).trim() || strOf(vp.asrModel).trim();
     var tts = strOf(cfg.ttsModel).trim() || strOf(vp.ttsModel).trim();
@@ -5216,6 +5505,21 @@
       push('识别服务：检测中…');
       var n = Math.round(CAPTURE_RATE * 0.35);
       var wav = encodeWav(int16ToBytes(new Int16Array(n)), CAPTURE_RATE);
+      var arr = resolveVoiceProvider('asr');
+      // DeepSeek：/v1/tools/asr 是固定端点，没有模型名。0.35 秒静音只用来验「地址 + 密钥」，
+      //   「认不认得出话」由下面的往返验证负责 —— 静音返回空文本是正常的，不能当失败。
+      if (arr.format === 'deepseek') {
+        asrLabel = 'DeepSeek /v1/tools/asr';
+        return dsPostMultipart(arr.provider.baseUrl, arr.provider.apiKey, '/v1/tools/asr',
+          [{ key: 'file', value: bytesToBase64(wav), fileName: 'probe.wav', contentType: 'audio/wav' }],
+          { readTimeoutMs: 15000 }
+        ).then(function () {
+          asrOk = true;
+          push('识别服务：可达（' + asrLabel + '）');
+        }).catch(function (e) {
+          push('识别服务：不可达（' + asrLabel + '）—— ' + (e && e.message || e));
+        });
+      }
       var built = buildReq('asr', {
         messages: [{ role: 'user', content: [{ type: 'input_audio', input_audio: { data: bytesToBase64(wav), format: 'wav' } }] }]
       });
@@ -5231,6 +5535,26 @@
 
     function probeTts() {
       push('合成服务：检测中…');
+      var ttsR = resolveVoiceProvider('tts');
+      // DeepSeek：端点固定、没有模型名，音色只有 stella / tide。这里真的合成一句「测试」，
+      //   一是验密钥，二是拿到一段真音频给下面的往返验证当输入。
+      if (ttsR.format === 'deepseek') {
+        ttsLabel = 'DeepSeek /v1/tools/tts（' + dsVoiceId() + '）';
+        var chunks = [];
+        return httpTtsDeepSeek('测试', { onPcm: function(b) { if (b && b.length) chunks.push(b); } }, ttsR).then(function (r) {
+          if (!r || !r.totalBytes) throw makeErr('响应里没有音频数据', 'voice_tts');
+          ttsOk = true;
+          push('合成服务：可达（' + ttsLabel + '）');
+          var total = 0, i;
+          for (i = 0; i < chunks.length; i++) total += chunks[i].length;
+          var out = new Uint8Array(total), off = 0;
+          for (i = 0; i < chunks.length; i++) { out.set(chunks[i], off); off += chunks[i].length; }
+          return out;
+        }).catch(function (e) {
+          push('合成服务：不可达（' + ttsLabel + '）—— ' + (e && e.message || e));
+          return null;
+        });
+      }
       var built = buildReq('tts', buildTtsBody('测试'));
       if (built.req.payload && built.req.payload.audio && built.req.payload.audio.voice === '__CLONE_REF__') {
         built.req.payload.audio.voice = strOf(voiceCfg().voiceId) || 'Mia';
@@ -5275,6 +5599,30 @@
       if (!wav || wav.length <= 44) {
         push('往返验证：未通过（合成音频为空，无法回灌）');
         return Promise.resolve(false);
+      }
+      // DeepSeek：识别端点固定，走 multipart（与正式通话同一条路，验的就是真链路）
+      var rtAsr = resolveVoiceProvider('asr');
+      if (rtAsr.format === 'deepseek') {
+        return dsPostMultipart(rtAsr.provider.baseUrl, rtAsr.provider.apiKey, '/v1/tools/asr',
+          [{ key: 'file', value: bytesToBase64(wav), fileName: 'roundtrip.wav', contentType: 'audio/wav' }],
+          { readTimeoutMs: 20000 }
+        ).then(function (data) {
+          var text2 = strOf(data && data.text).trim();
+          if (text2) {
+            roundTripOk = true;
+            push('往返验证：通过，识别回「' + text2 + '」');
+          } else {
+            roundTripOk = false;
+            roundTripReason = '识别结果为空';
+            push('往返验证：未通过（识别结果为空）');
+          }
+          return roundTripOk;
+        }).catch(function (e) {
+          roundTripOk = false;
+          roundTripReason = (e && e.message) || '请求失败';
+          push('往返验证：未通过（' + roundTripReason + '）');
+          return false;
+        });
       }
       var built = buildReq('asr', {
         messages: [{ role: 'user', content: [{ type: 'input_audio', input_audio: { data: bytesToBase64(wav), format: 'wav' } }] }]

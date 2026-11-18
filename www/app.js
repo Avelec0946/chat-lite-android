@@ -154,15 +154,33 @@ function compressImageForUpload(file) {
   });
 }
 
-function buildFileContent(m) {
+function buildFileContent(m, opts) {
   if (!m.files || m.files.length === 0 || m.role !== 'user') return m.content;
+  opts = opts || {};
+  // v3.0.17：DeepSeek 官方接口走 Files API —— 附件在这里变成 `{type:'file', file_id}`。
+  //   好处有两层：① PDF / Office 现在能读了（以前只认纯文本，二进制按 readAsText 读出来是乱码）；
+  //   ② 同一张图不再每轮重发一遍 base64（请求体上限 48 MiB，多图长会话真的会撞上）。
+  var dsFiles = opts.dsFiles === true;
+  var keyTag = opts.dsKeyTag || '';
   var hasImages = m.files.some(function(f) { return f.isImage; });
-  if (hasImages) {
+  var hasDsFiles = dsFiles && m.files.some(function(f) { return dsFileIdUsable(f, keyTag); });
+  // 二进制附件（PDF/Office）没有内联退路，即使这次的 file_id 用不了，也必须走内容块形态
+  //   —— 否则会落到下面那个字符串分支，拼出一段空正文
+  var hasBinary = m.files.some(function(f) { return !!f.binary; });
+  if (hasImages || hasDsFiles || hasBinary) {
     var parts = [];
     if (m.content) parts.push({ type: 'text', text: m.content });
     for (var f of m.files) {
+      // 有 file_id 就用 file_id（图片与文档同一条规则）—— 只有上传失败/换了密钥才回退内联
+      if (dsFiles && dsFileIdUsable(f, keyTag)) {
+        parts.push({ type: 'file', file_id: String(f.dsFileId) });
+        continue;
+      }
       if (f.isImage) {
         parts.push({ type: 'image_url', image_url: { url: 'data:' + f.mimeType + ';base64,' + f.base64 } });
+      } else if (f.binary) {
+        // 二进制附件的 content 是空的（没走文本读取），别把空段落发给模型
+        parts.push({ type: 'text', text: '--- ' + f.name + '（文件未能上传解析） ---' });
       } else {
         parts.push({ type: 'text', text: '--- ' + f.name + ' ---\n' + f.content });
       }
@@ -1331,6 +1349,61 @@ window.svgNodeColor = function(nodeId) {
 // ===== File Upload =====
 state.pendingFiles = [];
 
+// ===== v3.0.17: 附件走 Files API（DeepSeek 官方）=====
+// 上传**在选完附件时就开始**，不等用户点发送：解析是上游做的（100 页 PDF 要几十秒），
+// 等点发送再解析，那几十秒全砸在"已发送还没回复"的空窗里。占位灰块在此期间保持，
+// 顺带把「还没准备好，不能发送」这件事表达清楚了（sendMessage 里已有 loading 拦截）。
+var BINARY_DOC_RE = /^(pdf|doc|docx|ppt|pptx|xls|xlsx|epub|mobi|bmp|tif|tiff)$/i;
+var DS_MAX_UPLOAD_BYTES = 60 * 1024 * 1024;   // 官方上限 100 MiB，留余量给 base64 与内存
+
+function fileExtOf(name) {
+  var m = /\.([a-z0-9]+)$/i.exec(String(name || ''));
+  return m ? m[1].toLowerCase() : '';
+}
+
+// 当前会话的接口能不能用 Files API（不能就退回老行为：图片内联、文本读取、二进制拒收）
+function dsAttachProvider() {
+  try {
+    var conv = (typeof currentConv === 'function') ? currentConv() : null;
+    if (!conv) return null;
+    var p = getProvider(conv.providerId);
+    if (!p) return null;
+    if (typeof dsFilesEligible !== 'function' || !dsFilesEligible(p, conv.model)) return null;
+    return p;
+  } catch (e) { return null; }
+}
+
+function uploadAttachmentSlot(slot, provider) {
+  if (typeof dsUploadFile !== 'function') { slot.loading = false; renderFilePreview(); return Promise.resolve(); }
+  return dsUploadFile(provider, {
+    name: slot.name,
+    base64: slot.base64,
+    mimeType: slot.mimeType,
+    isImage: slot.isImage,
+    size: slot.size
+  }).then(function (r) {
+    slot.dsFileId = r.fileId;
+    slot.dsPurpose = r.purpose;
+    slot.dsKeyTag = (typeof dsKeyTag === 'function') ? dsKeyTag(provider.apiKey) : '';
+    slot.loading = false;
+    slot.uploadError = '';
+    renderFilePreview();
+  }, function (e) {
+    var msg = (e && e.message) || String(e);
+    if (slot.binary) {
+      // 二进制文档没有内联退路：读出来的"文本"是乱码，发过去只会污染上下文
+      var i = state.pendingFiles.indexOf(slot);
+      if (i >= 0) state.pendingFiles.splice(i, 1);
+      showToast('「' + slot.name + '」上传失败：' + msg, 'warn');
+    } else {
+      slot.loading = false;
+      slot.uploadError = msg;
+      showToast('图片上传失败，将按内联图片发送：' + msg, 'warn');
+    }
+    renderFilePreview();
+  });
+}
+
 function handleFileUpload(e) {
   const files = Array.from(e.target.files || []);
   if (!files.length) return;
@@ -1341,6 +1414,7 @@ function handleFileUpload(e) {
   //   以前每个格子都印文件名，顺序错了用户自己能看出来；现在只显示画面，顺序错了**完全隐形**，
   //   而「第几张图」对模型是有意义的，所以必须按选择顺序落位。
   const base = state.pendingFiles.length;
+  const dsP = dsAttachProvider();
   files.forEach(function (f) {
     state.pendingFiles.push({
       name: f.name,
@@ -1350,7 +1424,10 @@ function handleFileUpload(e) {
       loading: true,      // 占位中：界面显示灰块，且不允许发送
       content: '',
       base64: '',
-      mimeType: ''
+      mimeType: '',
+      binary: false,
+      dsFileId: '',
+      dsPurpose: ''
     });
   });
   renderFilePreview();
@@ -1359,6 +1436,19 @@ function handleFileUpload(e) {
     const slot = state.pendingFiles[base + k];
     if (!slot) return;    // 加载途中被用户删掉了
     const stillThere = function () { return state.pendingFiles.indexOf(slot) >= 0; };
+    const ext = fileExtOf(file.name);
+    const isBinaryDoc = !slot.isImage && BINARY_DOC_RE.test(ext);
+
+    if (isBinaryDoc && !dsP) {
+      // PDF / Office 这类必须由上游解析。以前是 readAsText 读出来一堆乱码发过去，
+      // 模型只能瞎猜 —— 与其假装支持，不如说清"这条接口做不到"。
+      if (stillThere()) {
+        state.pendingFiles.splice(state.pendingFiles.indexOf(slot), 1);
+        renderFilePreview();
+      }
+      showToast('「' + file.name + '」需要 DeepSeek 官方接口才能解析（当前接口只收文本与图片）', 'warn');
+      return;
+    }
 
     if (slot.isImage) {
       compressImageForUpload(file).then(function (dataUrl) {
@@ -1373,25 +1463,55 @@ function handleFileUpload(e) {
         //   `image_url` 是同一个拼法（app.js buildFileContent / voice.js buildFileContent），
         //   严格校验 mime 的接口可能直接拒图。声明成实际编码即可。
         slot.mimeType = 'image/jpeg';
+        if (dsP) { uploadAttachmentSlot(slot, dsP); return; }
         slot.loading = false;
         renderFilePreview();
       });
-    } else {
-      var reader = new FileReader();
-      reader.onload = function (ev) {
+      return;
+    }
+
+    if (isBinaryDoc) {
+      if (file.size > DS_MAX_UPLOAD_BYTES) {
+        if (stillThere()) {
+          state.pendingFiles.splice(state.pendingFiles.indexOf(slot), 1);
+          renderFilePreview();
+        }
+        showToast('「' + file.name + '」超过 60 MB，暂不支持', 'warn');
+        return;
+      }
+      var abReader = new FileReader();
+      abReader.onload = function (ev) {
         if (!stillThere()) return;
-        slot.content = ev.target.result;
-        slot.type = slot.type || 'text/plain';
-        slot.loading = false;
-        renderFilePreview();
+        slot.binary = true;
+        slot.mimeType = dsMimeOf({ name: file.name, type: file.type });
+        slot.base64 = dsBytesToB64(new Uint8Array(ev.target.result));
+        slot.content = '';
+        uploadAttachmentSlot(slot, dsP);
       };
-      reader.onerror = function () {
+      abReader.onerror = function () {
         if (!stillThere()) return;
         state.pendingFiles.splice(state.pendingFiles.indexOf(slot), 1);
         renderFilePreview();
+        showToast('读取「' + file.name + '」失败', 'warn');
       };
-      reader.readAsText(file);
+      abReader.readAsArrayBuffer(file);
+      return;
     }
+
+    var reader = new FileReader();
+    reader.onload = function (ev) {
+      if (!stillThere()) return;
+      slot.content = ev.target.result;
+      slot.type = slot.type || 'text/plain';
+      slot.loading = false;
+      renderFilePreview();
+    };
+    reader.onerror = function () {
+      if (!stillThere()) return;
+      state.pendingFiles.splice(state.pendingFiles.indexOf(slot), 1);
+      renderFilePreview();
+    };
+    reader.readAsText(file);
   });
   fileInput.value = '';
 }
@@ -1503,6 +1623,8 @@ function fillSettingsForm() {
   if (mpOverrideTextEl) mpOverrideTextEl.value = (conv && conv.modelPromptOverride) || '';
   // v3.0.5: 联网搜索设置（全局配置 + 会话开关回填）
   if (typeof renderWebSearchSettings === 'function') renderWebSearchSettings();
+  // v3.0.17: DeepSeek 全家桶（服务端联网工具 / 标题 / 内容安全 / 用户元信息 / 文件输入）
+  if (typeof renderDsSuiteSettings === 'function') renderDsSuiteSettings();
   // C5: 应用分组收折记忆状态
   applyGroupCollapseState();
 }
@@ -1585,6 +1707,8 @@ function saveSettingsHandler() {
   applyDisplaySettings();
   // v3.0.5: 联网搜索配置写回 settings（下方 saveSettings 统一落盘）
   if (typeof saveWebSearchSettingsFromForm === 'function') saveWebSearchSettingsFromForm();
+  // v3.0.17: DeepSeek 全家桶开关
+  if (typeof saveDsSuiteSettingsFromForm === 'function') saveDsSuiteSettingsFromForm();
   saveSettings();
 
   // 会话级字段

@@ -110,6 +110,13 @@ function appendChildPath(conv, fromId) {
 //          可在设置「常用偏好」中开启。Markdown 仍照常渲染（保持既有行为）。
 function renderBody(msg) {
   var text = (msg && msg.content) || '';
+  // v3.0.17：官方接口的引用（annotations）在正文里插上标。
+  //   角标编号与回复下面那张来源卡片的序号一致（都按 URL 首次出现顺序编号），
+  //   否则用户没法把「[2]」和卡片里的第二条对上。代码块里的位置直接跳过 —— 插进去会把代码弄坏。
+  if (msg && msg.role !== 'user' && Array.isArray(msg.citations) && msg.citations.length &&
+      typeof dsInjectCiteMarkers === 'function') {
+    try { text = dsInjectCiteMarkers(text, msg.citations); } catch (e) {}
+  }
   if (msg && msg.role === 'user' && !renderUserLatexEnabled()) {
     try {
       if (typeof marked !== 'undefined' && marked && typeof marked.parse === 'function') {
@@ -349,7 +356,15 @@ async function sendMessage() {
     wordCount: countWords(text),
     versions: [{ content: text, timestamp: Date.now(), reason: 'original' }],
     activeVersion: 0,
-    files: files.map(f => ({ name: f.name, type: f.type, content: f.isImage ? f.content : f.content.slice(0, 500000), isImage: f.isImage, base64: f.base64, mimeType: f.mimeType, size: f.size })),
+    // v3.0.17：dsFileId 是上传到 Files API 后拿到的引用（DeepSeek 官方接口下用它发附件）；
+    //   binary 标记「这是二进制文档，content 是空的，别当文本发」。
+    files: files.map(f => ({
+      name: f.name, type: f.type,
+      content: f.isImage ? f.content : String(f.content || '').slice(0, 500000),
+      isImage: f.isImage, base64: f.base64, mimeType: f.mimeType, size: f.size,
+      binary: !!f.binary, dsFileId: f.dsFileId || '', dsPurpose: f.dsPurpose || '',
+      dsKeyTag: f.dsKeyTag || ''
+    })),
     createdAt: Date.now()
   };
 
@@ -664,6 +679,14 @@ function buildContext(conv, opts) {
   const chain = getActiveChain(conv);
   var histIdx = 0;
   var sbMidCount = 0;
+  // v3.0.17：附件要不要走 Files API 的 file_id（官方接口 + 全家桶开着）。
+  //   判定放在这里而不是调用方：buildContext 是**唯一**的上下文构建器（语音也走它），
+  //   判定散出去就会重演 v130 的分叉。
+  var ctxProvider = (typeof getProvider === 'function') ? getProvider(conv.providerId) : null;
+  var dsFiles = (typeof dsFilesEligible === 'function') && dsFilesEligible(ctxProvider, conv.model);
+  // 附件里的 file_id 只对「上传它的那把密钥」有效：换账号/换 key 之后自动不用，
+  //   否则历史消息里那些失效 id 会让整个请求 400（导入备份到另一个账号时就会踩到）。
+  var dsFilesTag = (typeof dsKeyTag === 'function' && ctxProvider) ? dsKeyTag(ctxProvider.apiKey) : '';
   for (const m of chain) {
     if (!m || m.role === 'system') continue;
     histIdx++;
@@ -674,9 +697,18 @@ function buildContext(conv, opts) {
     if (o.forTitle && typeof atDigestForTitle === 'function') {
       content = atDigestForTitle(m);
     } else {
-      content = buildFileContent(m);
+      content = buildFileContent(m, { dsFiles: dsFiles, dsKeyTag: dsFilesTag });
     }
-    msgs.push({ role: m.role, content });
+    // v3.0.17：这一轮用过服务端联网工具的历史，要把 server_tool_calls 原样回传，
+    //   模型才能"记得"它读过的那几页（网页正文不返回，靠 signature 还原）。
+    //   官方明确：带工具块的历史也可以发给没声明工具的请求，所以这里不必判断当前轮开没开联网。
+    var echo = (!o.forTitle && typeof dsAssistantEcho === 'function') ? dsAssistantEcho(m) : null;
+    if (echo) {
+      echo.content = content;
+      msgs.push(echo);
+    } else {
+      msgs.push({ role: m.role, content });
+    }
 
     // Mid-context injection: every 4 history messages, capped at 5 reminders
     if (sb && sb.enabled && histIdx % 4 === 0 && sbMidCount < 5) {
@@ -735,11 +767,14 @@ function buildContextForContinue(conv, targetMsg) {
 
   var histIdx = 0;
   var sbMidCount = 0;
+  var ctxProvider2 = (typeof getProvider === 'function') ? getProvider(conv.providerId) : null;
+  var dsFiles2 = (typeof dsFilesEligible === 'function') && dsFilesEligible(ctxProvider2, conv.model);
+  var dsFilesTag2 = (typeof dsKeyTag === 'function' && ctxProvider2) ? dsKeyTag(ctxProvider2.apiKey) : '';
   for (const m of chain) {
     if (!m || m.role === 'system') continue;
     histIdx++;
     let content = m.content;
-    content = buildFileContent(m);
+    content = buildFileContent(m, { dsFiles: dsFiles2, dsKeyTag: dsFilesTag2 });
     msgs.push({ role: m.role, content });
 
     if (sb && sb.enabled && histIdx % 4 === 0 && sbMidCount < 5) {
@@ -810,6 +845,11 @@ async function executeStreamHttp(req, assistantMsg, opts) {
   opts = opts || {};
   const existingContent = opts.existingContent || '';
   const existingReasoning = opts.existingReasoning || '';
+  // v3.0.17：DeepSeek 官方「服务端联网工具」这一轮的解析状态（ds-suite.js）。
+  //   它只负责把 server_tool_event / annotations 翻成 trace 与来源，**不碰正文增量** ——
+  //   正文仍然只走 applyStreamDelta（v3.0.11 的唯一入口），这样振感/节流/滚动一个都不会漏。
+  const dsTurn = opts.ds || null;
+  if (dsTurn) assistantMsg.toolTrace = dsTurn.trace;   // 同一个数组引用：轨迹变化直接可见
 
   // 初始化内容（续接场景）
   assistantMsg.content = existingContent;
@@ -876,6 +916,14 @@ async function executeStreamHttp(req, assistantMsg, opts) {
         }
       }
       // 最终渲染 + 保存（内容一律保留 —— 绝不因为「没收全」而丢掉已经到达的部分）
+      // v3.0.17：服务端工具的收尾（轨迹 / 来源 / 引用角标 / 下一轮要回传的 server_tool_calls）
+      //   必须在这里落 —— 晚于 save() 的话这些字段只活在内存里，翻历史就没了。
+      if (dsTurn && typeof dsFinalize === 'function') {
+        try { dsFinalize(assistantMsg, dsTurn, assistantMsg.content); } catch (e) {}
+        if (dsTurn.title && typeof dsApplyTitle === 'function') {
+          try { dsApplyTitle(opts.conv || null, dsTurn.title); } catch (e) {}
+        }
+      }
       updateMessageContent(assistantMsg.id, assistantMsg.content, assistantMsg.reasoningContent || '');
       assistantMsg.versions[0] = {
         content: assistantMsg.content,
@@ -909,6 +957,17 @@ async function executeStreamHttp(req, assistantMsg, opts) {
           if (!choice) continue;
           sseEventCount++;
           if (choice.finish_reason) finishReason = choice.finish_reason;
+          // v3.0.17：服务端工具的过程（搜索 / 打开网页 / 阅读链接）先吃掉，再处理正文增量。
+          //   轨迹重绘节流 400ms —— 一次深度搜索可能十几个事件，每个都重绘会把流式正文挤卡。
+          if (dsTurn && typeof dsConsumeChoice === 'function') {
+            if (dsConsumeChoice(choice, dsTurn)) {
+              const tnow = Date.now();
+              if (tnow - (dsTurn.lastPaint || 0) > 400) {
+                dsTurn.lastPaint = tnow;
+                try { updateAgentTrace(assistantMsg); } catch (e) {}
+              }
+            }
+          }
           const delta = choice.delta;
           if (!delta) continue;
 
@@ -1250,11 +1309,15 @@ function agentTraceHtml(trace) {
       return '<div class="agent-trace-note">' + escapeHtml(t.summary || '本轮未联网') + '</div>';
     }
     called++;
-    var name = t.name === 'fetch_url' ? '抓取网页' : (t.name === 'web_search' ? '搜索' : String(t.name));
-    var arg = '';
+    // v3.0.17：服务端工具（深度搜索 / 打开网页 / 页内查找 / 阅读链接）有自己的中文名，
+    //   由 ds-suite 直接给 label 与 argText；客户端工具循环那两种仍按 name 推。
+    var name = t.label || (t.name === 'fetch_url' ? '抓取网页' : (t.name === 'web_search' ? '搜索' : String(t.name)));
+    var arg = t.argText || '';
     var a = t.args || {};
-    if (t.name === 'fetch_url') arg = String(a.url || '');
-    else if (a.query) arg = '「' + a.query + '」';
+    if (!arg) {
+      if (t.name === 'fetch_url') arg = String(a.url || '');
+      else if (a.query) arg = '「' + a.query + '」';
+    }
     var status = '';
     if (t.status === 'running') status = '<span class="agent-trace-spin"></span>';
     else if (t.status === 'error') status = '失败';
@@ -1508,7 +1571,18 @@ async function sendFromMessage(context) {
   //   （v3.0.5 是"拿到用户那句话直接去搜、结果硬塞进上下文"，那不是工具，是检索管道 —— 模型没有选择权。）
   //   v3.0.12：这里**不再**假设「接口支持 tools」。模型不支持时（如 kkaiapi 上的 gemini）由
   //   agentRunAdaptive 自己降级成普通对话，本函数只等结果 —— 联网失败绝不能让对话失败。
-  if (typeof agentRunAdaptive === 'function' && typeof webSearchEnabled === 'function' && webSearchEnabled(conv)) {
+  // ===== v3.0.17: DeepSeek 官方「全家桶」 —— 服务端工具优先 =====
+  //   官方接口下，联网不该由我们跑工具循环：把 deepseek_web_search / deepseek_read_url
+  //   声明进 tools，**搜索、打开网页、页内查找全在服务端完成**，一次请求就出结果，
+  //   还能开「深度思考搜索」（思考模式下自己多步检索）。客户端只渲染内容块。
+  //   没能用上的情况（中转站 / v4-pro / 全家桶关掉）继续走下面那条客户端工具循环，功能不丢。
+  var dsOn = (typeof dsIsOfficial === 'function') && dsIsOfficial(provider) &&
+    (typeof dsModelSupportsSuite !== 'function' || dsModelSupportsSuite(conv.model));
+  var dsNative = dsOn && typeof dsServerToolsEligible === 'function' &&
+    dsServerToolsEligible(provider, conv.model) &&
+    typeof webSearchEnabled === 'function' && webSearchEnabled(conv);
+
+  if (typeof agentRunAdaptive === 'function' && typeof webSearchEnabled === 'function' && webSearchEnabled(conv) && !dsNative) {
     var wsReady = (typeof wsResolveTarget === 'function') ? wsResolveTarget() : { ok: false, reason: '联网搜索未就绪' };
     if (!wsReady.ok) {
       // 没配密钥/地址：不阻断这轮对话，只是没有工具可用
@@ -1526,8 +1600,30 @@ async function sendFromMessage(context) {
     thinkingEnabled: conv.thinkingEnabled !== false
   };
 
+  // v3.0.17：官方接口的扩展字段（服务端工具 / 会话标题 / 内容安全）+ 用户元信息。
+  //   · 标题只在「新建会话第一轮、还没定过名」时要 —— 判定复用 auto-title 的 atShouldTitle，
+  //     拿到后由 dsApplyTitle 写回，并置 titleAuto.done，那边的额外命名请求就自动不发了。
+  //   · latest_reminder 挂在最后一条 user 消息前（官方要求紧邻）。
+  var dsTurn = null;
+  var wantTitle = false;
+  if (dsOn) {
+    wantTitle = (typeof dsWantTitle === 'function') && dsWantTitle(conv);
+    if (typeof dsEnrichPayload === 'function') {
+      dsEnrichPayload(reqBody, {
+        webSearch: (typeof webSearchEnabled === 'function') && webSearchEnabled(conv),
+        title: wantTitle,
+        provider: provider,
+        model: conv.model
+      });
+    }
+    if (typeof dsInjectReminder === 'function') reqBody.messages = dsInjectReminder(reqBody.messages);
+    if (wantTitle || reqBody.tools) dsTurn = (typeof dsNewTurn === 'function') ? dsNewTurn() : null;
+  }
+
   var req;
-  if (useDirect) {
+  // 全家桶的扩展字段只有官方端认，而且本机中转（/api/chat/completions）只转发聊天体、
+  // 不认 tools.title.safety_check —— 所以一旦要用扩展能力，必须直连。
+  if (useDirect || dsOn) {
     req = buildUpstreamPayload(provider, reqBody);
   } else {
     req = {
@@ -1539,7 +1635,7 @@ async function sendFromMessage(context) {
 
   // Capacitor 模式：走 executeRequest（根据配置选择流式/非流式）
   if (isCapacitor() && (CapHttp || CapStreamHttp)) {
-    await executeRequest(req, assistantMsg, { reason: 'original' });
+    await executeRequest(req, assistantMsg, { reason: 'original', ds: dsTurn, conv: conv });
     return;
   }
 
@@ -1594,6 +1690,16 @@ async function sendFromMessage(context) {
           const json = JSON.parse(data);
           const ch0 = json.choices && json.choices[0];
           if (ch0 && ch0.finish_reason) webFinishReason = ch0.finish_reason;
+          // v3.0.17：web 流式这条路径同样要吃服务端工具事件（与 APK 那条同一个入口）
+          if (dsTurn && typeof dsConsumeChoice === 'function') {
+            if (dsConsumeChoice(ch0, dsTurn)) {
+              const tnow = Date.now();
+              if (tnow - (dsTurn.lastPaint || 0) > 400) {
+                dsTurn.lastPaint = tnow;
+                try { updateAgentTrace(assistantMsg); } catch (e) {}
+              }
+            }
+          }
           const delta = ch0 && ch0.delta;
           if (delta) {
             var reasoningText = delta.reasoning_content || delta.thinking || delta.chain_of_thought || '';
@@ -1606,6 +1712,15 @@ async function sendFromMessage(context) {
       }
     }
     clearTimeout(webIdleTimer);
+
+    // v3.0.17：服务端工具的收尾（轨迹 / 来源 / 引用 / 回传字段）——
+    //   放在三个收尾分支之前，一处就覆盖「正常完成 / 触顶 / 断流」全部出口。
+    if (dsTurn && typeof dsFinalize === 'function') {
+      try { dsFinalize(assistantMsg, dsTurn, assistantMsg.content); } catch (e) {}
+      if (dsTurn.title && typeof dsApplyTitle === 'function') {
+        try { dsApplyTitle(conv, dsTurn.title); } catch (e) {}
+      }
+    }
 
     // v122: 完成度收尾 —— ① 触顶 ② 没有完成标记就被关闭，都保留内容并如实标记
     if (webFinishReason === 'length') {

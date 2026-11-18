@@ -1602,3 +1602,21 @@ body.voice-view-open .btn-voice-entry::after{display:none}
   display:inline-block;width:9px;height:9px;border-radius:50%;
   border:2px solid var(--border);border-top-color:var(--primary);animation:wsSpin .7s linear infinite;
 }
+
+/* ===== v3.0.17 引用角标（DeepSeek 服务端联网的 annotations）=====
+   角标刻在正文里、编号与下方来源卡片一致。做成"上标小胶囊"而不是普通上标数字：
+   上标裸数字在中文正文里几乎看不见，而这个角标是"这段有出处"的唯一提示。
+   点它走的是 web-search.js 那个统一的链接处理（同一件事不绑两套）。 */
+.cite-ref{
+  display:inline-block;vertical-align:super;line-height:1;margin:0 1px;
+  font-size:9.5px;font-weight:600;
+}
+.cite-ref>a{
+  display:inline-block;min-width:13px;height:13px;line-height:13px;text-align:center;
+  padding:0 2px;border-radius:4px;
+  background:rgba(124,58,237,.12);color:var(--accent);
+  text-decoration:none;font-variant-numeric:tabular-nums;
+}
+.cite-ref>a:hover{background:rgba(124,58,237,.24);text-decoration:none}
+/* 全家桶状态提示：接口不对时要说清"为什么这些开关不生效"，而不是让用户以为配错了 */
+.ds-hint-bad{color:var(--danger);opacity:1}
