@@ -330,7 +330,6 @@
               <span class="toggle-slider"></span>
             </label>
           </label>
-          <span class="setting-hint">开启后模型可以联网，但<b>走哪条通道看你用的是什么接口</b>：DeepSeek 官方接口（api.deepseek.com）走<b>服务端工具</b> —— 搜索、打开网页、页内查找都由服务端完成，回答带可点的引用角标，一次请求出结果；其他接口走本机工具循环（模型拿到 <code>web_search</code> / <code>fetch_url</code> 两个工具，由我们执行）。两条通道都由模型自己判断要不要联网、搜什么，工具结果都不写进对话历史。</span>
           <label class="setting-row setting-row-col">
             <span>系统提示词</span>
             <textarea id="system-prompt" class="setting-textarea" rows="3" placeholder="输入系统提示词..."></textarea>
@@ -1015,7 +1014,7 @@
 <script src="vendor/katex/katex.min.js?v=116"></script>
 <!-- LaTeX 渲染层：须在 katex.min.js 之后、chat.js 之前加载 -->
 <script src="latex.js?v=119"></script>
-<script src="db.js?v=138"></script>
+<script src="db.js?v=139"></script>
 <script src="haptics.js?v=116"></script>
 <script src="providers.js?v=102"></script>
 <!-- v3.0.5: 联网搜索（DeepSeek Search / Fetch）。必须在 providers.js 之后（用 normalizeBaseUrl/getProvider）、chat.js 之前 -->

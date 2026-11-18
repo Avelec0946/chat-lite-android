@@ -212,6 +212,24 @@ function migrateWebSearchSettings(w) {
   return out;
 }
 
+// v3.0.20：开箱即用的默认语音接口 —— DeepSeek 官方 + **密钥复用接口管理**。
+//   为什么要有它：用户到手不该先配一遍语音。只要「接口管理」里有一个 DeepSeek 官方接口，
+//   语音（识别 / 合成）就能直接跑；想换 MiMo 或自己的网关，在设置里改就行。
+//   注意 keyMode:'inherit' —— 密钥不落在这条记录里，跟着接口管理走，换 key 自动跟上。
+function defaultVoiceProviderSeed() {
+  return {
+    id: 'vp_deepseek_default',
+    name: 'DeepSeek 官方',
+    baseUrl: 'https://api.deepseek.com',
+    endpointPath: '/v1/tools/tts',
+    format: 'deepseek',
+    keyMode: 'inherit',
+    apiKey: '',
+    asrModel: '',
+    ttsModel: ''
+  };
+}
+
 // v125: 语音通话设置的默认值。
 //   独立成函数的原因：migrateSettings 也需要逐字段补默认（老用户没有 voice 字段），
 //   两处共用同一份真相，避免"默认值写了两次、改一处忘一处"。
@@ -230,15 +248,15 @@ function defaultVoiceSettings() {
     //   而且像 MiMo Token Plan 这类网关地址（token-plan-cn.xiaomimimo.com）只认它自己的
     //   密钥前缀（tp-），拿聊天渠道的地址去发语音必然 401。v125/v126 复用了聊天渠道，
     //   用户实测就是「识别失败 HTTP 401: Invalid API Key」。
-    voiceProviders: [],      // [{id,name,baseUrl,endpointPath,apiKey,models[],authType,...}]
-    voiceProviderId: '',     // 当前使用的语音接口
+    voiceProviders: [defaultVoiceProviderSeed()],   // 开箱即用：DeepSeek 官方（密钥复用接口管理）
+    voiceProviderId: 'vp_deepseek_default',         // 当前使用的语音接口
     asrProviderId: '',      // 兼容旧字段：指向 voiceProviders 的 id
     asrModel: 'mimo-v2.5-asr',
     ttsProviderId: '',
     ttsModel: 'mimo-v2.5-tts',
     // v126：大脑一律跟随当前会话，不再单独设渠道/模型。
     //   用户原话「直接跟随会话窗口模型，不额外设置」——留两个空字段只会让人以为没生效。
-    voiceId: 'Mia',
+    voiceId: 'stella',       // DeepSeek 官方音色（女声）；换 MiMo 时 voice-settings 会自动切到它的列表
     voiceDesign: '',        // 非空则优先用声音设计模型
     cloneRefName: '',       // 克隆参考音（存文件系统，不存 base64）
     personaId: 'warm',
@@ -445,6 +463,20 @@ function migrateVoiceSettings(v) {
    'voiceId','voiceDesign','cloneRefName','personaId','customPersona'].forEach(function(k) {
     if (typeof out[k] !== 'string') out[k] = def[k];
   });
+  // v3.0.20：语音接口开箱即用。只在「用户从来没配过」时播种一条 DeepSeek 官方（密钥复用）。
+  //   什么时候不播：
+  //     · 已经有接口（用户配过 MiMo 或别的）→ 一根手指都不动；
+  //     · `_voiceSeedDone` 已置 → 说明之前播过 / 用户自己删光了，删掉就是明确表态，别再加回来。
+  out._voiceSeedDone = v._voiceSeedDone === true;
+  if (!out._voiceSeedDone) {
+    out._voiceSeedDone = true;
+    if (!out.voiceProviders.length) {
+      out.voiceProviders = normalizeVoiceProviders([defaultVoiceProviderSeed()]);
+      out.voiceProviderId = out.voiceProviders[0].id;
+      // 音色只在用户没挑过（还是默认值）时才跟着切，别覆盖他自己的选择
+      if (!v.voiceId || v.voiceId === def.voiceId) out.voiceId = 'stella';
+    }
+  }
   // voiceProviderId 指向不存在的接口时清空（不要留一个指向空气的 id，
   //   否则运行时每次解析都要走一遍"找不到"的分支）
   if (out.voiceProviderId && !out.voiceProviders.some(function (p) { return p.id === out.voiceProviderId; })) {
